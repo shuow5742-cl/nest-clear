@@ -1,4 +1,5 @@
 """用 AutoWeaver 组合节点构造每盘行为树和功能码分发表。"""
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +22,7 @@ from .leaves import (
     PreparePick,
     PrepareScan,
     RecordDetection,
+    RecordCapture,
     WaitRequest,
 )
 
@@ -37,6 +39,7 @@ class RequestTracker:
 @dataclass(frozen=True)
 class FlowContext:
     """构树依赖；不保存当前盘的可变业务状态。"""
+
     board: Any
     config: Config
     path: list[tuple[float, float, float]]
@@ -46,47 +49,68 @@ class FlowContext:
 
 def choose_next(ctx: FlowContext) -> TreeNode:
     """目标存在时挑取，否则下发下一扫描位或结束。"""
-    return Fallback([
-        Sequence([
-            Predicate("有待挑目标", lambda bb: bool(bb.read("targets"))),
-            PreparePick(ctx.config),
-        ], name="挑取目标"),
-        Sequence([
-            Predicate("没有待挑目标", lambda bb: not bb.read("targets")),
-            PrepareScan(ctx.path),
-        ], name="继续扫描"),
-    ], name="选择挑取或扫描")
+    return Fallback(
+        [
+            Sequence(
+                [
+                    Predicate("有待挑目标", lambda bb: bool(bb.read("targets"))),
+                    PreparePick(ctx.config),
+                ],
+                name="挑取目标",
+            ),
+            Sequence(
+                [
+                    Predicate("没有待挑目标", lambda bb: not bb.read("targets")),
+                    PrepareScan(ctx.path),
+                ],
+                name="继续扫描",
+            ),
+        ],
+        name="选择挑取或扫描",
+    )
 
 
 def scan_branch(ctx: FlowContext) -> TreeNode:
     """功能码 1：首次直接扫描，后续到位后拍照和检测。"""
-    first = Sequence([
-        Predicate("尚未下发扫描位", lambda bb: bb.read("scan") is None),
-        PrepareScan(ctx.path),
-    ], name="首次扫描")
-    arrived = Sequence([
-        Predicate("等待扫描到位", lambda bb: bb.read("last_action") == 1),
-        CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", "读取实时坐标"),
-        CheckArrival(ctx.config, ctx.events),
-        Predicate("到位合格", lambda bb: bb.read("arrival_ok")),
-        CallWorker(ctx.board, "camera", lambda bb: {}, "image", "拍照"),
-        CallWorker(
-            ctx.board, "vision",
-            lambda bb: {"image": bb.read("image"), "pose": bb.read("actual")},
-            "targets", "检测并换算目标",
-        ),
-        RecordDetection(ctx.events),
-        choose_next(ctx),
-    ], name="到位拍照检测")
+    first = Sequence(
+        [
+            Predicate("尚未下发扫描位", lambda bb: bb.read("scan") is None),
+            PrepareScan(ctx.path),
+        ],
+        name="首次扫描",
+    )
+    arrived = Sequence(
+        [
+            Predicate("等待扫描到位", lambda bb: bb.read("last_action") == 1),
+            CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", "读取实时坐标"),
+            CheckArrival(ctx.config, ctx.events),
+            Predicate("到位合格", lambda bb: bb.read("arrival_ok")),
+            CallWorker(ctx.board, "camera", lambda bb: {}, "image", "拍照"),
+            RecordCapture(ctx.events),
+            CallWorker(
+                ctx.board,
+                "vision",
+                lambda bb: {"image": bb.read("image"), "pose": bb.read("actual")},
+                "targets",
+                "检测并换算目标",
+            ),
+            RecordDetection(ctx.events),
+            choose_next(ctx),
+        ],
+        name="到位拍照检测",
+    )
     return Fallback([first, arrived], name="首次或到位")
 
 
 def next_branch(ctx: FlowContext) -> TreeNode:
     """功能码 60：挑取结束后使用剩余目标，不重新拍照。"""
-    return Sequence([
-        Predicate("等待挑取完成", lambda bb: bb.read("last_action") == 3),
-        choose_next(ctx),
-    ], name="挑取完成后继续")
+    return Sequence(
+        [
+            Predicate("等待挑取完成", lambda bb: bb.read("last_action") == 3),
+            choose_next(ctx),
+        ],
+        name="挑取完成后继续",
+    )
 
 
 BranchFactory = Callable[[FlowContext], TreeNode]
@@ -99,15 +123,19 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, BranchFactory] | None = 
     dispatch = []
     for code, factory in factories.items():
         match = Predicate(f"功能码 == {code}", lambda bb, code=code: bb.read("request_func") == code)
-        business = Fallback([
-            factory(ctx),
-            PrepareError(ctx.events),
-        ], name=f"功能码 {code} 业务或 999")
+        business = Fallback(
+            [
+                factory(ctx),
+                PrepareError(ctx.events),
+            ],
+            name=f"功能码 {code} 业务或 999",
+        )
         dispatch.append(Sequence([match, business], name=f"功能码 {code}"))
     dispatch.append(PrepareError(ctx.events, unknown=True))
     dispatch_tree = Fallback(dispatch, name="功能码分发")
     reply = CallWorker(
-        ctx.board, "plc",
+        ctx.board,
+        "plc",
         lambda bb: {
             "operation": "reply",
             "task_id": bb.read("task_id"),
@@ -116,12 +144,15 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, BranchFactory] | None = 
         },
         name="写入应答",
     )
-    iteration = Sequence([
-        WaitRequest(ctx.board, ctx.tracker, ctx.config.plc.comm_fail_timeout_s, ctx.events),
-        dispatch_tree,
-        Retry(max_attempts=3, child=reply, name="应答最多三次"),
-        CommitReply(ctx.events),
-    ], name="处理一次请求")
+    iteration = Sequence(
+        [
+            WaitRequest(ctx.board, ctx.tracker, ctx.config.plc.comm_fail_timeout_s, ctx.events),
+            dispatch_tree,
+            Retry(max_attempts=3, child=reply, name="应答最多三次"),
+            CommitReply(ctx.events),
+        ],
+        name="处理一次请求",
+    )
     return RepeatUntil(
         cond=lambda snapshot, bb: bb.read("done", False),
         child=iteration,
@@ -167,5 +198,6 @@ def build_batch(
         "actual": None,
         "done": False,
         "error": "",
+        "raw_path": None,
     }
     return Batch(lambda: build_tree(ctx, branches), params=params, name="一盘")

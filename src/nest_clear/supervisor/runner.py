@@ -8,6 +8,7 @@ Task_ID，有则通过握手层回 999，通知 PLC 停机并要求人工处理�
 初始化重启及父程序退出属于有意停止，不代答。所有异常停止都等待新的
 bit7 上升沿，因为设备初始化边沿是唯一启动入口，不能自行重启。
 """
+
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from typing import Any
 from ..comm.handshake import Handshake
 from ..config import Config
 from ..paths import main_alive_file, supervisor_state_file
+from ..record.events import EventRecorder
 from .device_state import (
     ACTION_ESTOP,
     ACTION_RESTART,
@@ -35,9 +37,11 @@ logger = logging.getLogger("nest_clear.supervisor.runner")
 class Supervisor:
     """父程序常驻循环；只有设备初始化边沿允许启动子进程。"""
 
-    def __init__(self, config: Config, plc: Any) -> None:
+    def __init__(self, config: Config, plc: Any, *, metadata: dict[str, Any] | None = None) -> None:
         """绑定配置与具名 PLC 客户端，供入口和模拟测试使用。"""
         self.config = config
+        self.metadata = metadata or {}
+        self.events = EventRecorder(config.record_directory, "supervisor")
         self.plc = plc
         self.tracker = DeviceStateTracker()
         self.child: subprocess.Popen[Any] | None = None
@@ -59,17 +63,21 @@ class Supervisor:
             if task_id == 0 or task_id == result_id:
                 return
             Handshake(self.plc, self.plc.contract).write_reply(task_id, 999)
+            self.events.emit("supervisor_reply_999", task_id=task_id, reason=reason)
             logger.error(
                 "错误码：SUPERVISOR-CHILD-FAILED；主程序%s；已给 Task_ID=%s 回 999；"
                 "位置：父程序握手；排查建议：PLC 会报错停机，人工处理后重新初始化。",
-                reason, task_id,
+                reason,
+                task_id,
             )
         except Exception as exc:
             logger.error(
                 "错误码：SUPERVISOR-REPLY；主程序%s；检查待应答任务或给 "
                 "Task_ID=%s 回 999 失败：%s；位置：父程序握手；"
                 "排查建议：查网线/IP/PLC 是否上电，人工处理后重新初始化。",
-                reason, task_id, exc,
+                reason,
+                task_id,
+                exc,
             )
 
     def _running(self) -> bool:
@@ -81,6 +89,7 @@ class Supervisor:
             return True
         reason = f"意外退出，退出码 {code}"
         logger.error("主程序%s；等待下一次初始化信号", reason)
+        self.events.emit("child_exit", reason=reason, code=code)
         self.child = None
         self._started_at = None
         self._reply_after_failure(reason)
@@ -92,6 +101,7 @@ class Supervisor:
             return False
         assert self.child is not None
         logger.warning("停止主程序：%s", reason)
+        self.events.emit("child_stop", reason=reason, child_pid=self.child.pid)
         try:
             self.child.terminate()
             self.child.wait(timeout=3)
@@ -99,7 +109,9 @@ class Supervisor:
             self.child.kill()
             self.child.wait()
         except OSError as exc:
-            logger.error("错误码：SUPERVISOR-STOP；停止主程序失败：%s；位置：子进程；排查建议：检查进程权限", exc)
+            logger.error(
+                "错误码：SUPERVISOR-STOP；停止主程序失败：%s；位置：子进程；排查建议：检查进程权限", exc
+            )
             return False
         self.child = None
         self._started_at = None
@@ -112,8 +124,17 @@ class Supervisor:
             self.child = subprocess.Popen(self.config.supervisor.child_command)
             self._started_at = time.monotonic()
             logger.info("主程序已启动，PID %s，命令 %s", self.child.pid, self.config.supervisor.child_command)
+            self.events.emit(
+                "child_start",
+                child_pid=self.child.pid,
+                reason="初始化中上升沿",
+                command=self.config.supervisor.child_command,
+            )
         except OSError as exc:
-            logger.error("错误码：SUPERVISOR-START；启动主程序失败：%s；位置：子进程；排查建议：检查命令、运行目录和权限", exc)
+            logger.error(
+                "错误码：SUPERVISOR-START；启动主程序失败：%s；位置：子进程；排查建议：检查命令、运行目录和权限",
+                exc,
+            )
 
     def _publish(self) -> bool:
         """原子发布状态，避免主程序读取到半个 JSON。"""
@@ -125,7 +146,11 @@ class Supervisor:
             os.replace(temporary, self._state)
             return True
         except OSError as exc:
-            logger.error("错误码：SUPERVISOR-STATE；写状态文件失败：%s；位置：%s；排查建议：检查目录权限和磁盘空间", exc, self._state)
+            logger.error(
+                "错误码：SUPERVISOR-STATE；写状态文件失败：%s；位置：%s；排查建议：检查目录权限和磁盘空间",
+                exc,
+                self._state,
+            )
             return False
 
     def tick(self) -> None:
@@ -135,37 +160,57 @@ class Supervisor:
             word = int(self.plc.read("status"))
         except Exception as exc:
             self._failures += 1
+            if self._failures == 1:
+                self.events.emit("plc_disconnected", reason=str(exc))
             if self._failures % 20 == 1:
                 logger.warning(
                     "错误码：SUPERVISOR-PLC-READ；PLC 连不上或状态读取失败"
                     "（连续 %s 次）：%s；位置：设备状态；排查建议：查网线/IP/PLC 是否上电；"
-                    "保留上次状态并继续重试", self._failures, exc,
+                    "保留上次状态并继续重试",
+                    self._failures,
+                    exc,
                 )
         else:
             if self._failures:
                 logger.info("PLC 状态读取恢复，之前连续失败 %s 次", self._failures)
+                self.events.emit("plc_restored", failures=self._failures)
                 self._failures = 0
             if word != self.word:
                 level = logging.ERROR if bit(word, BIT_FAULT) else logging.INFO
                 previous = "未知" if self.word is None else f"0x{self.word:04X}"
                 logger.log(
-                    level, "设备状态变化：%s → %s（%s → 0x%04X）",
-                    describe(self.word or 0), describe(word), previous, word,
+                    level,
+                    "设备状态变化：%s → %s（%s → 0x%04X）",
+                    describe(self.word or 0),
+                    describe(word),
+                    previous,
+                    word,
                 )
                 if conflicting_bits(word):
                     logger.warning("循环启动与暂停或停止同时为 1，按暂停处理")
+                self.events.emit(
+                    "device_state",
+                    previous=self.word,
+                    word=word,
+                    bits=describe(word),
+                    previous_bits=describe(self.word or 0),
+                )
                 self.word = word
             decision = self.tracker.decide(word, child_running=running)
             self.paused = decision.paused
             published = self._publish()
             stopped = True
+            if decision.action == ACTION_RESTART:
+                self.events.emit("child_restart", reason=decision.reason)
             if decision.action in (ACTION_ESTOP, ACTION_RESTART):
                 stopped = self._stop(decision.reason)
             if decision.action in (ACTION_START, ACTION_RESTART):
                 if published and (stopped or not self._running()):
                     self._start()
                 elif not published:
-                    logger.error("错误码：SUPERVISOR-STATE；无法发布暂停状态，主程序未启动；位置：初始化；排查建议：修复状态文件后重新初始化")
+                    logger.error(
+                        "错误码：SUPERVISOR-STATE；无法发布暂停状态，主程序未启动；位置：初始化；排查建议：修复状态文件后重新初始化"
+                    )
         now = time.monotonic()
         if now >= self._next_heartbeat:
             self._next_heartbeat = now + 1.0
@@ -173,7 +218,10 @@ class Supervisor:
                 self._heartbeat = (self._heartbeat + 1) % 65536
                 self.plc.write("heartbeat", self._heartbeat)
             except Exception as exc:
-                logger.warning("错误码：SUPERVISOR-HEARTBEAT；PLC 心跳写入失败：%s；位置：心跳；排查建议：查网线/IP/PLC 是否上电", exc)
+                logger.warning(
+                    "错误码：SUPERVISOR-HEARTBEAT；PLC 心跳写入失败：%s；位置：心跳；排查建议：查网线/IP/PLC 是否上电",
+                    exc,
+                )
         if self._running():
             try:
                 age = time.time() - self._alive.stat().st_mtime
@@ -181,17 +229,17 @@ class Supervisor:
                 started_at = self._started_at if self._started_at is not None else now
                 elapsed = time.monotonic() - started_at
                 if elapsed > self.config.supervisor.startup_grace_s:
-                    reason = (
-                        f"启动后 {elapsed:.1f} 秒仍未打出活性点，可能卡在预检"
-                        "（相机/PLC）——查 main.log"
-                    )
+                    reason = f"启动后 {elapsed:.1f} 秒仍未打出活性点，可能卡在预检（相机/PLC）——查 main.log"
                     logger.error("主程序%s", reason)
+                    self.events.emit("watchdog", reason=reason)
                     if self._stop(reason):
                         self._reply_after_failure(f"被看门狗停止：{reason}")
             except OSError as exc:
                 logger.error(
                     "错误码：SUPERVISOR-ALIVE；读取活性文件失败：%s；位置：%s；"
-                    "排查建议：检查目录权限和磁盘。", exc, self._alive,
+                    "排查建议：检查目录权限和磁盘。",
+                    exc,
+                    self._alive,
                 )
             else:
                 if age > self.config.supervisor.watchdog_s:
@@ -200,11 +248,13 @@ class Supervisor:
                         f"{self.config.supervisor.watchdog_s:.1f} 秒；查 main.log"
                     )
                     logger.error("主程序%s", reason)
+                    self.events.emit("watchdog", reason=reason)
                     if self._stop(reason):
                         self._reply_after_failure(f"被看门狗停止：{reason}")
 
     def run(self) -> None:
         """持续运行直至中断，并在退出时释放子进程与连接。"""
+        self.events.emit("process_start", **self.metadata)
         try:
             while True:
                 self.tick()
@@ -214,3 +264,4 @@ class Supervisor:
         finally:
             self._stop("父程序退出")
             self.plc.close()
+            self.events.emit("process_stop")

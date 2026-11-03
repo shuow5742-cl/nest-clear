@@ -1,4 +1,5 @@
 """加载并严格校验业务配置，为通信和后续流程提供不可变配置。"""
+
 from dataclasses import dataclass
 import ipaddress
 import math
@@ -13,6 +14,7 @@ from .guard import GuardError
 @dataclass(frozen=True)
 class PLC:
     """保存 PLC 网络参数；本机 IP 仅用于记录，不用于绑定。"""
+
     ip: str
     local_ip: str
     port: int
@@ -23,6 +25,7 @@ class PLC:
 @dataclass(frozen=True)
 class Scan:
     """保存扫描范围；三个角点为 XY，扫描高度由 z 单独指定。"""
+
     corners: tuple[tuple[float, float], ...]
     step_x: float
     step_y: float
@@ -32,6 +35,7 @@ class Scan:
 @dataclass(frozen=True)
 class SupervisorConfig:
     """保存父程序轮询、看门狗和子进程启动参数。"""
+
     poll_s: float
     watchdog_s: float
     child_command: tuple[str, ...]
@@ -41,6 +45,7 @@ class SupervisorConfig:
 @dataclass(frozen=True)
 class VisionConfig:
     """保存相机模式、标定文件和占位检测器参数。"""
+
     camera_backend: str
     calibration: str
     pixels: tuple[tuple[float, ...], ...]
@@ -51,6 +56,7 @@ class VisionConfig:
 @dataclass(frozen=True)
 class Config:
     """冻结完整业务配置，避免运行时被各组件意外更改。"""
+
     plc: PLC
     scan: Scan
     arrival_tolerance_mm: float
@@ -61,6 +67,11 @@ class Config:
     record_directory: str
     supervisor: SupervisorConfig
     vision: VisionConfig
+    image_enabled: bool = True
+    image_format: str = "png"
+    image_quality: int = 3
+    image_retention_days: int = 30
+    image_queue_size: int = 32
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -124,8 +135,25 @@ def load_config(path: str | Path) -> Config:
         with open(path, encoding="utf-8") as file:
             data = yaml.safe_load(file)
     except (OSError, yaml.YAMLError) as exc:
-        raise GuardError("CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。") from exc
-    root = _mapping(data, "根", ["plc", "scan", "arrival_tolerance_mm", "pick_depth_z", "tools", "travel", "camera", "record", "supervisor", "vision"])
+        raise GuardError(
+            "CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。"
+        ) from exc
+    root = _mapping(
+        data,
+        "根",
+        [
+            "plc",
+            "scan",
+            "arrival_tolerance_mm",
+            "pick_depth_z",
+            "tools",
+            "travel",
+            "camera",
+            "record",
+            "supervisor",
+            "vision",
+        ],
+    )
     plc_data = root["plc"]
     if isinstance(plc_data, dict):
         plc_data = {"comm_fail_timeout_s": 10.0, **plc_data}
@@ -133,7 +161,13 @@ def load_config(path: str | Path) -> Config:
     port = p["port"]
     if type(port) is not int or not 1 <= port <= 65535:
         _fail("plc.port", "端口应为 1 到 65535 的整数")
-    plc = PLC(_ip(p["ip"], "plc.ip"), _ip(p["local_ip"], "plc.local_ip"), port, _number(p["timeout_s"], "plc.timeout_s", True), _number(p["comm_fail_timeout_s"], "plc.comm_fail_timeout_s", True))
+    plc = PLC(
+        _ip(p["ip"], "plc.ip"),
+        _ip(p["local_ip"], "plc.local_ip"),
+        port,
+        _number(p["timeout_s"], "plc.timeout_s", True),
+        _number(p["comm_fail_timeout_s"], "plc.comm_fail_timeout_s", True),
+    )
     t = _mapping(root["travel"], "travel", ["x", "y", "z"])
     travel = tuple(_vector(t[axis], f"travel.{axis}", 2) for axis in "xyz")
     for axis, bounds in zip("xyz", travel):
@@ -153,12 +187,49 @@ def load_config(path: str | Path) -> Config:
         _fail("scan.z", "扫描高度超出 Z 行程")
     if not travel[2][0] <= depth <= travel[2][1]:
         _fail("pick_depth_z", "下针深度超出 Z 行程")
-    scan = Scan(corners, _number(s["step_x"], "scan.step_x", True), _number(s["step_y"], "scan.step_y", True), z)
+    scan = Scan(
+        corners, _number(s["step_x"], "scan.step_x", True), _number(s["step_y"], "scan.step_y", True), z
+    )
     tools = _mapping(root["tools"], "tools", ["tool1", "tool2"])
     camera = _mapping(root["camera"], "camera", ["sn"])
-    record = _mapping(root["record"], "record", ["directory"])
+    record_data = root["record"]
+    if isinstance(record_data, dict):
+        record_data = {
+            "image_enabled": True,
+            "image_format": "png",
+            "image_quality": 3,
+            "image_retention_days": 30,
+            "image_queue_size": 32,
+            **record_data,
+        }
+    record = _mapping(
+        record_data,
+        "record",
+        [
+            "directory",
+            "image_enabled",
+            "image_format",
+            "image_quality",
+            "image_retention_days",
+            "image_queue_size",
+        ],
+    )
+    if type(record["image_enabled"]) is not bool or record["image_format"] not in ("png", "jpg"):
+        _fail("record", "图片开关应为布尔值，格式应为 png 或 jpg")
+    limit = 9 if record["image_format"] == "png" else 100
+    if (
+        type(record["image_quality"]) is not int
+        or not 0 <= record["image_quality"] <= limit
+        or type(record["image_retention_days"]) is not int
+        or record["image_retention_days"] < 0
+    ):
+        _fail("record", "压缩质量或保留天数无效")
+    if type(record["image_queue_size"]) is not int or record["image_queue_size"] < 1:
+        _fail("record.image_queue_size", "图片队列容量必须为正整数")
     offsets = tuple(_vector(tools[key], f"tools.{key}", 3) for key in ("tool1", "tool2"))
-    sup = _mapping(root["supervisor"], "supervisor", ["poll_s", "watchdog_s", "child_command", "startup_grace_s"])
+    sup = _mapping(
+        root["supervisor"], "supervisor", ["poll_s", "watchdog_s", "child_command", "startup_grace_s"]
+    )
     command = sup["child_command"]
     if not isinstance(command, list) or not command:
         _fail("supervisor.child_command", "应为非空命令参数列表")
@@ -168,7 +239,11 @@ def load_config(path: str | Path) -> Config:
         tuple(_string(arg, "supervisor.child_command") for arg in command),
         _number(sup["startup_grace_s"], "supervisor.startup_grace_s", True),
     )
-    v = _mapping(root["vision"], "vision", ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets"])
+    v = _mapping(
+        root["vision"],
+        "vision",
+        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets"],
+    )
     if v["camera_backend"] not in ("mock", "daheng"):
         _fail("vision.camera_backend", "应为 mock 或 daheng")
     if not isinstance(v["pixels"], list):
@@ -179,5 +254,23 @@ def load_config(path: str | Path) -> Config:
     radius = _number(v["dedup_radius_mm"], "vision.dedup_radius_mm")
     if radius < 0 or type(v["max_targets"]) is not int or v["max_targets"] < 1:
         _fail("vision", "去重半径应非负，最大目标数应为正整数")
-    vision = VisionConfig(v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"])
-    return Config(plc, scan, _number(root["arrival_tolerance_mm"], "arrival_tolerance_mm", True), depth, offsets, travel, _string(camera["sn"], "camera.sn"), _string(record["directory"], "record.directory"), supervisor, vision)
+    vision = VisionConfig(
+        v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"]
+    )
+    return Config(
+        plc,
+        scan,
+        _number(root["arrival_tolerance_mm"], "arrival_tolerance_mm", True),
+        depth,
+        offsets,
+        travel,
+        _string(camera["sn"], "camera.sn"),
+        _string(record["directory"], "record.directory"),
+        supervisor,
+        vision,
+        record["image_enabled"],
+        record["image_format"],
+        record["image_quality"],
+        record["image_retention_days"],
+        record["image_queue_size"],
+    )

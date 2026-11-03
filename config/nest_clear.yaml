@@ -25,6 +25,11 @@ camera:  # 相机识别参数
   sn: "待填写"  # 相机序列号占位，现场替换为设备 SN
 record:  # 运行记录参数
   directory: runs  # 记录根目录，可填写相对路径或绝对路径
+  image_enabled: true  # 是否保存扫描图像
+  image_format: png  # png 或 jpg
+  image_quality: 3  # PNG 压缩级别 0–9；JPEG 质量 0–100
+  image_queue_size: 32  # 后台最多容纳的图片张数（含正在写入），满时丢弃并记录
+  image_retention_days: 30  # 图片保留天数，日志与事件不删除
 
 supervisor:  # 父程序轮询和主程序活性监控
   poll_s: 0.1  # 设备状态轮询周期，秒

@@ -1,4 +1,5 @@
 """集中约定父子进程共享文件及按天归档的日志位置。"""
+
 from datetime import date
 from pathlib import Path
 
@@ -16,3 +17,8 @@ def main_alive_file(root: str | Path) -> Path:
 def supervisor_log_file(root: str | Path, day: date | None = None) -> Path:
     """返回当天日志位置，供日志处理器跨日切换目录。"""
     return Path(root) / (day or date.today()).isoformat() / "supervisor.log"
+
+
+def daily_file(root: str | Path, name: str, day: date | None = None) -> Path:
+    """返回指定日期的记录文件，供日志、事件与摘要共用。"""
+    return Path(root) / (day or date.today()).isoformat() / name

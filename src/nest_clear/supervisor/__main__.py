@@ -1,5 +1,7 @@
 """提供父程序命令行入口，配置按天日志并记录版本。"""
+
 import argparse
+import hashlib
 from datetime import date
 import logging
 from pathlib import Path
@@ -50,7 +52,9 @@ class DailyHandler(logging.Handler):
 def _commit(path: Path) -> str:
     """查询仓库当前提交，查询失败时返回可诊断说明。"""
     try:
-        return subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+        return subprocess.check_output(
+            ["git", "-C", str(path), "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL, timeout=5
+        ).strip()
     except (OSError, subprocess.SubprocessError) as exc:
         return f"无法读取（{exc}）"
 
@@ -65,10 +69,29 @@ def main() -> None:
         config = load_config(args.config)
         contract = load_contract(args.contract)
         handler = DailyHandler(config.record_directory)
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", handlers=[logging.StreamHandler(), handler])
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+            handlers=[logging.StreamHandler(), handler],
+        )
         logger = logging.getLogger("nest_clear.supervisor")
-        logger.info("父程序启动：nest-clear commit %s；Auto_Weaver commit %s", _commit(ROOT), _commit(Path("/home/shuow/Auto_Weaver")))
-        Supervisor(config, PLCClient(config.plc.ip, config.plc.port, config.plc.timeout_s, contract)).run()
+        logger.info(
+            "父程序启动：nest-clear commit %s；Auto_Weaver commit %s",
+            _commit(ROOT),
+            _commit(Path("/home/shuow/Auto_Weaver")),
+        )
+        metadata = {
+            "nest_commit": _commit(ROOT),
+            "framework_commit": _commit(ROOT.parent / "Auto_Weaver"),
+            "config_sha256": hashlib.sha256(Path(args.config).read_bytes()).hexdigest(),
+            "plc": f"{config.plc.ip}:{config.plc.port}",
+            "camera_sn": config.camera_sn,
+        }
+        Supervisor(
+            config,
+            PLCClient(config.plc.ip, config.plc.port, config.plc.timeout_s, contract),
+            metadata=metadata,
+        ).run()
     except GuardError as exc:
         logging.getLogger("nest_clear.supervisor").error("启动失败：%s", exc)
         raise SystemExit(1) from exc

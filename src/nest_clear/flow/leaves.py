@@ -1,4 +1,5 @@
 """一盘行为树的单一职责叶节点及 Worker 调用协议。"""
+
 from collections.abc import Callable
 import logging
 import math
@@ -76,8 +77,11 @@ class WaitRequest(CallWorker):
     def __init__(self, board: Any, tracker: Any, timeout: float, events: EventRecorder) -> None:
         """保留跨盘基线和通信失败预算。"""
         super().__init__(
-            board, "plc", lambda bb: {"operation": "request"},
-            result_key="poll_result", name="等待新请求",
+            board,
+            "plc",
+            lambda bb: {"operation": "request"},
+            result_key="poll_result",
+            name="等待新请求",
         )
         self.tracker = tracker
         self.timeout = timeout
@@ -123,6 +127,7 @@ class WaitRequest(CallWorker):
         self.tracker.processed = task
         self._blackboard.write("task_id", task, self.name)
         self._blackboard.write("request_func", func, self.name)
+        self._blackboard.write("raw_path", None, self.name)
         self._blackboard.write("started", time.monotonic(), self.name)
         self._blackboard.write("error", f"功能码 {func} 在当前状态不允许", self.name)
         self.events.emit("request", task_id=task, func=func, name=REQUEST_NAMES.get(func, "未知功能码"))
@@ -204,18 +209,32 @@ class CheckArrival(Instant):
         ok = isinstance(actual, (list, tuple)) and len(actual) == 3
         if ok:
             ok = all(
-                math.isfinite(value)
-                and abs(value - target) <= self.config.arrival_tolerance_mm
+                math.isfinite(value) and abs(value - target) <= self.config.arrival_tolerance_mm
                 for value, target in zip(actual, expected)
             )
         bb.write("arrival_ok", ok, self.name)
         self.events.emit("arrival", task_id=bb.read("task_id"), expected=expected, actual=actual, ok=ok)
         if not ok:
-            reason = (
-                f"到位超差：期望 {expected}，实际 {actual}，"
-                f"公差 {self.config.arrival_tolerance_mm} mm"
-            )
+            reason = f"到位超差：期望 {expected}，实际 {actual}，公差 {self.config.arrival_tolerance_mm} mm"
             bb.write("error", reason, self.name)
+
+
+class RecordCapture(Instant):
+    """拍照后立即排队原图，检测失败仍可追溯。"""
+
+    def __init__(self, events: EventRecorder) -> None:
+        """保存记录器，供拍照与检测之间的叶节点使用。"""
+        super().__init__(name="存档原图")
+        self.events = events
+
+    def perform(self) -> None:
+        """记录原图相对路径并放入黑板，供错误应答引用。"""
+        bb = self._blackboard
+        archive = getattr(self.events, "archive", None)
+        path = None
+        if archive is not None:
+            path = archive.raw(bb.read("image"), bb.read("next_index"), bb.read("task_id"))
+        bb.write("raw_path", path, self.name)
 
 
 class RecordDetection(Instant):
@@ -229,9 +248,20 @@ class RecordDetection(Instant):
     def perform(self) -> None:
         """记录本次结果数量及扫描序号。"""
         bb = self._blackboard
+        archive = getattr(self.events, "archive", None)
+        if archive is not None:
+            archive.overlay(
+                bb.read("image"),
+                bb.read("targets"),
+                bb.read("next_index"),
+                bb.read("task_id"),
+                bb.read("raw_path"),
+            )
         self.events.emit(
-            "detection", task_id=bb.read("task_id"),
-            count=len(bb.read("targets")), scan_index=bb.read("next_index"),
+            "detection",
+            task_id=bb.read("task_id"),
+            count=len(bb.read("targets")),
+            scan_index=bb.read("next_index"),
         )
 
 
@@ -280,7 +310,14 @@ class PrepareError(Instant):
         func = bb.read("request_func")
         reason = f"未知功能码 {func}" if self.unknown else bb.read("error")
         logger.error("Task_ID=%s 处理失败：%s", bb.read("task_id"), reason)
-        self.events.emit("error", task_id=bb.read("task_id"), request_func=func, reason=reason)
+        self.events.emit(
+            "error",
+            task_id=bb.read("task_id"),
+            request_func=func,
+            reason=reason,
+            scan_index=bb.read("next_index"),
+            raw_path=bb.read("raw_path"),
+        )
         bb.write("reply_func", 999, self.name)
         bb.write("reply_coordinates", {}, self.name)
         bb.write("reply_tool", None, self.name)
@@ -301,8 +338,14 @@ class CommitReply(Instant):
         if func in (1, 3):
             bb.write("last_action", func, self.name)
         self.events.emit(
-            "reply", task_id=bb.read("task_id"), request_func=bb.read("request_func"),
-            func=func, coordinates=bb.read("reply_coordinates"), tool=bb.read("reply_tool"),
+            "reply",
+            task_id=bb.read("task_id"),
+            request_func=bb.read("request_func"),
+            func=func,
+            coordinates=bb.read("reply_coordinates"),
+            tool=bb.read("reply_tool"),
+            scan_index=bb.read("next_index"),
+            raw_path=bb.read("raw_path"),
             elapsed_ms=round((time.monotonic() - bb.read("started")) * 1000, 3),
         )
         if func == 9:

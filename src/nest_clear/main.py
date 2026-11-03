@@ -1,6 +1,10 @@
 """主程序装配与每盘 Batch 的可暂停 tick 循环。"""
+
 import argparse
 import logging
+import hashlib
+import signal
+import yaml
 from pathlib import Path
 import subprocess
 import time
@@ -15,6 +19,11 @@ from nest_clear.flow.batch import FlowContext, RequestTracker, build_batch, buil
 from nest_clear.guard import GuardError
 from nest_clear.plan.scan_path import build_scan_path
 from nest_clear.record.events import EventRecorder
+from nest_clear.record.summary import TraySummary
+from nest_clear.record.images import ImageArchive
+from nest_clear.record.logging import configure
+from nest_clear.paths import supervisor_state_file
+from nest_clear.supervisor.gate import SupervisorGate
 from nest_clear.vision.detector import PixelTarget, StubDetector
 from nest_clear.vision.geometry import load_calibration
 from nest_clear.workers.camera import CameraWorker
@@ -27,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class Gate(Protocol):
     """父程序可注入的暂停和活性接口。"""
+
     def beat(self) -> None:
         """上报主进程活性。"""
         ...
@@ -40,19 +50,70 @@ def framework_commit() -> str:
     """读取框架提交号用于现场追溯，非 Git 安装时返回未知。"""
     try:
         import autoweaver
+
         directory = Path(autoweaver.__file__).resolve().parent
-        return subprocess.check_output(["git", "-C", str(directory), "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL, timeout=2).strip()
+        return subprocess.check_output(
+            ["git", "-C", str(directory), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def repository_commit(path: Path) -> str:
+    """查询仓库提交，非 Git 环境返回 unknown。"""
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(path), "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL, timeout=2
+        ).strip()
     except (OSError, subprocess.SubprocessError):
         return "unknown"
 
 
 class Application:
     """持有一次进程的设备、时钟和跨盘握手基线。"""
-    def __init__(self, config: Config, config_path: str | Path, *, detector: Any = None, camera: Any = None, events: EventRecorder | None = None) -> None:
+
+    def __init__(
+        self,
+        config: Config,
+        config_path: str | Path,
+        *,
+        detector: Any = None,
+        camera: Any = None,
+        events: EventRecorder | None = None,
+    ) -> None:
         """完成配置、路径、标定、PLC 和相机预检后装配 Workers。"""
         self.config = config
         self.events = events or EventRecorder(config.record_directory)
-        self.events.emit("process_start", framework_commit=framework_commit(), plc=f"{config.plc.ip}:{config.plc.port}", camera_sn=config.camera_sn)
+        config_bytes = Path(config_path).read_bytes()
+        calibration_path = Path(config.vision.calibration)
+        if not calibration_path.is_absolute():
+            calibration_path = Path(config_path).resolve().parent / calibration_path
+        calibration_info = yaml.safe_load(calibration_path.read_text(encoding="utf-8"))
+        commit = repository_commit(ROOT)
+        metadata = {
+            "nest_commit": commit,
+            "framework_commit": framework_commit(),
+            "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+            "plc": f"{config.plc.ip}:{config.plc.port}",
+            "camera_sn": config.camera_sn,
+            "camera_backend": config.vision.camera_backend,
+            "calibration_placeholder": calibration_info.get("placeholder", False),
+        }
+        logger.info("主程序启动信息：%s", metadata)
+        self.events.emit("process_start", **metadata)
+        self.summary = TraySummary(self.events)
+        self.archive = ImageArchive(
+            self.events,
+            config.image_enabled,
+            config.image_format,
+            config.image_quality,
+            config.image_retention_days,
+            config.image_queue_size,
+        )
+        self.events.archive = self.archive
         self.path = build_scan_path(config.scan, config.travel)
         calibration_path = Path(config.vision.calibration)
         if not calibration_path.is_absolute():
@@ -70,7 +131,9 @@ class Application:
             self.camera = CameraWorker(config.vision.camera_backend, config.camera_sn, camera)
             self.camera.open()
             detector = detector or StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels])
-            vision = VisionWorker(detector, calibration, config.vision.dedup_radius_mm, config.vision.max_targets)
+            vision = VisionWorker(
+                detector, calibration, config.vision.dedup_radius_mm, config.vision.max_targets
+            )
             self.board = WorldBoard()
             self.clock = BTClock(self.board)
             for worker in (self.plc, self.camera, vision):
@@ -86,6 +149,10 @@ class Application:
             self.io.close()
             raise
 
+    def mark(self, event: str, **fields: Any) -> None:
+        """将父程序暂停变化接入事件与盘计时。"""
+        self.events.emit(event, **fields)
+
     def step(self, gate: Gate | None = None) -> None:
         """每拍维持活性；暂停时不提交或推进 Batch。"""
         if gate is not None:
@@ -96,8 +163,12 @@ class Application:
             if self.handle is not None:
                 result = self.handle.result
                 if result.reason.value != "completed":
-                    raise GuardError("BATCH-FAILED", f"一盘执行失败：{result}", "主程序", "查看前面的 PLC 或行为树错误。")
-            self.handle = self.clock.submit(build_batch(self.board, self.config, self.path, self.tracker, self.events))
+                    raise GuardError(
+                        "BATCH-FAILED", f"一盘执行失败：{result}", "主程序", "查看前面的 PLC 或行为树错误。"
+                    )
+            self.handle = self.clock.submit(
+                build_batch(self.board, self.config, self.path, self.tracker, self.events)
+            )
         self.clock.tick_once()
 
     def close(self) -> None:
@@ -105,13 +176,21 @@ class Application:
         if self.clock is not None:
             self.clock.shutdown()
         self.io.close()
+        self.summary.finish("interrupted", self.events.clock().isoformat(), self.events.monotonic())
+        self.archive.close()
         self.events.emit("process_stop")
 
 
-def run(config_path: str | Path = ROOT / "config/nest_clear.yaml", gate: Gate | None = None) -> None:
+def run(
+    config_path: str | Path = ROOT / "config/nest_clear.yaml",
+    gate: Gate | None = None,
+    supervised: bool = False,
+) -> None:
     """持续处理各盘；暂停时仍按节拍向父程序报告活性。"""
     config = load_config(config_path)
     app = Application(config, config_path)
+    if gate is None and (supervised or supervisor_state_file(config.record_directory).exists()):
+        gate = SupervisorGate(config.record_directory, mark=app.mark)
     try:
         while True:
             app.step(gate)
@@ -124,10 +203,13 @@ def main() -> None:
     """解析入口配置并运行主程序。"""
     parser = argparse.ArgumentParser(description="燕窝挑毛算法主程序")
     parser.add_argument("--config", default=str(ROOT / "config/nest_clear.yaml"))
+    parser.add_argument("--supervised", action="store_true")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
+    config = load_config(args.config)
+    configure(config.record_directory, "main")
+    signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
-        run(args.config)
+        run(args.config, supervised=args.supervised)
     except GuardError as exc:
         logger.error("启动或运行失败：%s", exc)
         raise SystemExit(1) from exc
