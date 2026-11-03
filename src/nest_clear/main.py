@@ -11,7 +11,7 @@ from autoweaver.worker.clock import BTClock
 
 from nest_clear.comm import Handshake, PLCClient, load_contract
 from nest_clear.config import Config, load_config
-from nest_clear.flow.batch import RequestTracker, build_batch
+from nest_clear.flow.batch import FlowContext, RequestTracker, build_batch, build_tree, format_tree
 from nest_clear.guard import GuardError
 from nest_clear.plan.scan_path import build_scan_path
 from nest_clear.record.events import EventRecorder
@@ -76,6 +76,8 @@ class Application:
             for worker in (self.plc, self.camera, vision):
                 self.clock.attach_worker(worker)
             self.handle = None
+            context = FlowContext(self.board, config, self.path, self.tracker, self.events)
+            logger.info("主程序行为树结构：\n%s", format_tree(build_tree(context)))
         except BaseException:
             if self.clock is not None:
                 self.clock.shutdown()

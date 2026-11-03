@@ -1,188 +1,171 @@
-"""用行为树节点编排一盘 PLC 请求和 Worker 操作。"""
-import logging
-import math
-import time
+"""用 AutoWeaver 组合节点构造每盘行为树和功能码分发表。"""
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from autoweaver.motion_policy.batch import Batch
-from autoweaver.motion_policy.nodes.node import Status, TreeNode
-from autoweaver.worker.base import next_request_id
+from autoweaver.motion_policy.nodes.control.fallback import Fallback
+from autoweaver.motion_policy.nodes.control.sequence import Sequence
+from autoweaver.motion_policy.nodes.decorator.repeat_until import RepeatUntil
+from autoweaver.motion_policy.nodes.decorator.retry import Retry
+from autoweaver.motion_policy.nodes.node import TreeNode
 
 from nest_clear.config import Config
-from nest_clear.guard import GuardError
-from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.events import EventRecorder
-
-logger = logging.getLogger("nest_clear.flow")
-REQUEST_NAMES = {1: "扫描到位或请求首个扫描位", 60: "挑取完成下一步"}
+from .leaves import (
+    CallWorker,
+    CheckArrival,
+    CommitReply,
+    Predicate,
+    PrepareError,
+    PreparePick,
+    PrepareScan,
+    RecordDetection,
+    WaitRequest,
+)
 
 
 class RequestTracker:
-    """跨盘保存已观察及已处理编号，避免批次切换重复接收。"""
+    """仅跨盘保留 PLC 观察基线，防止重复接收上一盘请求。"""
+
     def __init__(self, baseline: int) -> None:
-        """以启动时的 PLC 编号作为忽略基线。"""
+        """启动时忽略当前编号；盘内业务状态放在 Blackboard。"""
         self.observed = baseline
         self.processed = None
 
 
-class TrayTree(TreeNode):
-    """按请求驱动有限状态行为树；所有设备操作通过 note/state 完成。"""
-    def __init__(self, board: Any, config: Config, path: list[tuple[float, float, float]], tracker: RequestTracker, events: EventRecorder) -> None:
-        """创建一盘私有流程状态和可扩展的功能码分发表。"""
-        super().__init__(name="一盘流程")
-        self.board = board
-        self.config = config
-        self.path = path
-        self.tracker = tracker
-        self.events = events
-        self.dispatch = {1: self._request_scan, 60: self._request_next}
-        self.phase = "poll"
-        self.rid = 0
-        self.next_index = 0
-        self.scan = None
-        self.targets = []
-        self.tool = 0
-        self.task_id = 0
-        self.request_func = 0
-        self.started = 0.0
-        self.reply_func = 0
-        self.last_action = 0
-        self.reply_coordinates = {}
-        self.reply_tool = None
-        self.pose = None
-
-    def _send(self, worker: str, payload: dict[str, Any], phase: str) -> None:
-        """发送编号 note；每次只允许一个操作在途，保证状态与请求配对。"""
-        self.rid = next_request_id()
-        self.worker = worker
-        self.phase = phase
-        self.board.pass_note(namespace=worker, name="execute", payload={**payload, "__request_id__": self.rid}, sender=self.name)
-
-    def _result(self) -> tuple[bool, Any, str]:
-        """检查本次完成编号和结果错误，不能仅凭完成编号判断成功。"""
-        result = self.snapshot.get(f"{self.worker}.result", {})
-        if result.get("id") != self.rid or self.snapshot.get(f"{self.worker}.last_completed_id", 0) < self.rid:
-            return False, None, ""
-        return True, result.get("value"), result.get("error", "")
-
-    def _reply(self, func: int, coordinates: dict[str, Any] | None = None, tool: int | None = None) -> None:
-        """通过 PLC Worker 按握手提交顺序异步应答。"""
-        self.reply_func = func
-        self.reply_coordinates = coordinates or {}
-        self.reply_tool = tool
-        self._send("plc", {"operation": "reply", "task_id": self.task_id, "func": func, "coordinates": self.reply_coordinates}, "reply")
-
-    def _error(self, reason: str) -> None:
-        """记录请求上下文并发送 999，让 PLC 得知可恢复的业务错误。"""
-        logger.error("Task_ID=%s 处理失败：%s", self.task_id, reason)
-        self.events.emit("error", task_id=self.task_id, request_func=self.request_func, reason=reason)
-        self._reply(999)
-
-    def _advance(self) -> None:
-        """目标耗尽后下发下一扫描位，路径耗尽则结束本盘。"""
-        if self.next_index >= len(self.path):
-            self._reply(9)
-            return
-        self.scan = self.path[self.next_index]
-        self.next_index += 1
-        self._reply(1, {"scan_xyz": self.scan})
-
-    def _pick(self) -> None:
-        """根据第八节工具偏移计算挑取坐标，行程合格才下发。"""
-        target = self.targets[0]
-        offset = self.config.tools[self.tool]
-        xyz = (target.xyz[0] + offset[0], target.xyz[1] + offset[1], self.config.pick_depth_z + offset[2])
-        guard_position(xyz, self.config.travel, f"Task_ID={self.task_id}，扫描位 {self.next_index}")
-        self.targets.pop(0)
-        tool = self.tool + 1
-        self.tool = 1 - self.tool
-        self._reply(3, {f"pick{tool}_xyz": xyz}, tool)
-
-    def _request_scan(self) -> None:
-        """首次请求只下发扫描位；后续请求先校验到位再拍照。"""
-        if self.scan is None:
-            self._advance()
-        elif self.last_action != 1:
-            self._error("当前未等待扫描到位，不能处理功能码 1")
-        else:
-            self._send("plc", {"operation": "actual"}, "actual")
-
-    def _request_next(self) -> None:
-        """挑取完成后消费已检测目标，不重新拍照。"""
-        if self.last_action != 3:
-            self._error("当前未等待挑取完成，不能处理功能码 60")
-        elif self.targets:
-            self._pick()
-        else:
-            self._advance()
-
-    def on_start(self) -> Status:
-        """首次 tick 开始轮询请求。"""
-        self._send("plc", {"operation": "request"}, "poll")
-        return Status.RUNNING
-
-    def on_running(self) -> Status:
-        """推进一个非阻塞状态转换，失败时发送带原因的 999。"""
-        ready, value, error = self._result()
-        if not ready:
-            return Status.RUNNING
-        if error:
-            if self.phase in ("poll", "reply"):
-                logger.error("PLC 通信失败：%s", error)
-                self.events.emit("error", task_id=self.task_id, reason=error)
-                return Status.FAILURE
-            self._error(error)
-            return Status.RUNNING
-        try:
-            if self.phase == "poll":
-                task, func = value
-                previous = self.tracker.observed
-                self.tracker.observed = task
-                if task == 0 or task == previous or task == self.tracker.processed:
-                    self._send("plc", {"operation": "request"}, "poll")
-                    return Status.RUNNING
-                if self.tracker.processed is not None and task != self.tracker.processed + 1 and task != 1:
-                    logger.warning("Task_ID 跳变：%s → %s", self.tracker.processed, task)
-                self.tracker.processed = task
-                self.task_id = task
-                self.request_func = func
-                self.started = time.monotonic()
-                self.events.emit("request", task_id=task, func=func, name=REQUEST_NAMES.get(func, "未知功能码"))
-                handler = self.dispatch.get(func)
-                if handler is None:
-                    self._error(f"未知功能码 {func}")
-                else:
-                    handler()
-            elif self.phase == "actual":
-                self.pose = tuple(value)
-                ok = len(self.pose) == 3 and all(math.isfinite(v) and abs(v - expected) <= self.config.arrival_tolerance_mm for v, expected in zip(self.pose, self.scan))
-                self.events.emit("arrival", task_id=self.task_id, expected=self.scan, actual=self.pose, ok=ok)
-                if not ok:
-                    self._error(f"到位超差：期望 {self.scan}，实际 {self.pose}，公差 {self.config.arrival_tolerance_mm} mm")
-                else:
-                    self._send("camera", {}, "camera")
-            elif self.phase == "camera":
-                self._send("vision", {"image": value, "pose": self.pose}, "vision")
-            elif self.phase == "vision":
-                self.targets = list(value)
-                self.events.emit("detection", task_id=self.task_id, count=len(self.targets), scan_index=self.next_index)
-                if self.targets:
-                    self._pick()
-                else:
-                    self._advance()
-            elif self.phase == "reply":
-                if self.reply_func in (1, 3):
-                    self.last_action = self.reply_func
-                self.events.emit("reply", task_id=self.task_id, request_func=self.request_func, func=self.reply_func, coordinates=self.reply_coordinates, tool=self.reply_tool, elapsed_ms=round((time.monotonic() - self.started) * 1000, 3))
-                if self.reply_func == 9:
-                    self.events.emit("tray_end", task_id=self.task_id, scans=self.next_index)
-                    return Status.SUCCESS
-                self._send("plc", {"operation": "request"}, "poll")
-        except Exception as exc:
-            self._error(str(exc))
-        return Status.RUNNING
+@dataclass(frozen=True)
+class FlowContext:
+    """构树依赖；不保存当前盘的可变业务状态。"""
+    board: Any
+    config: Config
+    path: list[tuple[float, float, float]]
+    tracker: RequestTracker
+    events: EventRecorder
 
 
-def build_batch(board: Any, config: Config, path: list[tuple[float, float, float]], tracker: RequestTracker, events: EventRecorder) -> Batch:
-    """为新盘构造全新行为树和独立 Batch 状态。"""
-    return Batch(lambda: TrayTree(board, config, path, tracker, events), name="一盘")
+def choose_next(ctx: FlowContext) -> TreeNode:
+    """目标存在时挑取，否则下发下一扫描位或结束。"""
+    return Fallback([
+        Sequence([
+            Predicate("有待挑目标", lambda bb: bool(bb.read("targets"))),
+            PreparePick(ctx.config),
+        ], name="挑取目标"),
+        Sequence([
+            Predicate("没有待挑目标", lambda bb: not bb.read("targets")),
+            PrepareScan(ctx.path),
+        ], name="继续扫描"),
+    ], name="选择挑取或扫描")
+
+
+def scan_branch(ctx: FlowContext) -> TreeNode:
+    """功能码 1：首次直接扫描，后续到位后拍照和检测。"""
+    first = Sequence([
+        Predicate("尚未下发扫描位", lambda bb: bb.read("scan") is None),
+        PrepareScan(ctx.path),
+    ], name="首次扫描")
+    arrived = Sequence([
+        Predicate("等待扫描到位", lambda bb: bb.read("last_action") == 1),
+        CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", "读取实时坐标"),
+        CheckArrival(ctx.config, ctx.events),
+        Predicate("到位合格", lambda bb: bb.read("arrival_ok")),
+        CallWorker(ctx.board, "camera", lambda bb: {}, "image", "拍照"),
+        CallWorker(
+            ctx.board, "vision",
+            lambda bb: {"image": bb.read("image"), "pose": bb.read("actual")},
+            "targets", "检测并换算目标",
+        ),
+        RecordDetection(ctx.events),
+        choose_next(ctx),
+    ], name="到位拍照检测")
+    return Fallback([first, arrived], name="首次或到位")
+
+
+def next_branch(ctx: FlowContext) -> TreeNode:
+    """功能码 60：挑取结束后使用剩余目标，不重新拍照。"""
+    return Sequence([
+        Predicate("等待挑取完成", lambda bb: bb.read("last_action") == 3),
+        choose_next(ctx),
+    ], name="挑取完成后继续")
+
+
+BranchFactory = Callable[[FlowContext], TreeNode]
+BRANCHES: dict[int, BranchFactory] = {1: scan_branch, 60: next_branch}
+
+
+def build_tree(ctx: FlowContext, branches: Mapping[int, BranchFactory] | None = None) -> TreeNode:
+    """由分发表构造功能码分支；公共应答不属于任何业务分支。"""
+    factories = BRANCHES if branches is None else branches
+    dispatch = []
+    for code, factory in factories.items():
+        match = Predicate(f"功能码 == {code}", lambda bb, code=code: bb.read("request_func") == code)
+        business = Fallback([
+            factory(ctx),
+            PrepareError(ctx.events),
+        ], name=f"功能码 {code} 业务或 999")
+        dispatch.append(Sequence([match, business], name=f"功能码 {code}"))
+    dispatch.append(PrepareError(ctx.events, unknown=True))
+    dispatch_tree = Fallback(dispatch, name="功能码分发")
+    reply = CallWorker(
+        ctx.board, "plc",
+        lambda bb: {
+            "operation": "reply",
+            "task_id": bb.read("task_id"),
+            "func": bb.read("reply_func"),
+            "coordinates": bb.read("reply_coordinates"),
+        },
+        name="写入应答",
+    )
+    iteration = Sequence([
+        WaitRequest(ctx.board, ctx.tracker, ctx.config.plc.comm_fail_timeout_s, ctx.events),
+        dispatch_tree,
+        Retry(max_attempts=3, child=reply, name="应答最多三次"),
+        CommitReply(ctx.events),
+    ], name="处理一次请求")
+    return RepeatUntil(
+        cond=lambda snapshot, bb: bb.read("done", False),
+        child=iteration,
+        name="一盘直到结束",
+    )
+
+
+def format_tree(tree: TreeNode) -> str:
+    """递归输出组合和装饰节点，供启动日志与现场检查。"""
+    lines: list[str] = []
+
+    def visit(node: TreeNode, depth: int) -> None:
+        """按树深度添加名称并遍历实际子节点。"""
+        lines.append(f"{'  ' * depth}{type(node).__name__}: {node.name}")
+        for child in getattr(node, "children", []):
+            visit(child, depth + 1)
+        child = getattr(node, "child", None)
+        if child is not None:
+            visit(child, depth + 1)
+
+    visit(tree, 0)
+    return "\n".join(lines)
+
+
+def build_batch(
+    board: Any,
+    config: Config,
+    path: list[tuple[float, float, float]],
+    tracker: RequestTracker,
+    events: EventRecorder,
+    branches: Mapping[int, BranchFactory] | None = None,
+) -> Batch:
+    """创建全新树及私有 Blackboard；业务状态均在参数中初始化。"""
+    ctx = FlowContext(board, config, path, tracker, events)
+    params = {
+        "next_index": 0,
+        "scan": None,
+        "targets": [],
+        "tool_index": 0,
+        "last_action": 0,
+        "task_id": 0,
+        "request_func": 0,
+        "actual": None,
+        "done": False,
+        "error": "",
+    }
+    return Batch(lambda: build_tree(ctx, branches), params=params, name="一盘")

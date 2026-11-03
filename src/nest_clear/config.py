@@ -17,6 +17,7 @@ class PLC:
     local_ip: str
     port: int
     timeout_s: float
+    comm_fail_timeout_s: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -125,11 +126,14 @@ def load_config(path: str | Path) -> Config:
     except (OSError, yaml.YAMLError) as exc:
         raise GuardError("CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。") from exc
     root = _mapping(data, "根", ["plc", "scan", "arrival_tolerance_mm", "pick_depth_z", "tools", "travel", "camera", "record", "supervisor", "vision"])
-    p = _mapping(root["plc"], "plc", ["ip", "local_ip", "port", "timeout_s"])
+    plc_data = root["plc"]
+    if isinstance(plc_data, dict):
+        plc_data = {"comm_fail_timeout_s": 10.0, **plc_data}
+    p = _mapping(plc_data, "plc", ["ip", "local_ip", "port", "timeout_s", "comm_fail_timeout_s"])
     port = p["port"]
     if type(port) is not int or not 1 <= port <= 65535:
         _fail("plc.port", "端口应为 1 到 65535 的整数")
-    plc = PLC(_ip(p["ip"], "plc.ip"), _ip(p["local_ip"], "plc.local_ip"), port, _number(p["timeout_s"], "plc.timeout_s", True))
+    plc = PLC(_ip(p["ip"], "plc.ip"), _ip(p["local_ip"], "plc.local_ip"), port, _number(p["timeout_s"], "plc.timeout_s", True), _number(p["comm_fail_timeout_s"], "plc.comm_fail_timeout_s", True))
     t = _mapping(root["travel"], "travel", ["x", "y", "z"])
     travel = tuple(_vector(t[axis], f"travel.{axis}", 2) for axis in "xyz")
     for axis, bounds in zip("xyz", travel):
