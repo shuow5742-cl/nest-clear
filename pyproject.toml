@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nest_clear"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = ["autoweaver", "pymodbus>=3.11", "pyyaml", "numpy", "opencv-python-headless"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.uv.sources]
+autoweaver = { path = "../Auto_Weaver", editable = true }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
