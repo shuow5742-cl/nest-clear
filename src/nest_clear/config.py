@@ -29,6 +29,25 @@ class Scan:
 
 
 @dataclass(frozen=True)
+class SupervisorConfig:
+    """保存父程序轮询、看门狗和子进程启动参数。"""
+    poll_s: float
+    watchdog_s: float
+    child_command: tuple[str, ...]
+    startup_grace_s: float = 60.0
+
+
+@dataclass(frozen=True)
+class VisionConfig:
+    """保存相机模式、标定文件和占位检测器参数。"""
+    camera_backend: str
+    calibration: str
+    pixels: tuple[tuple[float, ...], ...]
+    dedup_radius_mm: float
+    max_targets: int
+
+
+@dataclass(frozen=True)
 class Config:
     """冻结完整业务配置，避免运行时被各组件意外更改。"""
     plc: PLC
@@ -39,6 +58,8 @@ class Config:
     travel: tuple[tuple[float, ...], ...]
     camera_sn: str
     record_directory: str
+    supervisor: SupervisorConfig
+    vision: VisionConfig
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -103,7 +124,7 @@ def load_config(path: str | Path) -> Config:
             data = yaml.safe_load(file)
     except (OSError, yaml.YAMLError) as exc:
         raise GuardError("CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。") from exc
-    root = _mapping(data, "根", ["plc", "scan", "arrival_tolerance_mm", "pick_depth_z", "tools", "travel", "camera", "record"])
+    root = _mapping(data, "根", ["plc", "scan", "arrival_tolerance_mm", "pick_depth_z", "tools", "travel", "camera", "record", "supervisor", "vision"])
     p = _mapping(root["plc"], "plc", ["ip", "local_ip", "port", "timeout_s"])
     port = p["port"]
     if type(port) is not int or not 1 <= port <= 65535:
@@ -133,4 +154,26 @@ def load_config(path: str | Path) -> Config:
     camera = _mapping(root["camera"], "camera", ["sn"])
     record = _mapping(root["record"], "record", ["directory"])
     offsets = tuple(_vector(tools[key], f"tools.{key}", 3) for key in ("tool1", "tool2"))
-    return Config(plc, scan, _number(root["arrival_tolerance_mm"], "arrival_tolerance_mm", True), depth, offsets, travel, _string(camera["sn"], "camera.sn"), _string(record["directory"], "record.directory"))
+    sup = _mapping(root["supervisor"], "supervisor", ["poll_s", "watchdog_s", "child_command", "startup_grace_s"])
+    command = sup["child_command"]
+    if not isinstance(command, list) or not command:
+        _fail("supervisor.child_command", "应为非空命令参数列表")
+    supervisor = SupervisorConfig(
+        _number(sup["poll_s"], "supervisor.poll_s", True),
+        _number(sup["watchdog_s"], "supervisor.watchdog_s", True),
+        tuple(_string(arg, "supervisor.child_command") for arg in command),
+        _number(sup["startup_grace_s"], "supervisor.startup_grace_s", True),
+    )
+    v = _mapping(root["vision"], "vision", ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets"])
+    if v["camera_backend"] not in ("mock", "daheng"):
+        _fail("vision.camera_backend", "应为 mock 或 daheng")
+    if not isinstance(v["pixels"], list):
+        _fail("vision.pixels", "应为 [u, v, score] 列表")
+    pixels = tuple(_vector(item, "vision.pixels", 3) for item in v["pixels"])
+    if any(not 0 <= pixel[2] <= 1 for pixel in pixels):
+        _fail("vision.pixels", "目标分数必须在 0 到 1 之间")
+    radius = _number(v["dedup_radius_mm"], "vision.dedup_radius_mm")
+    if radius < 0 or type(v["max_targets"]) is not int or v["max_targets"] < 1:
+        _fail("vision", "去重半径应非负，最大目标数应为正整数")
+    vision = VisionConfig(v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"])
+    return Config(plc, scan, _number(root["arrival_tolerance_mm"], "arrival_tolerance_mm", True), depth, offsets, travel, _string(camera["sn"], "camera.sn"), _string(record["directory"], "record.directory"), supervisor, vision)

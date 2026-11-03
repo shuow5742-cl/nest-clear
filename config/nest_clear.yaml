@@ -24,3 +24,15 @@ camera:  # 相机识别参数
   sn: "待填写"  # 相机序列号占位，现场替换为设备 SN
 record:  # 运行记录参数
   directory: runs  # 记录根目录，可填写相对路径或绝对路径
+
+supervisor:  # 父程序轮询和主程序活性监控
+  poll_s: 0.1  # 设备状态轮询周期，秒
+  watchdog_s: 6.0  # 活性文件超时，秒
+  startup_grace_s: 60.0  # 启动后等待首个活性点的最长时间，秒，留出设备预检时间
+  child_command: [python, -m, nest_clear.main]  # 主程序命令及参数
+vision:  # 首期使用固定像素占位检测器，真实算法采图后替换
+  camera_backend: daheng  # mock 用于仿真；daheng 按 camera.sn 打开
+  calibration: calibration/camera.yaml  # 相对本配置文件所在目录
+  pixels: []  # 固定 [u, v, score]；空列表表示无目标
+  dedup_radius_mm: 1.0
+  max_targets: 10
