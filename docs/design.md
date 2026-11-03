@@ -99,3 +99,16 @@ bit7 初始化中 bit8 初始化完成 bit9 信息提示 bit10 一般报警 bit1
 - 树负责"流程"（等请求 → 分发 → 动作 → 应答），Worker 负责"能力"（读写 PLC、拍照、检测）；树与 Worker 之间只经 note/state 通信（NotifyAndWait 等）。
 - 参考 pluck-hair 的 `main.py` 装配方式与 `src/pluck/flow.py`、`src/workers/*.py` 的写法；框架注意事项见 `~/docs/code-guides/autoweaver.md`（完成≠成功，要另查错误；同步 handler 会阻塞全局 tick）。
 - 发现框架缺的通用能力：先在 nest-clear 里实现，同时记入 `docs/framework-candidates.md`（为什么通用、建议放框架哪里）。**不要直接改 ~/Auto_Weaver**，除非任务明确要求。
+
+## 7. 代码风格（所有任务必须遵守）
+- 一行一条语句；禁止分号连写、禁止 `if x: do()` 同行写法。
+- 所有函数有类型标注 + 中文 docstring（做什么、为什么这样、和谁衔接）；模块顶部写模块说明。
+- 关键决策处写注释解释原因；写法参照 pluck-hair `backend/src/supervisor/gate.py`。
+- 所有可预期的失败抛 `GuardError`（不要裸 ValueError/RuntimeError），带实际值、上下文（Task_ID/扫描位序号等）和具体 hint。
+- logging 的 logger 名用 `nest_clear.<模块>`；中文日志。
+- 测试：`uv run --extra dev pytest -q`；新功能必须带测试。不新增依赖、不改 pyproject.toml（确需新增先问 Claude）。
+
+## 8. 坐标符号约定（T3 起生效）
+- 视觉输出的目标坐标 = "相机参考点对准该目标时的模组坐标"（模组坐标系，mm）。
+- 挑取坐标：pick_xy = target_xy + tool_i.xy；pick_z = pick_depth_z + tool_i.z。
+  tool_i.xy 的含义 = 针尖相对相机参考点的偏移（模组坐标系），第一期人工测定填入配置。

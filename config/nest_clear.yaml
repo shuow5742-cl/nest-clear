@@ -13,7 +13,7 @@ scan:  # 模组坐标系下的扫描范围与步距，单位 mm
   z: 0.0  # 扫描拍照高度，单位 mm，按现场模组坐标填写
 arrival_tolerance_mm: 0.1  # 各轴实时位置与下发扫描位置允许的最大绝对差，单位 mm
 pick_depth_z: 0.0  # 下针深度的模组 Z 坐标，单位 mm，按现场测量填写
-tools:  # 工具相对相机的 XYZ 补偿，单位 mm，标定完成前手工填写
+tools:  # 工具补偿，单位 mm：pick_xy = 目标xy + 工具xy，pick_z = pick_depth_z + 工具z（见 design.md §8），标定完成前手工填写
   tool1: [0.0, 0.0, 0.0]  # 一号工具 XYZ 补偿，单位 mm
   tool2: [0.0, 0.0, 0.0]  # 二号工具 XYZ 补偿，单位 mm
 travel:  # 模组各轴允许的最小和最大坐标，单位 mm，按设备行程填写
