@@ -263,3 +263,31 @@ def test_report_groups_and_attention(tmp_path: Path) -> None:
     assert "03:04:08 999" in text and "检测失败" in text
     assert "03:04:06 看门狗" in text and "03:04:05 急停中" in text
     assert "2026-01-02T03" not in text
+
+
+def test_report_mode_rejection_deduplicates_and_translates_older_diagnostics(tmp_path: Path) -> None:
+    """拒绝事件及其普通 999 和错误日志只算一项，旧检测记录也能阅读。"""
+    day = date(2026, 1, 2)
+    directory = tmp_path / day.isoformat()
+    directory.mkdir()
+    reason = "挑毛进行中收到对刀指令，须先停止挑毛并由 PLC 重新初始化"
+    events = [
+        {"ts": "2026-01-02T03:04:05", "event": "reply", "tray_id": "盘1", "task_id": 8, "func": 999},
+        {"ts": "2026-01-02T03:04:05", "event": "mode_rejected", "tray_id": "盘1", "task_id": 8,
+         "mode": "挑毛中", "request_func": 100, "reason": reason},
+        {"ts": "2026-01-02T03:04:06", "event": "reply", "tray_id": "盘1", "task_id": 9, "func": 999},
+        {"ts": "2026-01-02T03:04:07", "event": "tooltip_failed", "task_id": 10, "tool": 1,
+         "reason": "错误码：TOOLTIP-FAILED\n发生了什么：front 相机无法识别针尖：no dark component\n位置：对刀\n排查建议：检查设备。"},
+    ]
+    (directory / "events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events))
+    (directory / "main.log").write_text(
+        f"2026-01-02 03:04:05,123 ERROR nest_clear.flow Task_ID=8 处理失败：{reason}\n"
+    )
+    text = report(tmp_path, day)
+    attention = text.split("需要人看的：", 1)[1]
+    assert attention.count("Task_ID=8") == 1
+    assert "模式不允许：挑毛中 时收到 100（工具1开始对刀），须先停止挑毛并由 PLC 重新初始化" in attention
+    assert "Task_ID=9" in attention and "999 次数：2" in text
+    assert "no dark component" not in text
+    assert "    错误码：TOOLTIP-FAILED；发生了什么：正面相机无法识别针尖：图像中未找到暗色针尖区域\n    排查建议：检查背光与曝光" in attention
+    assert "位置：对刀" not in attention

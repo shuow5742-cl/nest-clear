@@ -129,3 +129,14 @@ class TraySummary:
         self.checkpoint.unlink(missing_ok=True)
         self.events.tray_id = None
         self.data = None
+
+
+def write_tooltip_summary(events: EventRecorder, session: dict[str, Any], result: str,
+                          reason: str | None = None) -> None:
+    """按会话结束日期追加对刀摘要，与日报的日期保持一致。"""
+    now = events.clock()
+    row = {**session, "end_time": now.isoformat(), "result": result, "reason": reason}
+    path = daily_file(events.directory, "tooltip_summary.jsonl", now.date())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")

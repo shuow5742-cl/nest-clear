@@ -35,6 +35,49 @@ def _time(value: str) -> str:
         return "时间未知"
 
 
+def _vector(value: Any) -> str:
+    """以毫米精度展示坐标，避免 PLC 浮点噪声干扰阅读。"""
+    if value is None:
+        return "无"
+    return "[" + ", ".join(f"{number:.3f}" for number in value) + "]"
+
+
+def _failure_lines(reason: Any) -> tuple[str, str]:
+    """提取守卫错误的现象和建议，并兼容旧记录中的英文检测诊断。"""
+    fields = {}
+    raw = str(reason or "未知原因")
+    for line in raw.splitlines():
+        key, separator, value = line.partition("：")
+        if separator and key in ("错误码", "发生了什么", "排查建议"):
+            fields[key] = value.strip()
+    what = fields.get("发生了什么", raw.splitlines()[0])
+    what = what.replace("front 相机", "正面相机").replace("side 相机", "侧面相机")
+    what = what.replace("no dark component", "图像中未找到暗色针尖区域")
+    what = what.replace("largest component is too small", "图像中的暗色针尖区域过小")
+    code = fields.get("错误码", "未知")
+    hint = fields.get("排查建议", "检查相关设备和日志。")
+    if "图像中未找到暗色针尖区域" in what or "图像中的暗色针尖区域过小" in what:
+        hint = "检查背光与曝光，以及针尖是否在画面内。"
+    return f"错误码：{code}；发生了什么：{what}", f"排查建议：{hint}"
+
+
+def _mode_rejection(row: dict[str, Any]) -> str:
+    """根据协议解释被拒绝的功能码及恢复操作。"""
+    func = row.get("request_func")
+    mode = row.get("mode", "未知模式")
+    names = {1: "扫描", 60: "挑取完成", 100: "工具1开始对刀", 101: "工具2开始对刀",
+             110: "工具1对刀继续", 120: "工具2对刀继续", 130: "对刀完成"}
+    if mode == "挑毛中" and func in (100, 101):
+        hint = "须先停止挑毛并由 PLC 重新初始化"
+    elif func in (110, 120, 130) and mode == "空闲":
+        hint = "须先开始对应工具的对刀会话"
+    elif mode.startswith("对刀中"):
+        hint = "须先完成当前工具对刀，再发送允许的指令"
+    else:
+        hint = "须先进入允许该指令的工作模式"
+    return f"模式不允许：{mode} 时收到 {func}（{names.get(func, '未知指令')}），{hint}"
+
+
 def _log_groups(root: str | Path, day: date) -> tuple[Counter, list[str]]:
     """按级别、日志器及首句统计，并保留每条 ERROR 给人工清单。"""
     groups: Counter = Counter()
@@ -59,6 +102,7 @@ def report(root: str | Path, day: date) -> str:
     """汇总一日盘记录、状态变化和需要人工处理的事项。"""
     events = _rows(daily_file(root, "events.jsonl", day))
     trays = _rows(daily_file(root, "summary.jsonl", day))
+    calibrations = _rows(daily_file(root, "tooltip_summary.jsonl", day))
     lines = [f"设备日报 {day.isoformat()}"]
     processes = [row for row in events if row.get("event") in ("process_start", "process_stop")]
     periods = []
@@ -81,6 +125,24 @@ def report(root: str | Path, day: date) -> str:
         )
         if status == "中断":
             attention.append(f"{_time(tray.get('end_time', ''))} 中断的盘 {tray_id}")
+    lines.append("工具标定：")
+    for calibration in calibrations:
+        lines.append(
+            f"  {_time(calibration.get('start_time', ''))} 工具 {calibration.get('tool')}，"
+            f"迭代 {calibration.get('iterations', 0)} 次，{calibration.get('result')}"
+            f"，"
+            f"Δ {_vector(calibration.get('delta'))}，补偿 {_vector(calibration.get('old_compensation'))} → "
+            f"{_vector(calibration.get('new_compensation'))}"
+        )
+        if calibration.get("reason"):
+            detail, hint = _failure_lines(calibration["reason"])
+            lines.extend((f"    {detail}", f"    {hint}"))
+    if not calibrations:
+        lines.append("  无")
+    rejected = {(row.get("tray_id"), row.get("task_id")) for row in events
+                if row.get("event") == "mode_rejected"}
+    rejected_logs = {(str(row.get("task_id")), str(row.get("reason", ""))) for row in events
+                     if row.get("event") == "mode_rejected" and row.get("task_id") is not None}
     replies = []
     reasons: dict[tuple[Any, Any], str] = {}
     for row in events:
@@ -94,7 +156,15 @@ def report(root: str | Path, day: date) -> str:
             label = "代答 999" if event == "supervisor_reply_999" else "999"
             text = f"{clock} {label} 盘 {row.get('tray_id')} Task_ID={row.get('task_id')} 原因：{reason}"
             replies.append(text)
-            attention.append(text)
+            if event != "reply" or key not in rejected:
+                attention.append(text)
+        if event == "tooltip_failed":
+            detail, hint = _failure_lines(row.get("reason"))
+            attention.append(f"{clock} 对刀 131 工具 {row.get('tool')} Task_ID={row.get('task_id')}\n    {detail}\n    {hint}")
+        if event == "mode_rejected":
+            reason = row.get("reason", "未知")
+            reasons[key] = reason
+            attention.append(f"{clock} 模式拒绝 999 Task_ID={row.get('task_id')} {_mode_rejection(row)}")
         if event == "watchdog":
             attention.append(f"{clock} 看门狗：{row.get('reason', '未知')}")
         if event == "device_state" and "急停中" in row.get("bits", []):
@@ -108,13 +178,19 @@ def report(root: str | Path, day: date) -> str:
         lines.append(f"{level}：{sum(count for _, count in entries)} 条")
         for (_, logger, sentence), count in entries:
             lines.append(f"  {logger}：{sentence}（{count} 条）")
-    attention.extend(log_errors)
+    for error in log_errors:
+        match = re.search(r"Task_ID=(\d+) 处理失败：(.*)$", error)
+        if match and (match.group(1), match.group(2)) in rejected_logs:
+            continue
+        attention.append(error)
     lines.append("设备状态变化时间线（包含急停及暂停）：")
     for row in events:
         event = row.get("event")
         clock = _time(row.get("ts", ""))
         if event == "device_state":
             lines.append(f"  {clock} {'、'.join(row.get('bits', [])) or '无置位'}")
+        if event == "mode_change":
+            lines.append(f"  {clock} 模式 {row.get('previous_mode')} → {row.get('mode')}")
         if event in ("device_pause_begin", "device_pause_end"):
             action = "暂停开始" if event.endswith("begin") else "暂停结束"
             lines.append(f"  {clock} {action}")

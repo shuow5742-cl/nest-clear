@@ -63,6 +63,14 @@ class ImageArchive:
         """检测成功后另行提交叠加图，与原图使用同一文件名前缀。"""
         return self._submit(image, targets, scan, task_id, raw_path)
 
+    def calibration(self, image: Any, tool: int, task_id: int, iteration: int,
+                    view: str, point: tuple[float, float] | None = None,
+                    target: tuple[float, float] | None = None, raw_path: str | None = None) -> str | None:
+        """提交对刀原图或针尖与目标像素叠加图，沿用同一限流队列。"""
+        stem = f"calib_{tool}_{task_id}_{iteration}_{view}_{self.events.clock().strftime('%H%M%S_%f')}"
+        overlay = None if point is None else [(point, target)]
+        return self._submit(image, overlay, iteration, task_id, raw_path, stem)
+
     def _submit(
         self,
         image: Any,
@@ -70,6 +78,7 @@ class ImageArchive:
         scan: int,
         task_id: int,
         raw_path: str | None,
+        stem: str | None = None,
     ) -> str | None:
         """无等待地申请图片槽位，队列满时记录丢弃。"""
         if not self.enabled:
@@ -79,7 +88,7 @@ class ImageArchive:
         if raw_path:
             relative = Path(raw_path.replace(f"_raw.{self.image_format}", f"_{kind}.{self.image_format}"))
         else:
-            stem = f"{self.events.tray_id}_{scan:03d}_{now.strftime('%H%M%S_%f')}"
+            stem = stem or f"{self.events.tray_id}_{scan:03d}_{now.strftime('%H%M%S_%f')}"
             path = (
                 daily_file(self.events.directory, "images", now.date()) / f"{stem}_{kind}.{self.image_format}"
             )
@@ -118,6 +127,16 @@ class ImageArchive:
                 if image.ndim == 2:
                     image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
                 for index, target in enumerate(targets, 1):
+                    if isinstance(target, tuple):
+                        point_uv, target_uv = target
+                        point = tuple(round(x) for x in point_uv)
+                        destination = tuple(round(x) for x in target_uv)
+                        cv2.circle(image, point, 5, (0, 0, 255), 2)
+                        cv2.circle(image, destination, 5, (0, 255, 0), 2)
+                        cv2.line(image, point, destination, (255, 0, 0), 2)
+                        text = f"du={target_uv[0] - point_uv[0]:.1f} dv={target_uv[1] - point_uv[1]:.1f} px"
+                        cv2.putText(image, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                        continue
                     pixel = target.pixel
                     point = (round(pixel.u), round(pixel.v))
                     cv2.circle(image, point, 5, (0, 0, 255), 2)

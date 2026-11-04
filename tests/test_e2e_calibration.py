@@ -202,3 +202,65 @@ def test_finish_save_failure(rig, monkeypatch):
     records = plc.start_tool_calibration(1, P0, timeout_s=5, finish=True)
     assert records[-1]["func_code"] == 131
     assert app.config.tools == old and (path / "tools.yaml").read_bytes() == before
+
+
+def test_calibration_record_and_report(rig):
+    """成功和识别失败的会话可由图片、摘要及日报完整追溯。"""
+    from datetime import date
+    from nest_clear.record.report import report
+
+    plc, app, path = rig
+    offset(app, (0.5, 0.3, 0.2))
+    success = plc.start_tool_calibration(1, P0, timeout_s=5, finish=True)
+    assert success[-1]["func_code"] == 130
+    plc.set_actual_xyz(P0)
+    app.calib_camera.cameras["front"].config["undetectable"] = True
+    failure = plc.start_tool_calibration(1, P0, timeout_s=5)
+    assert failure[-1]["func_code"] == 131
+    assert plc.wait_reply(plc.request(130), 5)["func_code"] == 999
+    app.archive.close()
+    directory = next((path / "runs").glob("????-??-??"))
+    rows = [json.loads(line) for line in (directory / "tooltip_summary.jsonl").read_text().splitlines()]
+    good, bad = rows
+    assert {"start_time", "end_time", "tool", "iterations", "result", "reason", "delta", "old_compensation", "new_compensation", "task_ids", "images"} <= good.keys()
+    assert good["result"] == "成功" and good["iterations"] == 1
+    assert good["delta"] == pytest.approx([0.5, 0.3, 0.2], abs=0.03)
+    assert good["old_compensation"] == pytest.approx([1, 2, 3])
+    assert good["new_compensation"] == pytest.approx([1.5, 2.3, 3.2], abs=0.03)
+    assert len(good["task_ids"]) == 3 and len(good["images"]) == 2
+    assert bad["result"] == "失败" and "无法识别针尖" in bad["reason"]
+    for capture in good["images"]:
+        for image_path in (*capture["raw"].values(), *capture["overlay"].values()):
+            assert image_path and (path / "runs" / image_path).is_file()
+            assert "calib_1_" in image_path
+    assert all((path / "runs" / image_path).is_file() for image_path in bad["images"][0]["raw"].values())
+    events = [json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()]
+    assert any(row["event"] == "tooltip_detect" and row["images"]["overlay"]["front"] for row in events)
+    assert any(row["event"] == "tooltip_failed" and row["images"][0]["raw"]["front"] for row in events)
+    text = report(path / "runs", date.fromisoformat(directory.name))
+    assert "工具标定：" in text and "迭代 1 次，成功" in text
+    assert "需要人看的：" in text and "对刀 131" in text and "无法识别针尖" in text
+    assert "模式 空闲 → 对刀中(工具1)" in text
+    attention = text.split("需要人看的：", 1)[1]
+    assert attention.count("Task_ID=5") == 1
+    assert "模式不允许：空闲 时收到 130（对刀完成），须先开始对应工具的对刀会话" in attention
+    assert "no dark component" not in text
+    assert "front" not in text
+    assert text.count("    错误码：TOOLTIP-FAILED；发生了什么：正面相机无法识别针尖：图像中未找到暗色针尖区域") == 2
+    assert text.count("    排查建议：检查背光与曝光，以及针尖是否在画面内。") == 2
+    assert "位置：对刀" not in text
+    failed_event = next(row for row in events if row["event"] == "tooltip_failed")
+    assert "位置：对刀" in failed_event["reason"]
+    print("\n" + text)
+
+
+def test_calibration_record_images_disabled(rig):
+    """关闭图片归档仍可完成对刀并写摘要。"""
+    plc, app, path = rig
+    app.archive.enabled = False
+    records = plc.start_tool_calibration(1, P0, timeout_s=5, finish=True)
+    assert records[-1]["func_code"] == 130
+    row = json.loads(next((path / "runs").glob("*/tooltip_summary.jsonl")).read_text())
+    assert row["result"] == "成功"
+    assert all(value is None for value in row["images"][0]["raw"].values())
+    assert all(value is None for value in row["images"][0]["overlay"].values())

@@ -13,6 +13,7 @@ from autoweaver.motion_policy.nodes.node import TreeNode
 
 from nest_clear.guard import GuardError
 from nest_clear.plan.scan_path import guard_position
+from nest_clear.record.summary import write_tooltip_summary
 from nest_clear.tooltip import SilhouetteTipDetector, check_quality, compute_compensation, is_aligned, solve_correction
 from nest_clear.tooltip.store import load_baseline, save_tools
 from .context import FlowContext
@@ -22,9 +23,9 @@ from .modes import Mode, transition
 logger = logging.getLogger("nest_clear.flow.calibration")
 
 
-def fail(reason: str) -> None:
+def fail(reason: str, hint: str = "检查对刀基准、相机和设备位置。") -> None:
     """将对刀业务错误交给子树的 131 出口。"""
-    raise GuardError("TOOLTIP-FAILED", reason, "对刀", "检查对刀基准、相机和设备位置。")
+    raise GuardError("TOOLTIP-FAILED", reason, "对刀", hint)
 
 
 def change_mode(bb: object, ctx: FlowContext, target: Mode, name: str) -> None:
@@ -91,6 +92,8 @@ class SaveCompensation(Instant):
         object.__setattr__(self.ctx.config, "tools", tuple(offsets))
         self.ctx.events.emit("tooltip_compensation", task_id=bb.read("task_id"), tool=tool,
                              old=old, new=new, delta=delta)
+        session.update(delta=delta, old_compensation=list(old), new_compensation=list(new))
+        write_tooltip_summary(self.ctx.events, session, "成功")
         change_mode(bb, self.ctx, Mode.IDLE, self.name)
         bb.write("tooltip_session", None, self.name)
         bb.write("tooltip_baseline", None, self.name)
@@ -102,6 +105,7 @@ class SaveCompensation(Instant):
 def finish_branch(ctx: FlowContext) -> TreeNode:
     """130 完成校验及保存；失败统一回 131。"""
     steps = [
+        RecordTask(ctx),
         CheckSession(),
         CallWorker(ctx.board, "plc", lambda bb: {"operation": "calibration_final",
                    "tool": bb.read("tooltip_session")["tool"]}, "tooltip_final", name="读取最终标定坐标"),
@@ -122,6 +126,11 @@ class StartCalibration(Instant):
         bb = self._blackboard
         tool = 1 if bb.read("request_func") == 100 else 2
         self.ctx.events.emit("tooltip_start", task_id=bb.read("task_id"), tool=tool)
+        session = {"tool": tool, "iterations": 0, "offset": False, "last_position": None,
+                   "ended": False, "start_time": self.ctx.events.clock().isoformat(),
+                   "task_ids": [bb.read("task_id")], "images": [], "delta": None,
+                   "old_compensation": list(self.ctx.config.tools[tool - 1]), "new_compensation": None}
+        bb.write("tooltip_session", session, self.name)
         if not self.ctx.config.tool_calibration.enabled:
             fail("对刀功能未启用（tool_calibration.enabled=false）")
         path = Path(self.ctx.config.tool_calibration.directory) / f"tool{tool}_baseline.yaml"
@@ -132,8 +141,40 @@ class StartCalibration(Instant):
         if baseline.tool_name != f"tool{tool}" or {v.name for v in baseline.views} != {"front", "side"}:
             fail(f"工具 {tool} 基准工具号或视图不匹配")
         bb.write("tooltip_baseline", baseline, self.name)
-        bb.write("tooltip_session", {"tool": tool, "iterations": 0, "offset": False,
-                                     "last_position": baseline.p0, "ended": False}, self.name)
+        session["last_position"] = baseline.p0
+        bb.write("tooltip_session", session, self.name)
+
+
+class RecordTask(Instant):
+    """将继续和结束请求加入当前对刀会话。"""
+    def __init__(self, ctx: FlowContext) -> None:
+        """绑定记录上下文。"""
+        super().__init__(name="记录对刀请求")
+        self.ctx = ctx
+
+    def perform(self) -> None:
+        session = self._blackboard.read("tooltip_session")
+        if session:
+            session["task_ids"].append(self._blackboard.read("task_id"))
+
+
+class ArchiveTips(Instant):
+    """采图后先提交两个原图，保证检测失败仍可追查。"""
+    def __init__(self, ctx: FlowContext) -> None:
+        """绑定图片归档器。"""
+        super().__init__(name="归档对刀原图")
+        self.ctx = ctx
+
+    def perform(self) -> None:
+        bb = self._blackboard
+        session = bb.read("tooltip_session")
+        task = bb.read("task_id")
+        iteration = len(session["images"]) + 1
+        paths = {"task_id": task, "iteration": iteration, "raw": {}, "overlay": {}}
+        archive = getattr(self.ctx.events, "archive", None)
+        for view, image in bb.read("tooltip_images").items():
+            paths["raw"][view] = archive.calibration(image, session["tool"], task, iteration, view) if archive else None
+        session["images"].append(paths)
 
 
 class CheckPosition(Instant):
@@ -176,8 +217,21 @@ class DetectTips(Instant):
         for view in ("front", "side"):
             detection = SilhouetteTipDetector(**self.ctx.config.tool_calibration.detection[view]).detect(images[view])
             if detection.point_uv is None:
-                fail(f"{view} 相机无法识别针尖：{detection.diagnostic}")
+                diagnostic = {
+                    "no dark component": "图像中未找到暗色针尖区域",
+                    "largest component is too small": "图像中的暗色针尖区域过小",
+                }.get(detection.diagnostic, "图像中未能识别有效针尖区域")
+                camera = "正面" if view == "front" else "侧面"
+                fail(f"{camera}相机无法识别针尖：{diagnostic}", "检查背光与曝光，以及针尖是否在画面内。")
             points[view] = tuple(float(x) for x in detection.point_uv)
+        session = bb.read("tooltip_session")
+        paths = session["images"][-1]
+        archive = getattr(self.ctx.events, "archive", None)
+        targets = {view.name: view.target_uv for view in bb.read("tooltip_baseline").views}
+        for view in ("front", "side"):
+            paths["overlay"][view] = archive.calibration(
+                images[view], session["tool"], bb.read("task_id"), paths["iteration"], view,
+                points[view], targets[view], paths["raw"].get(view)) if archive else None
         bb.write("tooltip_points", points, self.name)
 
 
@@ -209,6 +263,7 @@ class SolveTips(Instant):
         quality = check_quality(result, cfg.max_residual_mm, cfg.max_condition)
         disagreement = result.axis_disagreement.get("z", 0.0)
         self.ctx.events.emit("tooltip_detect", task_id=bb.read("task_id"), tool=bb.read("tooltip_session")["tool"],
+                             images=bb.read("tooltip_session")["images"][-1],
                              pixels=points, delta=delta.tolist(),
                              residuals_uv={k: v.tolist() for k, v in residuals.items()},
                              residuals_mm=quality.residuals_mm, condition_number=result.condition_number,
@@ -267,8 +322,13 @@ class CalibrationFailed(Instant):
         bb = self._blackboard
         reason = bb.read("error")
         logger.warning("对刀失败：%s", reason)
+        session = bb.read("tooltip_session")
         self.ctx.events.emit("tooltip_failed", task_id=bb.read("task_id"),
+                             tool=session["tool"] if session else None,
+                             images=session["images"] if session else [],
                              request_func=bb.read("request_func"), reason=reason)
+        if session:
+            write_tooltip_summary(self.ctx.events, session, "失败", str(reason))
         change_mode(bb, self.ctx, Mode.IDLE, self.name)
         bb.write("tooltip_session", None, self.name)
         bb.write("tooltip_baseline", None, self.name)
@@ -282,11 +342,13 @@ def calibration_branch(ctx: FlowContext, start: bool) -> TreeNode:
     steps = []
     if start:
         steps.append(StartCalibration(ctx))
+    else:
+        steps.append(RecordTask(ctx))
     steps.extend([
         CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", name="读取对刀实时坐标"),
         CheckPosition(ctx, start),
         CallWorker(ctx.board, "calib_camera", lambda bb: {}, "tooltip_images", name="采集对刀双视图"),
-        DetectTips(ctx), SolveTips(ctx), PrepareCalibrationReply(ctx),
+        ArchiveTips(ctx), DetectTips(ctx), SolveTips(ctx), PrepareCalibrationReply(ctx),
     ])
     return Fallback([Sequence(steps, name="对刀迭代"), CalibrationFailed(ctx)], name="对刀业务或 131")
 
