@@ -9,6 +9,7 @@ from typing import Any, NoReturn
 import yaml
 
 from .guard import GuardError
+from .tooltip.store import load_tools
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,22 @@ class VisionConfig:
 
 
 @dataclass(frozen=True)
+class ToolCalibrationConfig:
+    """双相机、检测器和对刀容差的配置。"""
+
+    directory: str
+    cameras: dict[str, dict[str, Any]]
+    detection: dict[str, dict[str, Any]]
+    position_tolerance_mm: float
+    tip_tolerance_mm: float
+    consistency_tolerance_mm: float
+    max_iterations: int
+    max_residual_mm: float
+    max_condition: float
+    z_disagreement_mm: float
+
+
+@dataclass(frozen=True)
 class Config:
     """冻结完整业务配置，避免运行时被各组件意外更改。"""
 
@@ -67,6 +84,7 @@ class Config:
     record_directory: str
     supervisor: SupervisorConfig
     vision: VisionConfig
+    tool_calibration: ToolCalibrationConfig
     image_enabled: bool = True
     image_format: str = "png"
     image_quality: int = 3
@@ -129,7 +147,7 @@ def _ip(value: Any, path: str) -> str:
     return text
 
 
-def load_config(path: str | Path) -> Config:
+def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     """读取 YAML 并校验所有字段和行程，供启动预检调用。"""
     try:
         with open(path, encoding="utf-8") as file:
@@ -146,7 +164,7 @@ def load_config(path: str | Path) -> Config:
             "scan",
             "arrival_tolerance_mm",
             "pick_depth_z",
-            "tools",
+            "tool_calibration",
             "travel",
             "camera",
             "record",
@@ -190,7 +208,6 @@ def load_config(path: str | Path) -> Config:
     scan = Scan(
         corners, _number(s["step_x"], "scan.step_x", True), _number(s["step_y"], "scan.step_y", True), z
     )
-    tools = _mapping(root["tools"], "tools", ["tool1", "tool2"])
     camera = _mapping(root["camera"], "camera", ["sn"])
     record_data = root["record"]
     if isinstance(record_data, dict):
@@ -226,7 +243,6 @@ def load_config(path: str | Path) -> Config:
         _fail("record", "压缩质量或保留天数无效")
     if type(record["image_queue_size"]) is not int or record["image_queue_size"] < 1:
         _fail("record.image_queue_size", "图片队列容量必须为正整数")
-    offsets = tuple(_vector(tools[key], f"tools.{key}", 3) for key in ("tool1", "tool2"))
     sup = _mapping(
         root["supervisor"], "supervisor", ["poll_s", "watchdog_s", "child_command", "startup_grace_s"]
     )
@@ -257,6 +273,64 @@ def load_config(path: str | Path) -> Config:
     vision = VisionConfig(
         v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"]
     )
+    tc = _mapping(root["tool_calibration"], "tool_calibration", [
+        "directory", "cameras", "detection", "position_tolerance_mm", "tip_tolerance_mm",
+        "consistency_tolerance_mm", "max_iterations", "max_residual_mm", "max_condition",
+        "z_disagreement_mm",
+    ])
+    directory = _string(tc["directory"], "tool_calibration.directory")
+    cameras = _mapping(tc["cameras"], "tool_calibration.cameras", ["front", "side"])
+    detection = _mapping(tc["detection"], "tool_calibration.detection", ["front", "side"])
+    for name in ("front", "side"):
+        camera_config = cameras[name]
+        if not isinstance(camera_config, dict):
+            _fail(f"tool_calibration.cameras.{name}", "应为映射")
+        backend = camera_config.get("backend")
+        if backend == "uvc":
+            _mapping(camera_config, f"tool_calibration.cameras.{name}", ["backend", "device"])
+            if type(camera_config["device"]) is not int or camera_config["device"] < 0:
+                _fail(f"tool_calibration.cameras.{name}.device", "设备索引应为非负整数")
+        elif backend == "daheng":
+            _mapping(camera_config, f"tool_calibration.cameras.{name}", ["backend", "sn"])
+            _string(camera_config["sn"], f"tool_calibration.cameras.{name}.sn")
+        elif backend == "mock":
+            _mapping(camera_config, f"tool_calibration.cameras.{name}", ["backend"])
+        else:
+            _fail(f"tool_calibration.cameras.{name}.backend", "应为 mock、uvc 或 daheng")
+        det = _mapping(detection[name], f"tool_calibration.detection.{name}", ["direction", "threshold", "min_area"])
+        direction = _vector(det["direction"], f"tool_calibration.detection.{name}.direction", 2)
+        if not any(direction):
+            _fail(f"tool_calibration.detection.{name}.direction", "方向不能为零")
+        threshold = _number(det["threshold"], f"tool_calibration.detection.{name}.threshold")
+        if not 0 <= threshold <= 255 or type(det["min_area"]) is not int or det["min_area"] < 1:
+            _fail(f"tool_calibration.detection.{name}", "阈值应在 0 到 255 之间，面积应为正整数")
+    if type(tc["max_iterations"]) is not int or tc["max_iterations"] < 1:
+        _fail("tool_calibration.max_iterations", "应为正整数")
+    max_condition = _number(tc["max_condition"], "tool_calibration.max_condition", True)
+    if max_condition < 1:
+        _fail("tool_calibration.max_condition", "应大于等于 1")
+    tool_calibration = ToolCalibrationConfig(
+        directory, cameras, detection,
+        _number(tc["position_tolerance_mm"], "tool_calibration.position_tolerance_mm", True),
+        _number(tc["tip_tolerance_mm"], "tool_calibration.tip_tolerance_mm", True),
+        _number(tc["consistency_tolerance_mm"], "tool_calibration.consistency_tolerance_mm", True),
+        tc["max_iterations"],
+        _number(tc["max_residual_mm"], "tool_calibration.max_residual_mm", True),
+        max_condition,
+        _number(tc["z_disagreement_mm"], "tool_calibration.z_disagreement_mm", True),
+    )
+    tools_path = Path(directory) / "tools.yaml"
+    try:
+        if not require_tools and not tools_path.exists():
+            stored = {key: {"offset_xyz": [0.0, 0.0, 0.0]} for key in ("tool1", "tool2")}
+        else:
+            stored = load_tools(tools_path)["tools"]
+    except GuardError as exc:
+        raise GuardError(
+            "CONFIG-TOOLS", f"无法加载工具补偿 {tools_path}：{exc}", "启动预检",
+            "请用 python -m nest_clear.tools.tooltip_baseline 建立工具基准及补偿。",
+        ) from exc
+    offsets = tuple(tuple(stored[key]["offset_xyz"]) for key in ("tool1", "tool2"))
     return Config(
         plc,
         scan,
@@ -268,6 +342,7 @@ def load_config(path: str | Path) -> Config:
         _string(record["directory"], "record.directory"),
         supervisor,
         vision,
+        tool_calibration,
         record["image_enabled"],
         record["image_format"],
         record["image_quality"],

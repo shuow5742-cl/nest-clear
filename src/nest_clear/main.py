@@ -30,6 +30,7 @@ from nest_clear.vision.geometry import load_calibration
 from nest_clear.workers.camera import CameraWorker
 from nest_clear.workers.plc import PlcWorker
 from nest_clear.workers.vision import VisionWorker
+from nest_clear.tooltip.store import load_baseline
 
 logger = logging.getLogger("nest_clear.main")
 ROOT = Path(__file__).resolve().parents[2]
@@ -87,6 +88,24 @@ class Application:
     ) -> None:
         """完成配置、路径、标定、PLC 和相机预检后装配 Workers。"""
         self.config = config
+        for tool in (1, 2):
+            baseline_path = Path(config.tool_calibration.directory) / f"tool{tool}_baseline.yaml"
+            try:
+                baseline_data = yaml.safe_load(baseline_path.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError) as exc:
+                raise GuardError(
+                    "TOOLTIP-BASELINE", f"读取工具 {tool} 基准失败：{exc}", str(baseline_path),
+                    "请用 python -m nest_clear.tools.tooltip_baseline 建立基准。",
+                ) from exc
+            if isinstance(baseline_data, dict) and baseline_data.get("status") == "占位，未标定":
+                logger.warning("工具 %s 基准为占位，未建立基准：%s", tool, baseline_path)
+            else:
+                baseline = load_baseline(baseline_path)
+                if baseline.tool_name != f"tool{tool}":
+                    raise GuardError(
+                        "TOOLTIP-BASELINE", f"基准工具号不匹配：{baseline.tool_name}", str(baseline_path),
+                        "请重新建立对应工具的基准。",
+                    )
         self.events = events or EventRecorder(config.record_directory)
         config_bytes = Path(config_path).read_bytes()
         calibration_path = Path(config.vision.calibration)

@@ -99,6 +99,33 @@ def test_invalid_float_and_handshake_context(contract, value):
         assert text in str(captured.value)
 
 
+@pytest.mark.parametrize("tool", [1, 2])
+def test_calibration_reply_write_order(contract, tool):
+    """两把工具的标定坐标均先写数据区，再提交功能码和任务号。"""
+    class RecordingIO:
+        """记录写入顺序供握手测试检查。"""
+
+        def __init__(self):
+            """建立空写入记录。"""
+            self.writes = []
+
+        def write_real32_block(self, address, values):
+            """记录坐标块。"""
+            self.writes.append((address, values))
+
+        def write_u16(self, address, value):
+            """记录单个寄存器。"""
+            self.writes.append((address, value))
+
+    io = RecordingIO()
+    Handshake(io, contract).write_reply(42, 100, {f"calibration{tool}_xyz": [1, 2, 3]})
+    assert io.writes == [
+        (contract[f"calibration{tool}_x"].address, [1, 2, 3]),
+        (contract["reply_func"].address, 100),
+        (contract["result_id"].address, 42),
+    ]
+
+
 def test_real_timeout(contract):
     """真实 TCP 服务接受连接但不应答，验证 pymodbus 超时分类。"""
     with socket.socket() as server:

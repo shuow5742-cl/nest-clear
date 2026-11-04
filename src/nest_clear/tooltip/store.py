@@ -128,6 +128,24 @@ def save_baseline(
     _write(path, data, tool, "baseline", old, source, task_id)
 
 
+def initialize_tools(path: str | Path) -> None:
+    """首次建立补偿文件；已有文件绝不覆盖，供基准工具使用。"""
+    path = Path(path)
+    data = {
+        "version": 1,
+        "tools": {
+            name: {"offset_xyz": [0.0, 0.0, 0.0], "updated_at": "占位，未标定", "source": "占位，未标定"}
+            for name in ("tool1", "tool2")
+        },
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8") as stream:
+            yaml.safe_dump(data, stream, allow_unicode=True, sort_keys=False)
+    except OSError as exc:
+        raise _error(f"初始化 {path} 失败：{exc}") from exc
+
+
 def save_tools(
     path: str | Path, tool: int, offset_xyz: object, *, source: str, task_id: int | None = None
 ) -> None:

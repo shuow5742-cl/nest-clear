@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with open(args.config, encoding="utf-8") as stream:
             config = yaml.safe_load(stream)
-        app = load_config(args.app_config)
+        app = load_config(args.app_config, require_tools=False)
         configure(app.record_directory, "tool")
         events = EventRecorder(app.record_directory, process="tool")
         events.emit("tooltip_start", tool=args.tool, verify=args.verify, replay=args.replay)
@@ -225,6 +225,9 @@ def main(argv: list[str] | None = None) -> int:
                     or input("重置当前补偿为基准补偿？[Y/n]：").strip().lower() in ("", "y", "yes")
                 )
                 if reset:
+                    tools_path = calibration / "tools.yaml"
+                    if not tools_path.exists():
+                        store.initialize_tools(tools_path)
                     store.save_tools(
                         calibration / "tools.yaml", args.tool, baseline.offset_xyz, source="baseline_tool"
                     )

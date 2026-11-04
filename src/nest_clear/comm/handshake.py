@@ -40,7 +40,7 @@ class Handshake:
         blocks: list[tuple[int, list[float]]] = []
         for name, values in payload.items():
             where = f"{context}，坐标名={name!r}"
-            if name not in ("scan_xyz", "pick1_xyz", "pick2_xyz"):
+            if name not in ("scan_xyz", "pick1_xyz", "pick2_xyz", "calibration1_xyz", "calibration2_xyz"):
                 raise GuardError("HANDSHAKE-INVALID", f"未知坐标名，实际值 {values!r}", where, "检查坐标名是否与契约一致。")
             if not isinstance(values, (tuple, list)) or len(values) != 3:
                 raise GuardError("HANDSHAKE-INVALID", f"坐标应包含三个轴，实际 {values!r}", where, "按 X、Y、Z 顺序提供三个有限数字。")

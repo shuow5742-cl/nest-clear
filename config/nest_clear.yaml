@@ -14,9 +14,6 @@ scan:  # 模组坐标系下的扫描范围与步距，单位 mm
   z: 0.0  # 扫描拍照高度，单位 mm，按现场模组坐标填写
 arrival_tolerance_mm: 0.1  # 各轴实时位置与下发扫描位置允许的最大绝对差，单位 mm
 pick_depth_z: 0.0  # 下针深度的模组 Z 坐标，单位 mm，按现场测量填写
-tools:  # 工具补偿，单位 mm：pick_xy = 目标xy + 工具xy，pick_z = pick_depth_z + 工具z（见 design.md §8），标定完成前手工填写
-  tool1: [0.0, 0.0, 0.0]  # 一号工具 XYZ 补偿，单位 mm
-  tool2: [0.0, 0.0, 0.0]  # 二号工具 XYZ 补偿，单位 mm
 travel:  # 模组各轴允许的最小和最大坐标，单位 mm，按设备行程填写
   x: [-500.0, 500.0]  # X 轴最小、最大坐标，单位 mm
   y: [-500.0, 500.0]  # Y 轴最小、最大坐标，单位 mm
@@ -42,3 +39,19 @@ vision:  # 首期使用固定像素占位检测器，真实算法采图后替换
   pixels: []  # 固定 [u, v, score]；空列表表示无目标
   dedup_radius_mm: 1.0
   max_targets: 10
+
+tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把工具的基准
+  directory: config/calibration  # 基准和补偿文件目录
+  cameras:  # 正面看 X/Z，侧面看 Y/Z
+    front: {backend: uvc, device: 0}  # 正面设备
+    side: {backend: uvc, device: 1}  # 侧面设备
+  detection:  # 剪影极值方向、灰度阈值与最小面积
+    front: {direction: [0, 1], threshold: 127, min_area: 5}
+    side: {direction: [0, 1], threshold: 127, min_area: 5}
+  position_tolerance_mm: 0.05  # 运动到位容差，mm
+  tip_tolerance_mm: 0.03  # 针尖对准容差，mm
+  consistency_tolerance_mm: 0.01  # 最终坐标一致性容差，mm
+  max_iterations: 10  # 最大偏移次数
+  max_residual_mm: 0.03  # 投影残差告警阈值，mm
+  max_condition: 100.0  # 条件数告警阈值
+  z_disagreement_mm: 0.03  # 两视图 Z 分歧告警阈值，mm
