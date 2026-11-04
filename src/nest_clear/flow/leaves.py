@@ -13,6 +13,7 @@ from autoweaver.motion_policy.nodes.node import Status, TreeNode
 from nest_clear.config import Config
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.events import EventRecorder
+from .modes import Mode, transition
 
 logger = logging.getLogger("nest_clear.flow")
 REQUEST_NAMES = {1: "扫描到位或请求首个扫描位", 60: "挑取完成下一步"}
@@ -293,6 +294,19 @@ class CommitReply(Instant):
         """只有 PLC 确认写入后才记录应答和盘结束。"""
         bb = self._blackboard
         func = bb.read("reply_func")
+        current = bb.read("mode")
+        target = None
+        if func == 1 and current == Mode.IDLE:
+            target = Mode.PICKING
+        elif func == 9 and current == Mode.PICKING:
+            target = Mode.IDLE
+        if target is not None:
+            bb.write("mode", transition(current, target), self.name)
+            self.events.emit(
+                "mode_change", previous_mode=current.value, mode=target.value,
+                task_id=bb.read("task_id"), request_func=bb.read("request_func"),
+                scan_index=bb.read("next_index"),
+            )
         if func in (1, 3):
             bb.write("last_action", func, self.name)
         self.events.emit(

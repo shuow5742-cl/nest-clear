@@ -100,6 +100,11 @@ def test_full_tray_and_wrap(running: tuple[FakePLC, Application, SequenceDetecto
     replies = [event for event in events if event["event"] == "reply"]
     assert [event["tool"] for event in replies if event["func"] == 3] == [1, 2]
     assert len([event for event in events if event["event"] == "tray_end"]) == 1
+    changes = [event for event in events if event["event"] == "mode_change"]
+    assert [(event["previous_mode"], event["mode"]) for event in changes] == [
+        ("空闲", "挑毛中"), ("挑毛中", "空闲")
+    ]
+    assert all(event["tray_id"] and event["task_id"] and "scan_index" in event for event in changes)
 
 
 def test_unknown_and_arrival_error(running: tuple[FakePLC, Application, SequenceDetector, Path]) -> None:

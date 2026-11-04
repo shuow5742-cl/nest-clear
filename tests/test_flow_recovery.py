@@ -7,7 +7,9 @@ import time
 import pytest
 
 from nest_clear.config import load_config
-from nest_clear.flow.batch import BRANCHES, format_tree
+from nest_clear.flow.batch import format_tree
+from nest_clear.flow.dispatch import BRANCHES
+from nest_clear.flow.modes import Mode
 from nest_clear.flow.leaves import PrepareScan
 from nest_clear.guard import GuardError
 from nest_clear.main import Application
@@ -125,7 +127,7 @@ def test_reply_failure_exhausts_attempts(prepared: tuple, monkeypatch: pytest.Mo
 def test_tree_log_and_registered_branch(prepared: tuple, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """新增分发表项即可使功能码 77 执行对应子树。"""
     plc, app = prepared
-    monkeypatch.setitem(BRANCHES, 77, lambda ctx: PrepareScan(ctx.path))
+    monkeypatch.setitem(BRANCHES, 77, (frozenset((Mode.IDLE,)), lambda ctx: PrepareScan(ctx.path)))
     task = plc.request(77)
     drive_until(app, lambda: plc.io.read("result_id") == task)
     assert plc.io.read("reply_func") == 1
@@ -133,7 +135,7 @@ def test_tree_log_and_registered_branch(prepared: tuple, monkeypatch: pytest.Mon
     startup = "\n".join(record.message for record in caplog.get_records("setup"))
     assert "主程序行为树结构" in startup
     assert "RepeatUntil: 一盘直到结束" in startup
-    assert "Fallback: 功能码分发" in startup
+    assert "Fallback: 模式检查+功能码分发" in startup
     assert "Sequence: 功能码 60" in startup
 
 
@@ -171,3 +173,53 @@ def test_poll_timeout_config_default_and_validation(tmp_path: Path) -> None:
     config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(GuardError):
         load_config(config_path)
+
+
+def test_mode_rejection_preserves_picking_state(prepared: tuple, caplog: pytest.LogCaptureFixture) -> None:
+    """挑毛期间拒绝对刀，保留目标和工具顺序并可继续完成本盘。"""
+    import json
+    from nest_clear.vision.detector import PixelTarget
+
+    plc, app = prepared
+    # 使用启动时的检测器，让首个扫描位产生可观察的待挑目标。
+    vision = next(worker for worker in app.clock._workers if hasattr(worker, "detector"))
+    vision.detector.detect = lambda image: [PixelTarget(640, 480, 0.9), PixelTarget(660, 480, 0.8)]
+    task = plc.request(1)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
+    scan = plc.wait_reply(task, 5)["scan_xyz"]
+    plc.set_actual_xyz(scan)
+    task = plc.request(1)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
+    bb = app.handle.batch.blackboard
+    before = (bb.read("next_index"), list(bb.read("targets")), bb.read("tool_index"))
+    task = plc.request(100)
+    with caplog.at_level(logging.WARNING):
+        drive_until(app, lambda: plc.io.read("result_id") == task)
+    assert plc.io.read("reply_func") == 999
+    assert (bb.read("next_index"), list(bb.read("targets")), bb.read("tool_index")) == before
+    assert "挑毛进行中收到对刀指令" in caplog.text
+    task = plc.request(60)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
+    assert plc.io.read("reply_func") == 3
+    task = plc.request(60)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
+    assert plc.io.read("reply_func") == 1
+    plc.set_actual_xyz(plc.wait_reply(task, 5)["scan_xyz"])
+    task = plc.request(1)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
+    assert plc.io.read("reply_func") in (1, 3, 9)
+    rows = [json.loads(line) for line in next(Path(app.config.record_directory).glob("*/events.jsonl")).read_text().splitlines()]
+    rejected = next(row for row in rows if row["event"] == "mode_rejected")
+    assert rejected["mode"] == "挑毛中" and rejected["request_func"] == 100
+    assert rejected["tray_id"] and rejected["scan_index"] == before[0]
+    assert "重新初始化" in rejected["reason"]
+
+
+@pytest.mark.parametrize("code", [110, 120, 130])
+def test_idle_rejects_calibration_continuation(prepared: tuple, code: int) -> None:
+    """无对刀会话时拒绝后续功能码。"""
+    plc, app = prepared
+    task = plc.request(code)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
+    assert plc.io.read("reply_func") == 999
+    assert app.handle.batch.blackboard.read("mode") == Mode.IDLE
