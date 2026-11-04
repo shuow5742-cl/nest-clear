@@ -125,11 +125,33 @@ class FakePLC:
         while time.monotonic() < deadline:
             if self.io.read("result_id") == task_id:
                 result: dict[str, Any] = {"task_id": task_id, "func_code": self.io.read("reply_func")}
-                for name in ("scan", "pick1", "pick2"):
+                for name in ("scan", "pick1", "pick2", "calibration1", "calibration2"):
                     result[name + "_xyz"] = self.io.read_real32_block(self.contract[name + "_x"].address, 3)
                 return result
             time.sleep(0.01)
         raise TimeoutError(f"等待任务 {task_id} 应答超时")
+
+    def start_tool_calibration(
+        self, tool: int, actual_xyz: Sequence[float], timeout_s: float = 3,
+        position_error: Sequence[float] = (0, 0, 0),
+    ) -> list[dict[str, Any]]:
+        """驱动对刀至结束；每次偏移可注入固定的定位误差。"""
+        if tool not in (1, 2) or len(position_error) != 3:
+            raise ValueError("工具号或定位误差无效")
+        self.set_actual_xyz(actual_xyz)
+        request_func = 100 if tool == 1 else 101
+        records = []
+        while True:
+            task_id = self.request(request_func)
+            reply = self.wait_reply(task_id, timeout_s)
+            records.append({"request_func": request_func, **reply})
+            if reply["func_code"] in (111, 121, 131, 999):
+                return records
+            if reply["func_code"] not in ((100, 110) if tool == 1 else (101, 120)):
+                raise ValueError(f"对刀收到未处理的功能码 {reply['func_code']}")
+            xyz = reply[f"calibration{tool}_xyz"]
+            self.set_actual_xyz([a + b for a, b in zip(xyz, position_error)])
+            request_func = 110 if tool == 1 else 120
 
     def drive_tray(self, timeout_s: float = 3) -> list[dict[str, Any]]:
         """驱动一盘请求；按应答模拟到位或挑取完成，返回交互记录。"""
