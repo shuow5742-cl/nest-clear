@@ -139,3 +139,5 @@ bit7 初始化中 bit8 初始化完成 bit9 信息提示 bit10 一般报警 bit1
 6. 补偿：Δ = P_final − P0ᵢ；新 X/Y 补偿 = 基准 X/Y 补偿 + Δxy；新下针深度偏移 = 基准值 + Δz。
    保存到 `config/calibration/tools.yaml`：原子写入，写前备份旧版，追加历史记录（时间、工具号、P_final、Δ、新旧补偿）；运行中的主程序立即使用新值。
 7. 标定可在一盘中途发生，不丢失该盘进度（扫描序号、目标队列、工具交替状态）。通信/未知功能码仍回 999。
+
+对刀算法及接口说明见 [docs/tooltip.md](tooltip.md)，实现位于 `src/nest_clear/tooltip/`。
