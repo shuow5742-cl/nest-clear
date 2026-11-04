@@ -41,6 +41,7 @@ vision:  # 首期使用固定像素占位检测器，真实算法采图后替换
   max_targets: 10
 
 tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把工具的基准
+  enabled: true  # false 时不打开对刀相机；对刀功能码回 131 的处理由后续任务实现
   directory: config/calibration  # 基准和补偿文件目录
   cameras:  # 正面看 X/Z，侧面看 Y/Z
     front: {backend: uvc, device: 0}  # 正面设备

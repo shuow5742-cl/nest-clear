@@ -101,6 +101,7 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
     with FakePLC() as plc:
         config["plc"].update(ip=plc.host, port=plc.port, timeout_s=1)
         config["record"]["directory"] = str(tmp_path / "runs")
+        config["tool_calibration"]["enabled"] = False
         config["vision"].update(
             camera_backend="mock",
             calibration=str(ROOT / "config/calibration/camera.yaml"),

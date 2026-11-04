@@ -28,6 +28,7 @@ def prepared(tmp_path: Path, caplog: pytest.LogCaptureFixture):
             config,
             plc=replace(config.plc, ip=plc.host, port=plc.port),
             vision=replace(config.vision, camera_backend="mock"),
+            tool_calibration=replace(config.tool_calibration, enabled=False),
             record_directory=str(tmp_path),
         )
         app = Application(config, ROOT / "config/nest_clear.yaml")

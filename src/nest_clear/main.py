@@ -28,6 +28,7 @@ from nest_clear.supervisor.gate import SupervisorGate
 from nest_clear.vision.detector import PixelTarget, StubDetector
 from nest_clear.vision.geometry import load_calibration
 from nest_clear.workers.camera import CameraWorker
+from nest_clear.workers.calib_camera import CalibCameraWorker
 from nest_clear.workers.plc import PlcWorker
 from nest_clear.workers.vision import VisionWorker
 from nest_clear.tooltip.store import load_baseline
@@ -143,6 +144,7 @@ class Application:
         self.io = PLCClient(config.plc.ip, config.plc.port, config.plc.timeout_s, contract)
         self.plc = PlcWorker(Handshake(self.io, contract))
         self.camera = None
+        self.calib_camera = None
         self.clock = None
         try:
             baseline = self.plc.initialize()
@@ -150,6 +152,9 @@ class Application:
             self.tracker = RequestTracker(baseline)
             self.camera = CameraWorker(config.vision.camera_backend, config.camera_sn, camera)
             self.camera.open()
+            if config.tool_calibration.enabled:
+                self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras)
+                self.calib_camera.open()
             detector = detector or StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels])
             vision = VisionWorker(
                 detector, calibration, config.vision.dedup_radius_mm, config.vision.max_targets
@@ -158,15 +163,20 @@ class Application:
             self.clock = BTClock(self.board)
             for worker in (self.plc, self.camera, vision):
                 self.clock.attach_worker(worker)
+            if self.calib_camera is not None:
+                self.clock.attach_worker(self.calib_camera)
             self.handle = None
             context = FlowContext(self.board, config, self.path, self.tracker, self.events)
             logger.info("主程序行为树结构：\n%s", format_tree(build_tree(context)))
         except BaseException:
             if self.clock is not None:
                 self.clock.shutdown()
-            elif self.camera is not None:
+            if self.calib_camera is not None:
+                self.calib_camera.on_stop()
+            if self.camera is not None:
                 self.camera.camera.close()
             self.io.close()
+            self.archive.close()
             raise
 
     def mark(self, event: str, **fields: Any) -> None:

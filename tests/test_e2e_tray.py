@@ -44,6 +44,7 @@ def running(tmp_path: Path) -> Iterator[tuple[FakePLC, Application, SequenceDete
             record_directory=str(tmp_path),
             tools=((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)),
             vision=replace(config.vision, camera_backend="mock"),
+            tool_calibration=replace(config.tool_calibration, enabled=False),
         )
         detector = SequenceDetector()
         app = Application(config, ROOT / "config/nest_clear.yaml", detector=detector)
@@ -138,6 +139,7 @@ def test_nonzero_baseline_ignored(tmp_path: Path, caplog: pytest.LogCaptureFixtu
             plc=replace(config.plc, ip=plc.host, port=plc.port),
             record_directory=str(tmp_path),
             vision=replace(config.vision, camera_backend="mock"),
+            tool_calibration=replace(config.tool_calibration, enabled=False),
         )
         app = Application(config, ROOT / "config/nest_clear.yaml")
         try:

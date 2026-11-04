@@ -68,6 +68,7 @@ class ToolCalibrationConfig:
     max_residual_mm: float
     max_condition: float
     z_disagreement_mm: float
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -273,11 +274,16 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     vision = VisionConfig(
         v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"]
     )
-    tc = _mapping(root["tool_calibration"], "tool_calibration", [
+    tc_data = root["tool_calibration"]
+    if isinstance(tc_data, dict) and "enabled" not in tc_data:
+        tc_data = {**tc_data, "enabled": True}
+    tc = _mapping(tc_data, "tool_calibration", [
         "directory", "cameras", "detection", "position_tolerance_mm", "tip_tolerance_mm",
         "consistency_tolerance_mm", "max_iterations", "max_residual_mm", "max_condition",
-        "z_disagreement_mm",
+        "z_disagreement_mm", "enabled",
     ])
+    if type(tc["enabled"]) is not bool:
+        _fail("tool_calibration.enabled", "应为布尔值")
     directory = _string(tc["directory"], "tool_calibration.directory")
     cameras = _mapping(tc["cameras"], "tool_calibration.cameras", ["front", "side"])
     detection = _mapping(tc["detection"], "tool_calibration.detection", ["front", "side"])
@@ -318,6 +324,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _number(tc["max_residual_mm"], "tool_calibration.max_residual_mm", True),
         max_condition,
         _number(tc["z_disagreement_mm"], "tool_calibration.z_disagreement_mm", True),
+        tc["enabled"],
     )
     tools_path = Path(directory) / "tools.yaml"
     try:
