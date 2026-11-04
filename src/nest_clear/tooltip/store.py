@@ -64,10 +64,14 @@ def load_tools(path: str | Path) -> dict:
 
 
 def _write(
-    path: Path, data: dict, tool: int, action: str, old: object, source: str, task_id: int | None
+    path: Path, data: dict, tool: int, action: str, old: object, source: str, task_id: int | None,
+    details: dict | None = None,
 ) -> None:
     """同目录原子替换、保留旧版，并追加审计历史。"""
     temporary = None
+    history_position = None
+    history_path = path.parent / "tools_history.jsonl"
+    history_existed = history_path.exists()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now().astimezone()
@@ -81,7 +85,6 @@ def _write(
         if path.exists():
             backup = path.with_name(path.name + ".bak." + now.strftime("%Y%m%d%H%M%S%f"))
             shutil.copy2(path, backup)
-        os.replace(temporary, path)
         row = {
             "timestamp": now.isoformat(),
             "tool": tool,
@@ -90,11 +93,27 @@ def _write(
             "new": data,
             "source": source,
         }
+        if details is not None:
+            row.update(details)
         if task_id is not None:
             row["Task_ID"] = task_id
-        with (path.parent / "tools_history.jsonl").open("a", encoding="utf-8") as stream:
+        with history_path.open("a+", encoding="utf-8") as stream:
+            stream.seek(0, os.SEEK_END)
+            history_position = stream.tell()
             stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
     except (OSError, yaml.YAMLError, TypeError, ValueError) as exc:
+        if history_position is not None:
+            try:
+                if history_existed:
+                    with history_path.open("r+", encoding="utf-8") as stream:
+                        stream.truncate(history_position)
+                else:
+                    history_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise _error(f"保存 {path} 失败：{exc}") from exc
     finally:
         if temporary is not None:
@@ -147,7 +166,8 @@ def initialize_tools(path: str | Path) -> None:
 
 
 def save_tools(
-    path: str | Path, tool: int, offset_xyz: object, *, source: str, task_id: int | None = None
+    path: str | Path, tool: int, offset_xyz: object, *, source: str, task_id: int | None = None,
+    details: dict | None = None,
 ) -> None:
     """更新一把工具的补偿，另一把保持不变。"""
     if tool not in (1, 2) or not isinstance(source, str) or not source.strip():
@@ -166,4 +186,4 @@ def save_tools(
         "updated_at": datetime.now().astimezone().isoformat(),
         "source": source,
     }
-    _write(path, data, tool, "offset", old, source, task_id)
+    _write(path, data, tool, "offset", old, source, task_id, details)

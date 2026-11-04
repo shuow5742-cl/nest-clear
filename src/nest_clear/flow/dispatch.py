@@ -7,7 +7,7 @@ from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 from autoweaver.motion_policy.nodes.node import TreeNode
 
-from .calibration import calibration_placeholder, start_branch, continue_branch
+from .calibration import finish_branch, start_branch, continue_branch
 from .context import FlowContext
 from .leaves import Instant, Predicate, PrepareError
 from .modes import Mode
@@ -23,7 +23,7 @@ BRANCHES: dict[int, Branch] = {
     101: (frozenset((Mode.IDLE,)), start_branch),
     110: (frozenset((Mode.CALIBRATING_1,)), continue_branch),
     120: (frozenset((Mode.CALIBRATING_2,)), continue_branch),
-    130: (frozenset((Mode.CALIBRATING_1, Mode.CALIBRATING_2)), calibration_placeholder),
+    130: (frozenset((Mode.CALIBRATING_1, Mode.CALIBRATING_2)), finish_branch),
 }
 
 

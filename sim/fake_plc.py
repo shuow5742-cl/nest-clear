@@ -112,6 +112,13 @@ class FakePLC:
         words = [word for value in xyz for word in encode_real32(value)]
         self._set_registers(self.contract["actual_x"].address, words)
 
+    def set_calibration_final(self, tool: int, xyz: Sequence[float]) -> None:
+        """写入工具的最终标定反馈坐标。"""
+        if tool not in (1, 2) or len(xyz) != 3:
+            raise ValueError("工具号或最终坐标无效")
+        words = [word for value in xyz for word in encode_real32(value)]
+        self._set_registers(self.contract[f"calibration{tool}_feedback_x"].address, words)
+
     def request(self, func: int) -> int:
         """先写功能码再递增任务编号，让编号变化成为请求信号。"""
         self.task_id = self.task_id % self.wrap + 1
@@ -133,7 +140,8 @@ class FakePLC:
 
     def start_tool_calibration(
         self, tool: int, actual_xyz: Sequence[float], timeout_s: float = 3,
-        position_error: Sequence[float] = (0, 0, 0),
+        position_error: Sequence[float] = (0, 0, 0), *, finish: bool = False,
+        final_error: Sequence[float] = (0, 0, 0),
     ) -> list[dict[str, Any]]:
         """驱动对刀至结束；每次偏移可注入固定的定位误差。"""
         if tool not in (1, 2) or len(position_error) != 3:
@@ -141,15 +149,22 @@ class FakePLC:
         self.set_actual_xyz(actual_xyz)
         request_func = 100 if tool == 1 else 101
         records = []
+        final_xyz = actual_xyz
         while True:
             task_id = self.request(request_func)
             reply = self.wait_reply(task_id, timeout_s)
             records.append({"request_func": request_func, **reply})
+            if reply["func_code"] in (111, 121) and finish:
+                self.set_calibration_final(tool, [a + b for a, b in zip(final_xyz, final_error)])
+                task_id = self.request(130)
+                records.append({"request_func": 130, **self.wait_reply(task_id, timeout_s)})
+                return records
             if reply["func_code"] in (111, 121, 131, 999):
                 return records
             if reply["func_code"] not in ((100, 110) if tool == 1 else (101, 120)):
                 raise ValueError(f"对刀收到未处理的功能码 {reply['func_code']}")
             xyz = reply[f"calibration{tool}_xyz"]
+            final_xyz = xyz
             self.set_actual_xyz([a + b for a, b in zip(xyz, position_error)])
             request_func = 110 if tool == 1 else 120
 

@@ -13,8 +13,8 @@ from autoweaver.motion_policy.nodes.node import TreeNode
 
 from nest_clear.guard import GuardError
 from nest_clear.plan.scan_path import guard_position
-from nest_clear.tooltip import SilhouetteTipDetector, check_quality, is_aligned, solve_correction
-from nest_clear.tooltip.store import load_baseline
+from nest_clear.tooltip import SilhouetteTipDetector, check_quality, compute_compensation, is_aligned, solve_correction
+from nest_clear.tooltip.store import load_baseline, save_tools
 from .context import FlowContext
 from .leaves import CallWorker, Instant
 from .modes import Mode, transition
@@ -37,19 +37,78 @@ def change_mode(bb: object, ctx: FlowContext, target: Mode, name: str) -> None:
                         scan_index=bb.read("next_index"))
 
 
-class CalibrationUnavailable(Instant):
-    """130 仍使用原有占位行为。"""
+class CheckSession(Instant):
+    """130 仅接受已经返回完成码的会话。"""
     def __init__(self) -> None:
-        """设置占位节点名称。"""
-        super().__init__(name="对刀功能尚未实现")
+        super().__init__(name="检查对刀会话已结束")
 
     def perform(self) -> None:
-        raise GuardError("CALIBRATION-UNAVAILABLE", "对刀功能尚未实现", "对刀", "等待对刀功能实现。")
+        session = self._blackboard.read("tooltip_session")
+        if not session or not session["ended"]:
+            fail("收到 130 时对刀会话尚未结束（未回 111/121）")
 
 
-def calibration_placeholder(ctx: FlowContext) -> TreeNode:
-    """保留 130 的占位分支。"""
-    return CalibrationUnavailable()
+class SaveCompensation(Instant):
+    """核对最终位置，持久化后更新运行中的补偿。"""
+    def __init__(self, ctx: FlowContext) -> None:
+        super().__init__(name="核对最终坐标并保存补偿")
+        self.ctx = ctx
+
+    def perform(self) -> None:
+        bb = self._blackboard
+        session = bb.read("tooltip_session")
+        baseline = bb.read("tooltip_baseline")
+        final = bb.read("tooltip_final")
+        actual = bb.read("actual")
+        expected = session["last_position"] if session["offset"] else baseline.p0
+        cfg = self.ctx.config.tool_calibration
+        tol = cfg.consistency_tolerance_mm if session["offset"] else cfg.position_tolerance_mm
+
+        def matches(value: object) -> bool:
+            return (isinstance(value, (tuple, list)) and len(value) == 3
+                    and all(math.isfinite(a) and abs(a - b) <= tol for a, b in zip(value, expected)))
+
+        ok = matches(final) and (session["offset"] or matches(actual))
+        self.ctx.events.emit("tooltip_consistency", task_id=bb.read("task_id"), tool=session["tool"],
+                             expected=expected, actual=final, realtime=actual if not session["offset"] else None,
+                             tolerance_mm=tol, ok=ok)
+        if not ok:
+            fail(f"最终坐标不一致：期望 {expected}，实际 {final}，实时 {actual}，公差 {tol} mm")
+        result = compute_compensation(baseline, final)
+        new = tuple(float(x) for x in result.offset_xyz)
+        delta = [float(x) for x in result.delta_xyz]
+        tool = session["tool"]
+        old = self.ctx.config.tools[tool - 1]
+        try:
+            save_tools(Path(cfg.directory) / "tools.yaml", tool, new, source="calibration",
+                       task_id=bb.read("task_id"), details={"P0": list(baseline.p0), "P_final": list(final),
+                       "delta": delta, "old_compensation": list(old), "new_compensation": list(new)})
+        except Exception:
+            logger.exception("对刀补偿保存失败，工具 %s", tool)
+            raise
+        offsets = list(self.ctx.config.tools)
+        offsets[tool - 1] = new
+        object.__setattr__(self.ctx.config, "tools", tuple(offsets))
+        self.ctx.events.emit("tooltip_compensation", task_id=bb.read("task_id"), tool=tool,
+                             old=old, new=new, delta=delta)
+        change_mode(bb, self.ctx, Mode.IDLE, self.name)
+        bb.write("tooltip_session", None, self.name)
+        bb.write("tooltip_baseline", None, self.name)
+        bb.write("reply_func", 130, self.name)
+        bb.write("reply_coordinates", {}, self.name)
+        bb.write("reply_tool", None, self.name)
+
+
+def finish_branch(ctx: FlowContext) -> TreeNode:
+    """130 完成校验及保存；失败统一回 131。"""
+    steps = [
+        CheckSession(),
+        CallWorker(ctx.board, "plc", lambda bb: {"operation": "calibration_final",
+                   "tool": bb.read("tooltip_session")["tool"]}, "tooltip_final", name="读取最终标定坐标"),
+        CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", name="读取实时坐标"),
+        SaveCompensation(ctx),
+    ]
+    return Fallback([Sequence(steps, name="完成对刀并保存"), CalibrationFailed(ctx)], name="完成对刀或 131")
 
 
 class StartCalibration(Instant):
@@ -155,7 +214,8 @@ class SolveTips(Instant):
                              residuals_mm=quality.residuals_mm, condition_number=result.condition_number,
                              z_disagreement_mm=disagreement)
         if not quality.ok or disagreement > cfg.z_disagreement_mm:
-            logger.warning("对刀质量告警：残差=%s，条件数=%s，Z 分歧=%s", quality.residuals_mm, quality.condition_number, disagreement)
+            logger.warning("对刀质量告警：残差=%s，条件数=%s，Z 分歧=%s",
+                           quality.residuals_mm, quality.condition_number, disagreement)
             self.ctx.events.emit("tooltip_quality_warning", task_id=bb.read("task_id"),
                                  residuals_mm=quality.residuals_mm, condition_number=quality.condition_number,
                                  z_disagreement_mm=disagreement, quality_ok=quality.ok)
@@ -178,7 +238,8 @@ class PrepareCalibrationReply(Instant):
             session["ended"] = True
             func = 111 if tool == 1 else 121
             coordinates = {}
-            self.ctx.events.emit("tooltip_aligned", task_id=bb.read("task_id"), tool=tool, iterations=session["iterations"])
+            self.ctx.events.emit("tooltip_aligned", task_id=bb.read("task_id"), tool=tool,
+                                 iterations=session["iterations"])
         else:
             if session["iterations"] >= self.ctx.config.tool_calibration.max_iterations:
                 fail(f"对刀偏移超过最大次数 {session['iterations']}")
@@ -187,7 +248,8 @@ class PrepareCalibrationReply(Instant):
             func = (110 if tool == 1 else 120) if session["offset"] else (100 if tool == 1 else 101)
             coordinates = {f"calibration{tool}_xyz": xyz}
             session.update(iterations=session["iterations"] + 1, offset=True, last_position=xyz)
-            self.ctx.events.emit("tooltip_offset", task_id=bb.read("task_id"), tool=tool, coordinates=xyz, iteration=session["iterations"])
+            self.ctx.events.emit("tooltip_offset", task_id=bb.read("task_id"), tool=tool,
+                                 coordinates=xyz, iteration=session["iterations"])
         bb.write("tooltip_session", session, self.name)
         bb.write("reply_func", func, self.name)
         bb.write("reply_coordinates", coordinates, self.name)
@@ -205,7 +267,8 @@ class CalibrationFailed(Instant):
         bb = self._blackboard
         reason = bb.read("error")
         logger.warning("对刀失败：%s", reason)
-        self.ctx.events.emit("tooltip_failed", task_id=bb.read("task_id"), request_func=bb.read("request_func"), reason=reason)
+        self.ctx.events.emit("tooltip_failed", task_id=bb.read("task_id"),
+                             request_func=bb.read("request_func"), reason=reason)
         change_mode(bb, self.ctx, Mode.IDLE, self.name)
         bb.write("tooltip_session", None, self.name)
         bb.write("tooltip_baseline", None, self.name)

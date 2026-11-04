@@ -36,6 +36,9 @@ class PlcWorker(AsyncRequestWorker):
             return self.handshake.read_request()
         if operation == "actual":
             return self.handshake.io.read_real32_block(self.handshake.contract["actual_x"].address, 3)
+        if operation == "calibration_final":
+            name = f"calibration{payload['tool']}_feedback_x"
+            return self.handshake.io.read_real32_block(self.handshake.contract[name].address, 3)
         if operation == "reply":
             self.handshake.write_reply(payload["task_id"], payload["func"], payload.get("coordinates"))
             return None
