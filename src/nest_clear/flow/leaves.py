@@ -6,9 +6,9 @@ import math
 import time
 from typing import Any
 
+from autoweaver.motion_policy import CallWorker as FrameworkCallWorker
 from autoweaver.motion_policy.nodes.leaf.condition import Condition
 from autoweaver.motion_policy.nodes.node import Status, TreeNode
-from autoweaver.worker.base import next_request_id
 
 from nest_clear.config import Config
 from nest_clear.plan.scan_path import guard_position
@@ -18,57 +18,15 @@ logger = logging.getLogger("nest_clear.flow")
 REQUEST_NAMES = {1: "扫描到位或请求首个扫描位", 60: "挑取完成下一步"}
 
 
-class CallWorker(TreeNode):
-    """树中的通用设备调用：发 note，等待对应完成，再检查错误和保存结果。"""
-
-    def __init__(
-        self,
-        board: Any,
-        worker: str,
-        payload: Callable[[Any], dict[str, Any]],
-        result_key: str | None = None,
-        name: str = "调用设备",
-    ) -> None:
-        """绑定 WorldBoard、请求构造器和可选结果键。"""
-        super().__init__(name=name)
-        self.board = board
-        self.worker = worker
-        self.payload = payload
-        self.result_key = result_key
-        self.rid = 0
-
-    def on_start(self) -> Status:
-        """为本次调用发出独立编号的 note。"""
-        try:
-            payload = self.payload(self._blackboard)
-            self.rid = next_request_id()
-            payload["__request_id__"] = self.rid
-            self.board.pass_note(
-                namespace=self.worker,
-                name="execute",
-                payload=payload,
-                sender=self.name,
-            )
-            return Status.RUNNING
-        except Exception as exc:
-            self._blackboard.write("error", str(exc), self.name)
-            return Status.FAILURE
+class CallWorker(FrameworkCallWorker):
+    """保留设备调用失败的任务日志，结果关联交由框架处理。"""
 
     def on_running(self) -> Status:
-        """只接受本次编号的结果；完成不等于成功，错误留给上层兜底。"""
-        result = self.snapshot.get(f"{self.worker}.result", {})
-        completed = self.snapshot.get(f"{self.worker}.last_completed_id", 0)
-        if completed < self.rid or result.get("id") != self.rid:
-            return Status.RUNNING
-        error = result.get("error")
-        if error:
-            self._blackboard.write("error", error, self.name)
-            task = self._blackboard.read("task_id")
-            logger.warning("%s失败，Task_ID=%s：%s", self.name, task, error)
-            return Status.FAILURE
-        if self.result_key is not None:
-            self._blackboard.write(self.result_key, result.get("value"), self.name)
-        return Status.SUCCESS
+        """记录框架报告的失败，供现场定位请求。"""
+        status = super().on_running()
+        if status == Status.FAILURE:
+            logger.warning("%s失败，Task_ID=%s：%s", self.name, self._blackboard.read("task_id"), self._blackboard.read("error"))
+        return status
 
 
 class WaitRequest(CallWorker):

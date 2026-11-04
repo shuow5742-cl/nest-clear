@@ -196,7 +196,7 @@ def test_recover_interrupted_checkpoint(tmp_path: Path) -> None:
 def test_log_midnight(tmp_path: Path) -> None:
     """日志处理器跨午夜时切换目录。"""
     import logging
-    from nest_clear.record.logging import DailyHandler
+    from nest_clear.record.log_setup import DailyHandler
 
     day = [date(2026, 1, 1)]
     handler = DailyHandler(tmp_path, "main", clock=lambda: day[0])

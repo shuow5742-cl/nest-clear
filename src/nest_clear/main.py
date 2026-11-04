@@ -10,18 +10,19 @@ import subprocess
 import time
 from typing import Any, Protocol
 
+from autoweaver.motion_policy import format_tree
 from autoweaver.motion_policy.world_board import WorldBoard
 from autoweaver.worker.clock import BTClock
 
 from nest_clear.comm import Handshake, PLCClient, load_contract
 from nest_clear.config import Config, load_config
-from nest_clear.flow.batch import FlowContext, RequestTracker, build_batch, build_tree, format_tree
+from nest_clear.flow.batch import FlowContext, RequestTracker, build_batch, build_tree
 from nest_clear.guard import GuardError
 from nest_clear.plan.scan_path import build_scan_path
 from nest_clear.record.events import EventRecorder
 from nest_clear.record.summary import TraySummary
 from nest_clear.record.images import ImageArchive
-from nest_clear.record.logging import configure
+from nest_clear.record.log_setup import configure
 from nest_clear.paths import supervisor_state_file
 from nest_clear.supervisor.gate import SupervisorGate
 from nest_clear.vision.detector import PixelTarget, StubDetector

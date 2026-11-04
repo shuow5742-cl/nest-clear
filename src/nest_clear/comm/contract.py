@@ -61,6 +61,17 @@ def load_contract(path: str | Path) -> Contract:
             entries[register.name] = register
         if not entries:
             raise ValueError("寄存器列表为空")
+        # 握手按连续三轴一次写入，契约加载时即验证这一静态约束。
+        for prefix in ("scan", "pick1", "pick2"):
+            names = [f"{prefix}_{axis}" for axis in "xyz"]
+            if any(name not in entries for name in names):
+                raise ValueError(f"坐标 {prefix} 缺少轴寄存器")
+            registers = [entries[name] for name in names]
+            if any(register.type != "REAL32" for register in registers) or any(
+                register.address != registers[0].address + index * 2
+                for index, register in enumerate(registers)
+            ):
+                raise ValueError(f"坐标 {prefix} 地址不连续或类型错误")
         return Contract(MappingProxyType(entries))
     except (OSError, yaml.YAMLError, ValueError, TypeError) as exc:
         raise GuardError("CONTRACT-INVALID", f"契约加载失败：{exc}", str(path), "检查 PLC 契约文件。") from exc

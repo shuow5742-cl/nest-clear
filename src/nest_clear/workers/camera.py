@@ -5,14 +5,16 @@ from autoweaver.sensor.camera.base import CameraConfig
 from autoweaver.sensor.camera.mock import MockCamera
 from autoweaver.sensor.camera.daheng import DahengCamera
 from nest_clear.guard import GuardError
-from .async_worker import AsyncWorker
+from autoweaver.worker import AsyncRequestWorker
 
 
-class CameraWorker(AsyncWorker):
+class CameraWorker(AsyncRequestWorker):
     """以异步 note 执行相机采图，避免 SDK 阻塞 tick。"""
+    name = "camera"
+
     def __init__(self, backend: str, sn: str, camera: Any = None) -> None:
         """保存相机参数；允许测试注入兼容相机。"""
-        super().__init__("camera")
+        super().__init__()
         try:
             self.camera = camera or (MockCamera(CameraConfig(device_sn=sn)) if backend == "mock" else DahengCamera(CameraConfig(device_sn=sn, trigger_mode=True)))
         except Exception as exc:

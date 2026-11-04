@@ -4,16 +4,18 @@ from typing import Any
 
 from nest_clear.comm import Handshake
 from nest_clear.guard import GuardError
-from .async_worker import AsyncWorker
+from autoweaver.worker import AsyncRequestWorker
 
 logger = logging.getLogger("nest_clear.workers.plc")
 
 
-class PlcWorker(AsyncWorker):
+class PlcWorker(AsyncRequestWorker):
     """串行完成一条 PLC 操作；事务同步执行在框架线程池。"""
+    name = "plc"
+
     def __init__(self, handshake: Handshake) -> None:
         """绑定已预检的握手和连接。"""
-        super().__init__("plc")
+        super().__init__()
         self.handshake = handshake
 
     def initialize(self) -> int:

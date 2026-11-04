@@ -3,14 +3,16 @@ from typing import Any
 
 from nest_clear.vision.detector import Detector, ModuleTarget, postprocess
 from nest_clear.vision.geometry import Calibration, pixel_to_module
-from .async_worker import AsyncWorker
+from autoweaver.worker import AsyncRequestWorker
 
 
-class VisionWorker(AsyncWorker):
+class VisionWorker(AsyncRequestWorker):
     """检测和换算可能耗时，在后台执行并显式发布完成状态。"""
+    name = "vision"
+
     def __init__(self, detector: Detector, calibration: Calibration, radius: float, maximum: int) -> None:
         """保存检测器、标定和每视野筛选参数。"""
-        super().__init__("vision")
+        super().__init__()
         self.detector = detector
         self.calibration = calibration
         self.radius = radius

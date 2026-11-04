@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from autoweaver.motion_policy import format_tree
 from autoweaver.motion_policy.batch import Batch
 from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
@@ -82,17 +83,17 @@ def scan_branch(ctx: FlowContext) -> TreeNode:
     arrived = Sequence(
         [
             Predicate("等待扫描到位", lambda bb: bb.read("last_action") == 1),
-            CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", "读取实时坐标"),
+            CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", name="读取实时坐标"),
             CheckArrival(ctx.config, ctx.events),
             Predicate("到位合格", lambda bb: bb.read("arrival_ok")),
-            CallWorker(ctx.board, "camera", lambda bb: {}, "image", "拍照"),
+            CallWorker(ctx.board, "camera", lambda bb: {}, "image", name="拍照"),
             RecordCapture(ctx.events),
             CallWorker(
                 ctx.board,
                 "vision",
                 lambda bb: {"image": bb.read("image"), "pose": bb.read("actual")},
                 "targets",
-                "检测并换算目标",
+                name="检测并换算目标",
             ),
             RecordDetection(ctx.events),
             choose_next(ctx),
@@ -158,23 +159,6 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, BranchFactory] | None = 
         child=iteration,
         name="一盘直到结束",
     )
-
-
-def format_tree(tree: TreeNode) -> str:
-    """递归输出组合和装饰节点，供启动日志与现场检查。"""
-    lines: list[str] = []
-
-    def visit(node: TreeNode, depth: int) -> None:
-        """按树深度添加名称并遍历实际子节点。"""
-        lines.append(f"{'  ' * depth}{type(node).__name__}: {node.name}")
-        for child in getattr(node, "children", []):
-            visit(child, depth + 1)
-        child = getattr(node, "child", None)
-        if child is not None:
-            visit(child, depth + 1)
-
-    visit(tree, 0)
-    return "\n".join(lines)
 
 
 def build_batch(

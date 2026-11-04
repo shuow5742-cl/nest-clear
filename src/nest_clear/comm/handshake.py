@@ -50,13 +50,7 @@ class Handshake:
                 except GuardError as exc:
                     raise GuardError("HANDSHAKE-INVALID", f"坐标无效，实际值 {values!r}：{exc.what}", where, "检查三个轴是否为有限且可编码的数值。") from exc
             prefix = name[:-4]
-            try:
-                registers = [self.contract[f"{prefix}_{axis}"] for axis in "xyz"]
-            except GuardError as exc:
-                raise GuardError("HANDSHAKE-INVALID", f"坐标契约缺失，实际值 {values!r}：{exc.what}", where, "检查 PLC 契约中的三个坐标地址。") from exc
-            if any(register.type != "REAL32" for register in registers) or any(registers[i].address != registers[0].address + i * 2 for i in range(3)):
-                raise GuardError("HANDSHAKE-INVALID", f"坐标地址不连续或类型错误，实际值 {values!r}", where, "检查 PLC 契约的三个坐标地址和类型。")
-            blocks.append((registers[0].address, list(values)))
+            blocks.append((self.contract[f"{prefix}_x"].address, list(values)))
         for address, values in blocks:
             self.io.write_real32_block(address, values)
         self.io.write_u16(self.contract["reply_func"].address, func_code)

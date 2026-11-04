@@ -124,3 +124,24 @@ def test_real_timeout(contract):
             client.close()
             done.set()
             thread.join(3)
+
+
+@pytest.mark.parametrize("change", ["missing", "type", "address"])
+def test_coordinate_contract_rejected_on_load(tmp_path, change):
+    """坐标块缺轴、类型错误或不连续时，在加载契约阶段报错。"""
+    import yaml
+
+    data = yaml.safe_load((ROOT / "config/plc_contract.yaml").read_text())
+    registers = data["registers"]
+    target = next(item for item in registers if item["name"] == "scan_y")
+    if change == "missing":
+        registers.remove(target)
+    elif change == "type":
+        target["type"] = "UINT16"
+    else:
+        target["address"] = 50000
+    path = tmp_path / "contract.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(GuardError, match="坐标 scan") as captured:
+        load_contract(path)
+    assert captured.value.code == "CONTRACT-INVALID"
