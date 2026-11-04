@@ -1,0 +1,5 @@
+# 占位，未标定；现场建立基准后更新。
+version: 1
+tools:
+  tool1: {offset_xyz: [0.0, 0.0, 0.0], updated_at: '占位，未标定', source: '占位，未标定'}
+  tool2: {offset_xyz: [0.0, 0.0, 0.0], updated_at: '占位，未标定', source: '占位，未标定'}

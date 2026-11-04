@@ -9,12 +9,16 @@ from pymodbus.datastore import ModbusDeviceContext, ModbusSequentialDataBlock, M
 from pymodbus.server import ModbusTcpServer
 
 from nest_clear.comm import PLCClient, load_contract
+from nest_clear.comm.codec import encode_real32, encode_u16
 
 
 class FakePLC:
-    """运行真实 TCP 服务器，并用独立客户端模拟 PLC 请求和坐标反馈。"""
+    """运行真实 TCP 服务器，PLC 内部状态直接写入服务端数据区。"""
 
-    def __init__(self, port: int = 0, host: str = "127.0.0.1", wrap: int = 65535, contract_path: str | Path | None = None) -> None:
+    def __init__(
+        self, port: int = 0, host: str = "127.0.0.1", wrap: int = 65535,
+        contract_path: str | Path | None = None,
+    ) -> None:
         """保存服务器及任务回绕参数；端口零由系统分配空闲端口。"""
         if type(wrap) is not int or not 1 <= wrap <= 65535:
             raise ValueError("回绕上限必须在 1 至 65535 之间")
@@ -30,8 +34,15 @@ class FakePLC:
 
     def _trace(self, sending: bool, pdu: Any) -> Any:
         """记录服务器收到的写请求，供测试检查真实 TCP 写入顺序。"""
-        if not sending and pdu.function_code in (6, 16):
-            self.writes.append((pdu.address + 40001, list(pdu.registers)))
+        if not sending:
+            if pdu.function_code in (6, 16):
+                self.writes.append((pdu.address + 40001, list(pdu.registers)))
+            elif pdu.function_code == 22:
+                self.writes.append((pdu.address + 40001, [pdu.and_mask, pdu.or_mask]))
+            elif pdu.function_code == 23:
+                self.writes.append((pdu.write_address + 40001, list(pdu.write_registers)))
+            elif pdu.function_code in (5, 15):
+                self.writes.append((pdu.address + 1, list(pdu.bits)))
         return pdu
 
     def start(self) -> "FakePLC":
@@ -83,19 +94,29 @@ class FakePLC:
 
     def set_status(self, value: int) -> None:
         """设置设备状态字，供后续状态机测试模拟 PLC 状态。"""
-        self.io.write("status", value)
+        self._set_registers(self.contract["status"].address, [encode_u16(value)])
+
+    def _set_registers(self, address: int, values: list[int]) -> None:
+        """在服务器事件循环中更新内部寄存器，不伪装成外部客户端写入。"""
+        runtime = self._server.context.devices[0]
+        result = asyncio.run_coroutine_threadsafe(
+            runtime.async_setValues(16, address - 40001, values), self._loop
+        ).result(5)
+        if result is not None:
+            raise ValueError(f"模拟 PLC 内部写入失败：{result}")
 
     def set_actual_xyz(self, xyz: Sequence[float]) -> None:
         """设置三个实时反馈坐标，模拟设备到达扫描位置。"""
         if len(xyz) != 3:
             raise ValueError("实时坐标必须有三个轴")
-        self.io.write_real32_block(self.contract["actual_x"].address, xyz)
+        words = [word for value in xyz for word in encode_real32(value)]
+        self._set_registers(self.contract["actual_x"].address, words)
 
     def request(self, func: int) -> int:
         """先写功能码再递增任务编号，让编号变化成为请求信号。"""
         self.task_id = self.task_id % self.wrap + 1
-        self.io.write("request_func", func)
-        self.io.write("task_id", self.task_id)
+        self._set_registers(self.contract["request_func"].address, [encode_u16(func)])
+        self._set_registers(self.contract["task_id"].address, [encode_u16(self.task_id)])
         return self.task_id
 
     def wait_reply(self, task_id: int, timeout_s: float = 3) -> dict[str, Any]:

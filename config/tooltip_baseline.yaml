@@ -1,0 +1,13 @@
+# 现场需替换设备标识、确认方向和检测阈值。
+cameras:
+  front: {backend: uvc, device: 0} # 正面，主要观察 X/Z
+  side: {backend: uvc, device: 1} # 侧面，主要观察 Y/Z
+detection:
+  front: {direction: [0, 1], threshold: 127, min_area: 5}
+  side: {direction: [0, 1], threshold: 127, min_area: 5}
+jog_step_mm: 0.2 # 人工点动建议步距；本程序不控制设备
+center_warning_px: 100 # 正面针尖偏离图像中心的警告阈值
+quality:
+  max_fit_rms_px: 2.0 # 拟合像素 RMS 上限
+  max_condition: 100.0 # 位移矩阵及联合相机矩阵条件数上限
+  max_residual_mm: 0.03 # 验证时投影残差上限
