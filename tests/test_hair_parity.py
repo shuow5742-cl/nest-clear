@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from nest_clear.vision.hair import HairDetectConfig, detect_candidates, gen1_pixel_gates
+from nest_clear.vision.hair import HairDetectConfig, detect_candidates, gen1_pixel_gates, scaled
 
 import cv2
 from hair_scenes import SCENES, frame_for
@@ -12,7 +12,7 @@ DATA = Path(__file__).parent / 'data/hair_parity'
 
 
 def assert_parity(frame, golden):
-    cfg = HairDetectConfig()
+    cfg = scaled(HairDetectConfig(um_per_px=6.959))
     candidates = detect_candidates(frame, cfg)
     assert len(candidates) == len(golden['clumps'])
     eligible = [c for c in candidates if gen1_pixel_gates(c, cfg)[0]]
@@ -62,7 +62,7 @@ def test_gate_thresholds_and_unmeasurable_paleness():
     from dataclasses import replace
     from nest_clear.vision.hair import HairCandidate
 
-    cfg = HairDetectConfig()
+    cfg = HairDetectConfig(um_per_px=6.959)
     c = HairCandidate((0., 0.), 0., (), (0., 0., 1., 1.), (0.5, 0.5),
                       300., 25000, None, None, 'no background', 'cv-dark')
     assert gen1_pixel_gates(c, cfg) == (True, None)

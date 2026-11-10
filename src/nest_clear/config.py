@@ -1,6 +1,6 @@
 """加载并严格校验业务配置，为通信和后续流程提供不可变配置。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 import ipaddress
 import math
 from pathlib import Path
@@ -9,6 +9,7 @@ from typing import Any, NoReturn
 import yaml
 
 from .guard import GuardError
+from .vision.hair.config import HairDetectConfig
 from .tooltip.store import load_tools
 
 
@@ -52,6 +53,7 @@ class VisionConfig:
     pixels: tuple[tuple[float, ...], ...]
     dedup_radius_mm: float
     max_targets: int
+    hair_detector: HairDetectConfig = field(default_factory=HairDetectConfig)
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,71 @@ def _ip(value: Any, path: str) -> str:
     except ValueError:
         _fail(path, f"不是有效 IP 地址：{text}")
     return text
+
+
+def _hair_config(value: Any) -> HairDetectConfig:
+    """Validate optional reference-pixel tuning without silently accepting typos."""
+    path = "vision.hair_detector"
+    if not isinstance(value, dict):
+        _fail(path, "应为映射")
+    data = dict(value)
+    pick = data.pop("pick_point", {})
+    if not isinstance(pick, dict):
+        _fail(path + ".pick_point", "应为映射")
+    extra_pick = set(pick) - {"mode", "thick_pow", "central_pow", "dens_pow"}
+    if extra_pick:
+        _fail(path + ".pick_point", f"未知字段 {sorted(extra_pick)}")
+    for key, val in pick.items():
+        target = "pick_point" if key == "mode" else key
+        if target in data:
+            _fail(path + ".pick_point", f"重复配置 {target}")
+        data[target] = val
+    defaults = HairDetectConfig()
+    allowed = {f.name for f in fields(HairDetectConfig)}
+    extra = set(data) - allowed
+    if extra:
+        _fail(path, f"未知字段 {sorted(extra)}")
+    values = {}
+    fractions = {"fiber_dens_th", "fiber_mean_dens_min", "contain_overlap", "hair_mid_band", "trace_adapt", "max_gray_ratio", "min_dark_frac"}
+    scales = {"line_blur_scale", "seed_grow_scale"}
+    nonnegative = {"dens_pow", "central_pow", "thick_pow", "min_width_mm", "max_gray_ratio", "min_dark_frac", "seed_grow_close"}
+    gray = {"hair_dark_max", "line_dark_max", "fiber_fine_gray_max", "trace_ridge_max"}
+    for name, value in data.items():
+        item_path = f"{path}.{name}"
+        default = getattr(defaults, name)
+        if name == "pick_point":
+            if value != "thick_central":
+                _fail(item_path, "仅支持 thick_central")
+        elif isinstance(default, bool):
+            if type(value) is not bool:
+                _fail(item_path, "应为布尔值")
+        elif isinstance(default, tuple):
+            if not isinstance(value, (list, tuple)) or len(value) != 2 or any(type(v) is not int or v < 1 for v in value) or value[0] >= value[1]:
+                _fail(item_path, "应为两个递增的正整数")
+            value = tuple(value)
+        else:
+            if isinstance(default, int) and type(value) is not int:
+                _fail(item_path, "应为整数")
+            number = _number(value, item_path)
+            if number < 0 or (number == 0 and name not in nonnegative):
+                _fail(item_path, "应为正数" if name not in nonnegative else "应为非负数")
+            if name in fractions and number > 1:
+                _fail(item_path, "应在 0 到 1 之间")
+            if name in scales and number > 1:
+                _fail(item_path, "应大于 0 且不超过 1")
+            if name in gray and number > 255:
+                _fail(item_path, "灰度应在 0 到 255 之间")
+            if name.endswith("_k") or name in {"fiber_dens_win_ds", "fiber_close_k_ds"}:
+                if number < 3 or number % 2 != 1:
+                    _fail(item_path, "核尺寸应为不小于 3 的奇数")
+        values[name] = value
+    result = HairDetectConfig(**values)
+    if result.fiber_fine_gray_max <= result.hair_dark_max:
+        _fail(path + ".fiber_fine_gray_max", "必须大于 hair_dark_max，否则取点暗度归一化除数为零或负数")
+    ratio = result.reference_um_per_px / result.um_per_px
+    if not math.isfinite(ratio) or ratio == 0 or not math.isfinite(ratio * ratio):
+        _fail(path, "参考尺度与当前尺度比例超出数值范围")
+    return result
 
 
 def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
@@ -256,10 +323,13 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         tuple(_string(arg, "supervisor.child_command") for arg in command),
         _number(sup["startup_grace_s"], "supervisor.startup_grace_s", True),
     )
+    vision_data = root["vision"]
+    if isinstance(vision_data, dict):
+        vision_data = {"hair_detector": {}, **vision_data}
     v = _mapping(
-        root["vision"],
+        vision_data,
         "vision",
-        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets"],
+        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets", "hair_detector"],
     )
     if v["camera_backend"] not in ("mock", "daheng"):
         _fail("vision.camera_backend", "应为 mock 或 daheng")
@@ -272,7 +342,8 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     if radius < 0 or type(v["max_targets"]) is not int or v["max_targets"] < 1:
         _fail("vision", "去重半径应非负，最大目标数应为正整数")
     vision = VisionConfig(
-        v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"]
+        v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"],
+        _hair_config(v["hair_detector"])
     )
     tc_data = root["tool_calibration"]
     if isinstance(tc_data, dict) and "enabled" not in tc_data:

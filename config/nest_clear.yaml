@@ -39,6 +39,36 @@ vision:  # 首期使用固定像素占位检测器，真实算法采图后替换
   pixels: []  # 固定 [u, v, score]；空列表表示无目标
   dedup_radius_mm: 1.0
   max_targets: 10
+  hair_detector:  # 毛检测参数；像素项填写一代参考像素，会按尺度 k 自动换算
+    um_per_px: 27.75  # µm/像素 = 像元1.85µm × 工作距离120mm / 焦距8mm；现场按标定或实际工作距离改
+    reference_um_per_px: 6.959  # 一代参考尺度，µm/像素
+    pick_point:  # 一代粗度和中心评分参数
+      mode: thick_central  # 取点模式
+      thick_pow: 1.0  # 粗度权重指数
+      central_pow: 2.0  # 中心权重指数
+      dens_pow: 0.0  # 密度权重指数；零时不计算密度高斯
+    hair_dark_max: 55  # 一代暗核灰度上限
+    dark_open_k: 5  # 一代暗核开运算核尺寸，参考像素
+    dark_close_k: 21  # 一代暗核闭运算核尺寸，参考像素
+    covered_dilate_k: 15  # 一代去重覆盖膨胀核尺寸，参考像素
+    line_blur_sigma: 15  # 一代背景高斯标准差，参考像素
+    line_contrast: 13  # 一代细线局部灰度差下限
+    line_min_area: 150  # 一代细线面积下限，参考像素平方
+    fiber_min_area: 1500  # 一代纤维团面积下限，参考像素平方
+    fiber_dens_win_ds: 15  # 一代半分辨率纤维密度窗口，参考像素
+    fiber_close_k_ds: 11  # 一代半分辨率纤维闭运算核，参考像素
+    bridge_max_hop: 170  # 一代桥接最大距离，参考像素
+    line_min_span: 120.0  # 一代线拟合最小跨度，参考像素
+    merge_gap_px: 30  # 一代团块合并距离，参考像素
+    contain_overlap: 0.8  # 一代包含抑制比例
+    seed_grow_max_area: 220000  # 一代种子生长面积上限，参考像素平方
+    trace_step: 6.0  # 一代轴追踪步距，参考像素
+    pick_dens_sigma: 10.0  # 一代取点密度标准差，参考像素
+    min_length_mm: 2.0  # 兼容模式挑取长度门，毫米
+    min_area_mm2: 1.2  # 兼容模式挑取面积门，平方毫米
+    min_width_mm: 0.35  # 兼容模式等效宽度门，毫米
+    max_gray_ratio: 0.70  # 暗度相对背景上限，零表示关闭
+    min_dark_frac: 0.15  # 暗像素占比下限，零表示关闭
 
 tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把工具的基准
   enabled: true  # false 时不打开对刀相机；对刀功能码回 131 的处理由后续任务实现

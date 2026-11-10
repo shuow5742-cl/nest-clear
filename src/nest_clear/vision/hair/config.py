@@ -4,6 +4,18 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class HairDetectConfig:
     """Gen1 pixel-domain tuning and physical pick gates."""
+    dark_open_k: int = 5
+    dark_close_k: int = 21
+    covered_dilate_k: int = 15
+    line_close_k: int = 9
+    line_open_k: int = 3
+    link_close_k: int = 5
+    merge_pad_extra: int = 4
+    bridge_pad_extra: int = 4
+    linefit_pad_extra: int = 6
+    trace_crop_pad: int = 3
+    pale_min_pad: int = 12
+    densify_step: float = 5.0
     bridge_chain_collinear_deg: float = 38.0
     bridge_chain_hop: int = 100
     bridge_collinear_deg: float = 55.0
@@ -37,7 +49,7 @@ class HairDetectConfig:
     hair_min_thick: float = 4.0
     line_band: float = 16.0
     line_blur_scale: float = 0.5
-    line_blur_sigma: int = 15
+    line_blur_sigma: float = 15.0
     line_cc_min_area: int = 13
     line_contrast: int = 13
     line_dark_max: int = 85
@@ -62,6 +74,7 @@ class HairDetectConfig:
     pick_refine_enable: bool = True
     pick_point: str = 'thick_central'
     thick_pow: float = 1.0
+    seed_grow_pad: int = 4
     seed_grow_bg_margin: int = 48
     seed_grow_close: int = 0
     seed_grow_enable: bool = True
@@ -81,7 +94,8 @@ class HairDetectConfig:
     trace_ridge_max: int = 135
     trace_seed_min_area: int = 150
     trace_step: float = 6.0
-    um_per_px: float = 6.959
+    reference_um_per_px: float = 6.959
+    um_per_px: float = 27.75
     min_length_mm: float = 2.0
     min_area_mm2: float = 1.2
     min_width_mm: float = 0.35

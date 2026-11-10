@@ -28,7 +28,7 @@ def clump_paleness(det, gray_full, *, cfg) -> tuple:
         x, y, bw, bh = cv2.boundingRect(arr)
         if bw <= 0 or bh <= 0:
             return (None, None, 'empty bounding box')
-        pad = max(12, int(0.25 * max(bw, bh)))
+        pad = max(cfg.pale_min_pad, int(0.25 * max(bw, bh)))
         x1, y1 = (max(0, x - pad), max(0, y - pad))
         x2, y2 = (min(w, x + bw + pad), min(h, y + bh + pad))
         if x2 - x1 < 3 or y2 - y1 < 3:
@@ -154,8 +154,8 @@ def _line_hairs(gray: np.ndarray, covered: np.ndarray, dark: np.ndarray | None=N
         dark = cv2.subtract(cv2.GaussianBlur(gray, (0, 0), cfg.line_blur_sigma), gray)
     bg_cap = bg_ceiling if bg_ceiling is not None else cfg.line_dark_max
     mask = ((dark >= cfg.line_contrast) & (gray < bg_cap)).astype(np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.line_close_k, cfg.line_close_k)))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.line_open_k, cfg.line_open_k)))
     n, lab, stats, _c = cv2.connectedComponentsWithStatsWithAlgorithm(mask, 8, cv2.CV_32S, cv2.CCL_SPAGHETTI)
     out: list[HairClump] = []
     for i in range(1, n):
@@ -379,7 +379,7 @@ def _merge_nearby_clumps(clumps: list[HairClump], shape: tuple[int, int], gap: i
         if len(members) == 1:
             out.append(members[0])
             continue
-        pad = gap + 4
+        pad = gap + cfg.merge_pad_extra
         x1 = max(0, min((int(m.bbox.x1) for m in members)) - pad)
         y1 = max(0, min((int(m.bbox.y1) for m in members)) - pad)
         x2 = min(w, max((int(m.bbox.x2) for m in members)) + pad)
@@ -392,10 +392,12 @@ def _merge_nearby_clumps(clumps: list[HairClump], shape: tuple[int, int], gap: i
         out.extend(rebuilt if rebuilt else members)
     return out
 
-def _densify_poly(poly: np.ndarray, step: float=5.0, max_pts: int=None, *, cfg) -> np.ndarray:
+def _densify_poly(poly: np.ndarray, step: float=None, max_pts: int=None, *, cfg) -> np.ndarray:
     if max_pts is None:
         max_pts = cfg.bridge_peri_max_pts
     "Resample a polygon's PERIMETER to ~``step``-px spacing (float Nx2), capped at ``max_pts``\n    evenly-spaced points. The stored polygons are CHAIN_APPROX_SIMPLE (sparse vertices), so a raw\n    nearest-vertex search between two clumps can miss the true closest boundary points by tens of px;\n    densifying makes the nearest-point hop accurate, and the cap keeps the pairwise search cheap."
+    if step is None:
+        step = cfg.densify_step
     pts = np.asarray(poly, np.float32)
     if len(pts) < 2:
         return pts.reshape(-1, 2)
@@ -544,7 +546,7 @@ def _bridge_link_clumps(clumps: list[HairClump], gray: np.ndarray, shape: tuple[
             out.append(nodes[members_idx[0]])
             continue
         members = [nodes[k] for k in members_idx]
-        pad = cfg.bridge_corridor_th + 4
+        pad = cfg.bridge_corridor_th + cfg.bridge_pad_extra
         x1 = max(0, min((int(m.bbox.x1) for m in members)) - pad)
         y1 = max(0, min((int(m.bbox.y1) for m in members)) - pad)
         x2 = min(w, max((int(m.bbox.x2) for m in members)) + pad)
@@ -556,7 +558,7 @@ def _bridge_link_clumps(clumps: list[HairClump], gray: np.ndarray, shape: tuple[
         for i, j, p, q in edges:
             if i in mset and j in mset:
                 cv2.line(local, (int(p[0] - x1), int(p[1] - y1)), (int(q[0] - x1), int(q[1] - y1)), 255, cfg.bridge_corridor_th)
-        local = cv2.morphologyEx(local, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+        local = cv2.morphologyEx(local, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.link_close_k, cfg.link_close_k)))
         rebuilt = _rebuild_merged_clumps(local, members, x1, y1, cfg=cfg)
         out.extend(rebuilt if rebuilt else members)
     return out
@@ -628,7 +630,7 @@ def _linefit_link_clumps(clumps: list[HairClump], gray: np.ndarray, shape: tuple
         x_lo = e_lo if _bridge_eval(e_lo, cen + (lo - cfg.line_ext_px) * d, gray, bg_cap, cfg=cfg)[1] else cen + (lo - cfg.line_ext_px) * d
         x_hi = e_hi if _bridge_eval(e_hi, cen + (hi + cfg.line_ext_px) * d, gray, bg_cap, cfg=cfg)[1] else cen + (hi + cfg.line_ext_px) * d
         path = np.vstack([x_lo, P[inl], x_hi])
-        pad = cfg.bridge_corridor_th + 6
+        pad = cfg.bridge_corridor_th + cfg.linefit_pad_extra
         lx1 = max(0, int(path[:, 0].min()) - pad)
         ly1 = max(0, int(path[:, 1].min()) - pad)
         lx2 = min(w, int(path[:, 0].max()) + pad)
@@ -655,7 +657,7 @@ def _linefit_link_clumps(clumps: list[HairClump], gray: np.ndarray, shape: tuple
         local[ly1 - fy1:ly2 - fy1, lx1 - fx1:lx2 - fx1] = linemask
         for m in members:
             cv2.fillPoly(local, [np.asarray(m.polygon_xy, np.int32) - [fx1, fy1]], 255)
-        local = cv2.morphologyEx(local, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+        local = cv2.morphologyEx(local, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.link_close_k, cfg.link_close_k)))
         rebuilt = _rebuild_merged_clumps(local, members, fx1, fy1, cfg=cfg)
         rebuilt = [replace(rc, pick_method='cv-dark') for rc in rebuilt]
         out = rest + (rebuilt if rebuilt else members)
@@ -862,7 +864,7 @@ def _seed_grow_clumps(clumps: list[HairClump], gray_full: np.ndarray, shape: tup
     for lbl, members in buckets.items():
         comp_s = (lab == lbl).astype(np.uint8)
         dx, dy, dcw, dch = cv2.boundingRect(comp_s)
-        pad = 4
+        pad = cfg.seed_grow_pad
         fx0 = max(0, int(dx / sx) - pad)
         fy0 = max(0, int(dy / sy) - pad)
         fx1 = min(w, int(np.ceil((dx + dcw) / sx)) + pad)
@@ -932,10 +934,10 @@ def _axis_trace_extend(clumps: list[HairClump], gray: np.ndarray, shape: tuple[i
             out.append(c)
             continue
         allpts = np.vstack([poly, np.asarray(pts_hi + pts_lo, float)])
-        x1 = max(0, int(allpts[:, 0].min()) - 3)
-        y1 = max(0, int(allpts[:, 1].min()) - 3)
-        x2 = min(w, int(allpts[:, 0].max()) + 3)
-        y2 = min(h, int(allpts[:, 1].max()) + 3)
+        x1 = max(0, int(allpts[:, 0].min()) - cfg.trace_crop_pad)
+        y1 = max(0, int(allpts[:, 1].min()) - cfg.trace_crop_pad)
+        x2 = min(w, int(allpts[:, 0].max()) + cfg.trace_crop_pad)
+        y2 = min(h, int(allpts[:, 1].max()) + cfg.trace_crop_pad)
         local = np.zeros((y2 - y1, x2 - x1), np.uint8)
         cv2.fillPoly(local, [np.asarray(c.polygon_xy, np.int32) - [x1, y1]], 255)
         for seed, chain in ((hi, pts_hi), (lo, pts_lo)):

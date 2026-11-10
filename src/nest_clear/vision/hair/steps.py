@@ -1,5 +1,6 @@
 """The twelve gen1 detection stages and final pick gates."""
 from dataclasses import dataclass
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -41,13 +42,22 @@ def gen1_pixel_gates(c: HairCandidate, cfg: HairDetectConfig) -> tuple[bool, str
     return True, None
 
 
-def detect_candidates(image_bgr: np.ndarray, cfg: HairDetectConfig) -> list[HairCandidate]:
+def detect_candidates(image_bgr: np.ndarray, cfg: HairDetectConfig, *,
+                      timings_ms: dict[str, float] | None = None) -> list[HairCandidate]:
+    """Detect with an already scaled config; optionally collect stage timings."""
+    started = perf_counter() if timings_ms is not None else 0.0
+    def mark(name):
+        nonlocal started
+        if timings_ms is not None:
+            now = perf_counter()
+            timings_ms[name] = (now - started) * 1000.0
+            started = now
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     bg60 = float(np.percentile(gray[::4, ::4], 60))
     dark_max = int(max(35, min(cfg.hair_dark_max, bg60 - cfg.core_bg_margin)))
     mask = (gray < dark_max).astype(np.uint8) * 255
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((cfg.dark_open_k, cfg.dark_open_k), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((cfg.dark_close_k, cfg.dark_close_k), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     clumps = []
     for contour in contours:
@@ -71,26 +81,37 @@ def detect_candidates(image_bgr: np.ndarray, cfg: HairDetectConfig) -> list[Hair
             pick_angle_deg=angle, object_type=core.HAIR_TYPE, thick_radius=radius))
     clipped = np.minimum(gray, np.uint8(min(255, round(bg60))))
     line_dark = cv2.subtract(core._blur_background(clipped, cfg=cfg), gray)
+    mark("dark_core")
     covered = np.zeros(gray.shape, np.uint8)
     for det in clumps:
         if det.polygon_xy:
             cv2.fillPoly(covered, [np.asarray(det.polygon_xy, np.int32)], 255)
-    covered_bool = cv2.dilate(covered, np.ones((15, 15), np.uint8)) > 0
+    covered_bool = cv2.dilate(covered, np.ones((cfg.covered_dilate_k, cfg.covered_dilate_k), np.uint8)) > 0
     clumps.extend(core._line_hairs(gray, covered_bool, line_dark, bg_ceiling=int(bg60), cfg=cfg))
+    mark("line")
     for det in clumps:
         if det.pick_method == 'cv-line' and det.polygon_xy:
             cv2.fillPoly(covered, [np.asarray(det.polygon_xy, np.int32)], 255)
-    covered_bool = cv2.dilate(covered, np.ones((15, 15), np.uint8)) > 0
+    covered_bool = cv2.dilate(covered, np.ones((cfg.covered_dilate_k, cfg.covered_dilate_k), np.uint8)) > 0
     clumps.extend(core._fiber_density_clumps(gray, line_dark, covered_bool, bg_ceiling=int(bg60), cfg=cfg))
+    mark("fiber")
     shape = image_bgr.shape[:2]
     clumps = core._bridge_link_clumps(clumps, gray, shape, cfg=cfg)
+    mark("bridge")
     clumps = core._linefit_link_clumps(clumps, gray, shape, dark_max=dark_max, cfg=cfg)
+    mark("linefit")
     clumps = core._merge_nearby_clumps(clumps, shape, cfg=cfg)
+    mark("merge")
     clumps = core._suppress_contained(clumps, cfg=cfg)
+    mark("suppress_before")
     clumps = core._seed_grow_clumps(clumps, gray, shape, dark_max=dark_max, cfg=cfg)
+    mark("seed_grow")
     clumps = core._axis_trace_extend(clumps, gray, shape, cfg=cfg)
+    mark("axis_trace")
     clumps = core._suppress_contained(clumps, cfg=cfg)
+    mark("suppress_after")
     clumps = core._refine_pick_points(clumps, gray, line_dark, cfg=cfg)
+    mark("refine")
     clumps.sort(key=lambda c: -c.mask_area)
     result = []
     for c in clumps:
@@ -101,4 +122,5 @@ def detect_candidates(image_bgr: np.ndarray, cfg: HairDetectConfig) -> list[Hair
             core._clump_length_px(c, cfg=cfg), c.mask_area, ratio, fraction,
             reason,
             c.pick_method))
+    mark("relabel_output")
     return result
