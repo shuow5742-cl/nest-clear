@@ -6,7 +6,14 @@ build-backend = "hatchling.build"
 name = "nest_clear"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["autoweaver", "pymodbus>=3.11", "pyyaml", "numpy", "opencv-python-headless"]
+dependencies = [
+    "autoweaver",
+    "pymodbus>=3.11",
+    "pyyaml",
+    "numpy",
+    "opencv-python==4.11.0.86",
+    "scikit-image>=0.26.0",
+]
 
 [project.optional-dependencies]
 dev = ["pytest"]

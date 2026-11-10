@@ -1,0 +1,50 @@
+{
+  "hairs": [],
+  "clumps": [
+    {
+      "pick_point_xy": [
+        1997.0,
+        759.0
+      ],
+      "bbox": {
+        "x1": 1948.0,
+        "y1": 740.0,
+        "x2": 2048.0,
+        "y2": 780.0
+      },
+      "polygon_xy": [
+        [
+          1948,
+          740
+        ],
+        [
+          1948,
+          779
+        ],
+        [
+          2047,
+          779
+        ],
+        [
+          2047,
+          740
+        ]
+      ],
+      "confidence": 0.0482625,
+      "mask_area": 3861,
+      "object_type": "crumb",
+      "pick_angle_deg": 0.0,
+      "pick_method": "cv-dark",
+      "eligible_for_pick": false,
+      "reject_reason": "short",
+      "thick_radius": "inf",
+      "length_px": 99.0
+    }
+  ],
+  "paleness": [
+    [
+      0.1,
+      1.0
+    ]
+  ]
+}

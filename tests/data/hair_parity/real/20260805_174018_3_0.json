@@ -1,0 +1,61 @@
+{
+  "filename": "20260805_174018_3_0.png",
+  "hairs": [
+    {
+      "px": [
+        255.0,
+        255.0
+      ],
+      "conf": 1.0,
+      "obj_type": "hair",
+      "pick_angle_deg": 48.233299255371094
+    }
+  ],
+  "clumps": [
+    {
+      "pick_point_xy": [
+        255.0,
+        255.0
+      ],
+      "bbox": {
+        "x1": 0.0,
+        "y1": 0.0,
+        "x2": 512.0,
+        "y2": 512.0
+      },
+      "polygon_xy": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          511
+        ],
+        [
+          511,
+          511
+        ],
+        [
+          511,
+          0
+        ]
+      ],
+      "confidence": 1.0,
+      "mask_area": 261121,
+      "object_type": "hair",
+      "pick_angle_deg": 48.233299255371094,
+      "pick_method": "cv-dark",
+      "eligible_for_pick": true,
+      "reject_reason": null,
+      "thick_radius": "inf",
+      "length_px": 511.0
+    }
+  ],
+  "paleness": [
+    [
+      null,
+      null
+    ]
+  ]
+}
