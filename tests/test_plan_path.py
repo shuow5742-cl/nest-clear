@@ -26,3 +26,30 @@ def test_travel_guard() -> None:
 def test_first_generation_expected(scan: Scan, expected: list[tuple[float, float]]) -> None:
     """期望点列来自一代 flow.py 的 build_serpentine_path 及 _axis_points。"""
     assert [point[:2] for point in build_scan_path(scan, ((-10, 10), (-10, 10), (-10, 10)))] == expected
+
+
+def test_tray_grid_and_single():
+    """默认二代视野覆盖一代料盘，并验证蛇形和重叠。"""
+    from dataclasses import replace
+    from nest_clear.config import load_config
+    from nest_clear.plan.scan_path import scan_details
+    cfg = load_config("config/nest_clear.yaml")
+    path = build_scan_path(cfg.scan, cfg.travel)
+    detail = scan_details(cfg.scan, path)
+    assert (detail["nx"], detail["ny"]) == (2, 3)
+    assert detail["overlap_mm"] == pytest.approx([40.632, 40.4735])
+    expected = [(-55.833, 42.1245), (-55.833, 85.9), (-55.833, 129.6755), (-126.867, 129.6755), (-126.867, 85.9), (-126.867, 42.1245)]
+    for point, wanted in zip(path, expected):
+        assert point[:2] == pytest.approx(wanted)
+    small = replace(cfg.scan, size_mm=(10, 10))
+    assert build_scan_path(small, cfg.travel) == [(-5, 5, small.z)]
+
+
+@pytest.mark.parametrize("changes", [{"size_mm": (0, 10)}, {"fov_mm": (20, 84)}, {"min_overlap_mm": -1}])
+def test_tray_guard(changes):
+    """无效覆盖尺寸或重叠必须报告守卫错误。"""
+    from dataclasses import replace
+    from nest_clear.config import load_config
+    cfg = load_config("config/nest_clear.yaml")
+    with pytest.raises(GuardError):
+        build_scan_path(replace(cfg.scan, **changes), cfg.travel)

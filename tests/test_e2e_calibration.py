@@ -34,7 +34,8 @@ def rig(tmp_path: Path):
         config = load_config(ROOT / "config/nest_clear.yaml")
         tc = replace(config.tool_calibration, directory=str(tmp_path), cameras={"front": {"backend": "mock"}, "side": {"backend": "mock"}})
         config = replace(config, tools=((1.0, 2.0, 3.0), (0.0, 0.0, 0.0)), plc=replace(config.plc, ip=plc.host, port=plc.port),
-                         vision=replace(config.vision, camera_backend="mock", allow_placeholder_calibration=True),
+                         vision=replace(config.vision, camera_backend="mock", allow_placeholder_calibration=True,
+                                        responsibility_zone=False),
                          record_directory=str(tmp_path / "runs"), tool_calibration=tc)
         config = replace(config, scan=Scan(((1.0, 0.0), (0.0, 0.0), (1.0, 0.0)), 1.0, 1.0, 0.0))
         class Detector:

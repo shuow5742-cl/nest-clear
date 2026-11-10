@@ -1,6 +1,6 @@
 """加载并严格校验业务配置，为通信和后续流程提供不可变配置。"""
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 import ipaddress
 import math
 from pathlib import Path
@@ -32,6 +32,13 @@ class Scan:
     step_x: float
     step_y: float
     z: float
+    mode: str = "corners"
+    origin_xy: tuple[float, float] = (0.0, 0.0)
+    size_mm: tuple[float, float] = (182.7, 171.8)
+    fov_mm: tuple[float, float] | None = None
+    min_overlap_mm: float = 20.0
+    x_direction: int = -1
+    y_direction: int = 1
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,8 @@ class VisionConfig:
     skip_radius_mm: float = 0.6
     max_picks_per_view: int = 30
     preview_window: bool = False
+    responsibility_zone: bool = True
+    ignore_regions_px: tuple[tuple[float, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,7 +274,13 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     for axis, bounds in zip("xyz", travel):
         if bounds[0] >= bounds[1]:
             _fail(f"travel.{axis}", "最小值必须小于最大值")
-    s = _mapping(root["scan"], "scan", ["corners", "step_x", "step_y", "z"])
+    scan_data = {"mode": "corners", "tray": {"origin_xy": [0, 0], "size_mm": [182.7, 171.8], "x_direction": -1, "y_direction": 1}, "fov_mm": None, "min_overlap_mm": 20, **root["scan"]}
+    s = _mapping(scan_data, "scan", ["corners", "step_x", "step_y", "z", "mode", "tray", "fov_mm", "min_overlap_mm"])
+    if s["mode"] not in ("corners", "tray"):
+        _fail("scan.mode", "应为 corners 或 tray")
+    tray = _mapping(s["tray"], "scan.tray", ["origin_xy", "size_mm", "x_direction", "y_direction"])
+    if any(type(tray[k]) is not int or tray[k] not in (-1, 1) for k in ("x_direction", "y_direction")):
+        _fail("scan.tray", "x_direction 和 y_direction 必须为 1 或 -1")
     if not isinstance(s["corners"], list) or len(s["corners"]) != 3:
         _fail("scan.corners", "必须提供三个 XY 角点")
     corners = tuple(_vector(point, f"scan.corners[{index}]", 2) for index, point in enumerate(s["corners"]))
@@ -280,7 +295,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     if not travel[2][0] <= depth <= travel[2][1]:
         _fail("pick_depth_z", "下针深度超出 Z 行程")
     scan = Scan(
-        corners, _number(s["step_x"], "scan.step_x", True), _number(s["step_y"], "scan.step_y", True), z
+        corners, _number(s["step_x"], "scan.step_x", True), _number(s["step_y"], "scan.step_y", True), z,
+        s["mode"], _vector(tray["origin_xy"], "scan.tray.origin_xy", 2),
+        _vector(tray["size_mm"], "scan.tray.size_mm", 2),
+        None if s["fov_mm"] is None else _vector(s["fov_mm"], "scan.fov_mm", 2),
+        _number(s["min_overlap_mm"], "scan.min_overlap_mm"), tray["x_direction"], tray["y_direction"]
     )
     camera = _mapping(root["camera"], "camera", ["sn"])
     record_data = root["record"]
@@ -331,11 +350,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     )
     vision_data = root["vision"]
     if isinstance(vision_data, dict):
-        vision_data = {"hair_detector": {}, "detector": "hair", "allow_placeholder_calibration": False, "review_radius_mm": 0.3, "skip_radius_mm": 0.6, "max_picks_per_view": 30, "preview": {"window": False}, **vision_data}
+        vision_data = {"responsibility_zone": True, "ignore_regions_px": [], "hair_detector": {}, "detector": "hair", "allow_placeholder_calibration": False, "review_radius_mm": 0.3, "skip_radius_mm": 0.6, "max_picks_per_view": 30, "preview": {"window": False}, **vision_data}
     v = _mapping(
         vision_data,
         "vision",
-        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets", "hair_detector", "detector", "allow_placeholder_calibration", "review_radius_mm", "skip_radius_mm", "max_picks_per_view", "preview"],
+        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets", "hair_detector", "detector", "allow_placeholder_calibration", "review_radius_mm", "skip_radius_mm", "max_picks_per_view", "preview", "responsibility_zone", "ignore_regions_px"],
     )
     if v["camera_backend"] not in ("mock", "daheng"):
         _fail("vision.camera_backend", "应为 mock 或 daheng")
@@ -354,11 +373,18 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _fail("vision", "预览开关或每视野上限无效")
     review = _number(v["review_radius_mm"], "vision.review_radius_mm", True)
     skip = _number(v["skip_radius_mm"], "vision.skip_radius_mm", True)
+    if type(v["responsibility_zone"]) is not bool or not isinstance(v["ignore_regions_px"], list):
+        _fail("vision", "负责区开关须为布尔值，屏蔽区须为矩形列表")
+    regions = tuple(_vector(r, f"vision.ignore_regions_px[{i}]", 4) for i, r in enumerate(v["ignore_regions_px"]))
+    if any(x1 > x2 or y1 > y2 for x1, y1, x2, y2 in regions):
+        _fail("vision.ignore_regions_px", "矩形须按左上、右下顺序填写")
     vision = VisionConfig(
         v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"],
         _hair_config(v["hair_detector"]), v["detector"], v["allow_placeholder_calibration"],
-        review, skip, v["max_picks_per_view"], preview["window"]
+        review, skip, v["max_picks_per_view"], preview["window"], v["responsibility_zone"], regions
     )
+    if scan.fov_mm is None:
+        scan = replace(scan, fov_mm=tuple(vision.hair_detector.um_per_px * n / 1000 for n in (4024, 3036)))
     tc_data = root["tool_calibration"]
     if isinstance(tc_data, dict) and "enabled" not in tc_data:
         tc_data = {**tc_data, "enabled": True}

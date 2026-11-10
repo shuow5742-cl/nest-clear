@@ -247,7 +247,7 @@ class RecordDetection(Instant):
         bb.write("targets", eligible, self.name)
         archive = getattr(self.events, "archive", None)
         if archive:
-            overlay = render(bb.read("image"), d["observations"], eligible[0] if eligible else None)
+            overlay = render(bb.read("image"), d["observations"], eligible[0] if eligible else None, self.config.vision.ignore_regions_px)
             archive.rendered(
                 overlay, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"),
                 self.config.vision.preview_window,
@@ -255,7 +255,7 @@ class RecordDetection(Instant):
         self.events.emit(
             "detection", task_id=bb.read("task_id"), scan_index=bb.read("next_index"),
             count=d["count"], eligible_count=d["eligible_count"], rejections=d["rejections"],
-            failed_count=d["failed_count"], elapsed_ms=d["elapsed_ms"],
+            failed_count=d["failed_count"], other_view_count=d.get("other_view_count", 0), ignored_count=d.get("ignored_count", 0), elapsed_ms=d["elapsed_ms"],
             unmeasurable=[o.candidate.paleness_unmeasurable_reason for o in d["observations"]
                           if o.candidate.paleness_unmeasurable_reason],
         )

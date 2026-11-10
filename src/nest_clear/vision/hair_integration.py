@@ -50,11 +50,11 @@ def measure(c: HairCandidate, pose: tuple[float, float, float], calibration: Cal
 
 # OpenCV BGR：绿=要挑，黄=物理门拒绝，红=挑取失败；青=曾判成功但又出现（仍跳过并告警）。
 COLORS = {"eligible": (0, 255, 0), "rejected": (0, 255, 255),
-          "failed": (0, 0, 255), "attempted": (255, 255, 0)}
-LABELS = {"eligible": "PICK", "rejected": "skip", "failed": "FAILED", "attempted": "REAPPEARED"}
+          "failed": (0, 0, 255), "attempted": (255, 255, 0), "other_view": (128, 128, 128)}
+LABELS = {"eligible": "PICK", "rejected": "skip", "failed": "FAILED", "attempted": "REAPPEARED", "other_view": "OTHER"}
 
 
-def render(image: np.ndarray, observations: list[Observation], selected: Observation | None = None) -> np.ndarray:
+def render(image: np.ndarray, observations: list[Observation], selected: Observation | None = None, ignore_regions: tuple[tuple[float, ...], ...] = ()) -> np.ndarray:
     """按画面尺寸缩放标注，显示每个候选和本次选中目标的扎点。"""
     image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
     factor = max(0.5, max(image.shape[:2]) / 1280.0)
@@ -62,16 +62,25 @@ def render(image: np.ndarray, observations: list[Observation], selected: Observa
     number_scale = font_scale * 2.0
     thickness = max(1, round(factor))
     line_width = max(1, round(2 * factor))
+    for x1, y1, x2, y2 in ignore_regions:
+        x1, y1, x2, y2 = map(round, (x1, y1, x2, y2))
+        dash = max(4, round(10 * factor))
+        for x in range(x1, x2, 2 * dash):
+            cv2.line(image, (x, y1), (min(x + dash, x2), y1), (128, 128, 128), 1)
+            cv2.line(image, (x, y2), (min(x + dash, x2), y2), (128, 128, 128), 1)
+        for y in range(y1, y2, 2 * dash):
+            cv2.line(image, (x1, y), (x1, min(y + dash, y2)), (128, 128, 128), 1)
+            cv2.line(image, (x2, y), (x2, min(y + dash, y2)), (128, 128, 128), 1)
     for observation in observations:
         candidate = observation.candidate
         color = COLORS[observation.status]
         poly = np.asarray(candidate.polygon, dtype=np.int32)
-        if len(poly) >= 3:
+        if len(poly) >= 3 and observation.status != "other_view":
             layer = image.copy()
             cv2.fillPoly(layer, [poly], color)
             image = cv2.addWeighted(layer, 0.2, image, 0.8, 0)
         x1, y1, x2, y2 = map(round, candidate.bbox)
-        cv2.rectangle(image, (x1, y1), (x2, y2), color, line_width)
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, 1 if observation.status == "other_view" else line_width)
         label = LABELS[observation.status]
         if observation.reason and observation.status == "rejected":
             label += f" {observation.reason}"

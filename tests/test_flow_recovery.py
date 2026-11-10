@@ -184,6 +184,7 @@ def test_mode_rejection_preserves_picking_state(prepared: tuple, caplog: pytest.
     plc, app = prepared
     # 使用启动时的检测器，让首个扫描位产生可观察的待挑目标。
     vision = next(worker for worker in app.clock._workers if hasattr(worker, "detector"))
+    vision.config = replace(vision.config, responsibility_zone=False)
     vision.detector.detect = lambda image: [PixelTarget(640, 480, 0.9), PixelTarget(660, 480, 0.8)]
     task = plc.request(1)
     drive_until(app, lambda: plc.io.read("result_id") == task)

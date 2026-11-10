@@ -5,6 +5,14 @@ plc:  # PLC 网络参数，现场调试时与设备网络设置核对
   timeout_s: 3.0  # 单次连接及读写超时，单位秒，按网络响应情况调整
   comm_fail_timeout_s: 10.0  # 连续轮询失败允许的最长时间，单位秒，超过后退出等待重启
 scan:  # 模组坐标系下的扫描范围与步距，单位 mm
+  mode: tray  # tray 按料盘覆盖区规划；corners 使用原有角点路径
+  tray:  # 料盘覆盖区从指定角沿方向延伸
+    origin_xy: [0.0, 0.0]  # 占位角点，现场测量后填写模组 XY
+    size_mm: [182.7, 171.8]  # 一代中心范围 168.45×161.16 加视野 14.25×10.69，约为此尺寸
+    x_direction: -1  # 换行沿 X 负方向；1 为正方向
+    y_direction: 1  # 首行沿 Y 正方向；-1 为负方向
+  fov_mm: null  # 视野宽高，null 时由像素尺度和 4024×3036 推算
+  min_overlap_mm: 20.0  # 最小重叠须 ≥ 最长目标毛长度 + 余量，保证至少一图完整出现
   corners:  # 三个 XY 角点，按现场测量结果填写；Z 在下方单独填写
     - [100.0, 0.0]  # 起点：X 最大、Y 最小，首行从此处沿 Y 正方向扫描
     - [0.0, 0.0]  # X 方向终点：与起点同 Y，确定换行沿 X 负方向的范围
@@ -34,6 +42,8 @@ supervisor:  # 父程序轮询和主程序活性监控
   startup_grace_s: 60.0  # 启动后等待首个活性点的最长时间，秒，留出设备预检时间
   child_command: [python, -m, nest_clear.main]  # 主程序命令及参数
 vision:
+  responsibility_zone: true  # 按离扎点最近的视野中心分配；false 恢复原行为
+  ignore_regions_px: []  # 像素矩形 [x1,y1,x2,y2]，现场按针尖实际位置填写
   detector: hair  # 检测器：hair 为生产默认值，stub 用于仿真
   allow_placeholder_calibration: false  # 默认禁止占位相机标定下发坐标；仿真可设 true
   # 一代 40 / 80 像素 × 6.959 µm，分别约为 0.3 / 0.6 mm

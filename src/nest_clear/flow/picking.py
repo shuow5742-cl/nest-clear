@@ -51,7 +51,7 @@ def scan_branch(ctx: FlowContext) -> TreeNode:
             CallWorker(
                 ctx.board,
                 "vision",
-                lambda bb: {"image": bb.read("image"), "pose": bb.read("actual"), "attempted": bb.read("attempted"), "pending": bb.read("pending")},
+                lambda bb: {"image": bb.read("image"), "pose": bb.read("actual"), "attempted": bb.read("attempted"), "pending": bb.read("pending"), "scan": bb.read("scan"), "scan_path": ctx.path},
                 "detection",
                 name="检测并换算目标",
             ),

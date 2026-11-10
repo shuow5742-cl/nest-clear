@@ -77,6 +77,7 @@ class TraySummary:
         d["last_mono"] = row["mono"]
         d["last_ts"] = row["ts"]
         if event == "detection":
+            d["other_view"] = d.get("other_view", 0) + row.get("other_view_count", 0)
             d["scans"] += 1
             d["targets"] += row["count"]
             d["eligible"] = d.get("eligible", 0) + row.get("eligible_count", 0)

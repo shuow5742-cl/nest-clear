@@ -191,3 +191,25 @@ def test_preview_does_not_block_archive(tmp_path, monkeypatch, caplog):
         release.set()
         archive.close()
     assert any(record.levelno == logging.WARNING and '模拟窗口失败' in record.message for record in caplog.records)
+
+
+def test_responsibility_and_ignore(calibration):
+    """按扎点分配三视野，边界相等归本位，屏蔽不进入观察结果。"""
+    from nest_clear.workers.vision import owns_target
+    centers = [(0, 0), (10, 0), (20, 0)]
+    assert owns_target((5, 0), (0, 0), centers)
+    assert owns_target((5, 0), (10, 0), centers)
+    assert not owns_target((11, 0), (0, 0), centers)
+    cfg = replace(load_config('config/nest_clear.yaml').vision, ignore_regions_px=((9, 0, 15, 3),))
+    class Detector:
+        def detect(self, image):
+            return [candidate(x=0), candidate(x=10), candidate(x=20)]
+    worker = VisionWorker(Detector(), calibration, 1, 10, cfg)
+    result = worker.execute({'image': np.zeros((30, 30, 3), np.uint8), 'pose': (0, 0, 0), 'scan': (0, 0, 0), 'scan_path': [(0, 0, 0), (10, 0, 0), (20, 0, 0)], 'attempted': []})
+    assert result['ignored_count'] == 1 and result['other_view_count'] == 1
+    assert len(result['eligible']) == 1 and result['count'] == 2
+    bb = Board(detection=result, attempted=[], view_picks=0, next_index=1, task_id=1)
+    leaf = __import__('nest_clear.flow.leaves', fromlist=['RecordDetection']).RecordDetection(Events(), load_config('config/nest_clear.yaml'))
+    leaf._blackboard = bb
+    leaf.perform()
+    assert bb.read('attempted') == []

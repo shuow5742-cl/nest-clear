@@ -105,11 +105,12 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
         config["vision"].update(
             camera_backend="mock",
             detector="stub",
+            responsibility_zone=False,  # 本测试验证记录，不测试视野分配。
             allow_placeholder_calibration=True,
             calibration=str(ROOT / "config/calibration/camera.yaml"),
             pixels=[[640, 480, 0.9], [660, 480, 0.8]],
         )
-        config["scan"].update(corners=[[1, 0], [0, 0], [1, 0]], step_x=1, step_y=1, z=0)
+        config["scan"].update(mode="corners", corners=[[1, 0], [0, 0], [1, 0]], step_x=1, step_y=1, z=0)
         config["supervisor"].update(
             poll_s=0.02,
             watchdog_s=3,

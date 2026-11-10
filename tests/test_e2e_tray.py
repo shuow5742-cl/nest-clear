@@ -45,7 +45,8 @@ def running(tmp_path: Path) -> Iterator[tuple[FakePLC, Application, SequenceDete
             scan=Scan(((1.0, 0.0), (0.0, 0.0), (1.0, 0.0)), 1.0, 1.0, 0.0),
             record_directory=str(tmp_path),
             tools=((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)),
-            vision=replace(config.vision, camera_backend="mock", detector="stub", allow_placeholder_calibration=True),
+            vision=replace(config.vision, camera_backend="mock", detector="stub", allow_placeholder_calibration=True,
+                           responsibility_zone=False),
             tool_calibration=replace(config.tool_calibration, enabled=False),
         )
         detector = SequenceDetector()

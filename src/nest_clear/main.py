@@ -18,7 +18,7 @@ from nest_clear.comm import Handshake, PLCClient, load_contract
 from nest_clear.config import Config, load_config
 from nest_clear.flow.batch import FlowContext, RequestTracker, build_batch, build_tree
 from nest_clear.guard import GuardError
-from nest_clear.plan.scan_path import build_scan_path
+from nest_clear.plan.scan_path import build_scan_path, scan_details
 from nest_clear.record.events import EventRecorder
 from nest_clear.record.summary import TraySummary
 from nest_clear.record.images import ImageArchive
@@ -136,6 +136,9 @@ class Application:
         )
         self.events.archive = self.archive
         self.path = build_scan_path(config.scan, config.travel)
+        details = scan_details(config.scan, self.path)
+        logger.info("扫描规划：%s", details)
+        self.events.emit("scan_plan", **details)
         calibration_path = Path(config.vision.calibration)
         if not calibration_path.is_absolute():
             calibration_path = Path(config_path).resolve().parent / calibration_path

@@ -66,6 +66,17 @@ class VisionWorker(AsyncRequestWorker):
         if self.config is None:
             targets = [ModuleTarget(p, pixel_to_module(p.u, p.v, pose, self.calibration)) for p in pixels]
             return postprocess(targets, self.radius, self.maximum)
+        def ignored(p: Any) -> bool:
+            """按候选包围盒中心屏蔽现场针区。"""
+            if isinstance(p, HairCandidate):
+                x1, y1, x2, y2 = p.bbox
+                x, y = (x1 + x2) / 2, (y1 + y2) / 2
+            else:
+                x, y = p.u, p.v
+            return any(a <= x <= c and b <= y <= d for a, b, c, d in self.config.ignore_regions_px)
+
+        ignored_count = sum(ignored(p) for p in pixels)
+        pixels = [p for p in pixels if not ignored(p)]
         observations = [
             measure(p, pose, self.calibration, self.config.hair_detector)
             if isinstance(p, HairCandidate) else stub_observation(p, pose, self.calibration)
@@ -90,11 +101,26 @@ class VisionWorker(AsyncRequestWorker):
                 observation.status = "attempted" if match["success"] else "failed"
                 if match["success"]:
                     warnings.append("成功目标再次出现")
+        path = payload.get("scan_path")
+        scan = payload.get("scan")
+        if self.config.responsibility_zone and path and scan is not None:
+            center = pixel_to_module(self.calibration.K[0, 2], self.calibration.K[1, 2], pose, self.calibration)
+            centers = [(center[0] + p[0] - scan[0], center[1] + p[1] - scan[1]) for p in path]
+            for observation in observations:
+                if observation.status == "eligible" and not owns_target(observation.target.xyz[:2], center[:2], centers):
+                    observation.status = "other_view"
         eligible = sorted((o for o in observations if o.status == "eligible"), key=lambda o: o.area, reverse=True)
         return {
             "observations": observations, "eligible": eligible, "result": result, "warnings": warnings,
             "count": len(observations), "eligible_count": len(eligible),
             "rejections": dict(Counter(o.reason for o in observations if o.reason)),
+            "ignored_count": ignored_count, "other_view_count": sum(o.status == "other_view" for o in observations),
             "failed_count": sum(o.status == "failed" for o in observations),
             "elapsed_ms": (time.perf_counter() - start) * 1000,
         }
+
+
+def owns_target(target: tuple[float, ...], center: tuple[float, ...], centers: list[tuple[float, float]]) -> bool:
+    """相等时本视野也负责；距离比较使用扎点的模组坐标。"""
+    distance = math.dist(target, center)
+    return all(distance <= math.dist(target, other) + 1e-9 for other in centers)

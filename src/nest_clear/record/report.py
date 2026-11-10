@@ -139,7 +139,7 @@ def report(root: str | Path, day: date) -> str:
             reasons.update(r.get('rejections', {}))
         rate = success / (success + failed) * 100 if success + failed else 0
         return (f"  {label}：识别 {detected}，可挑 {eligible}，尝试 {attempts}，成功 {success}，失败 {failed}，"
-                f"成功率 {rate:.1f}%，拒绝 {dict(reasons)}，平均检测耗时 {ms / scans if scans else 0:.1f} ms")
+                f"成功率 {rate:.1f}%，其他视野 {sum(r.get('other_view', 0) for r in rows)}，拒绝 {dict(reasons)}，平均检测耗时 {ms / scans if scans else 0:.1f} ms")
     for tray in trays:
         lines.append(recognition(f"盘 {tray.get('tray_id')}", [tray]))
     lines.append(recognition("当天", trays))
