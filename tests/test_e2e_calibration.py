@@ -34,7 +34,7 @@ def rig(tmp_path: Path):
         config = load_config(ROOT / "config/nest_clear.yaml")
         tc = replace(config.tool_calibration, directory=str(tmp_path), cameras={"front": {"backend": "mock"}, "side": {"backend": "mock"}})
         config = replace(config, tools=((1.0, 2.0, 3.0), (0.0, 0.0, 0.0)), plc=replace(config.plc, ip=plc.host, port=plc.port),
-                         vision=replace(config.vision, camera_backend="mock"),
+                         vision=replace(config.vision, camera_backend="mock", allow_placeholder_calibration=True),
                          record_directory=str(tmp_path / "runs"), tool_calibration=tc)
         config = replace(config, scan=Scan(((1.0, 0.0), (0.0, 0.0), (1.0, 0.0)), 1.0, 1.0, 0.0))
         class Detector:
@@ -42,7 +42,9 @@ def rig(tmp_path: Path):
                 self.calls = 0
             def detect(self, image):
                 self.calls += 1
-                return [PixelTarget(640, 480, 0.9), PixelTarget(660, 480, 0.8)] if self.calls == 1 else []
+                if self.calls == 1:
+                    return [PixelTarget(640, 480, 0.9), PixelTarget(660, 480, 0.8)]
+                return [PixelTarget(660, 480, 0.8)] if self.calls == 2 else []
         app = Application(config, ROOT / "config/nest_clear.yaml", detector=Detector())
         for view in VIEWS:
             camera = app.calib_camera.cameras[view.name]
@@ -160,11 +162,11 @@ def test_finish_saves_compensation(rig, tool):
     history = [json.loads(line) for line in (path / "tools_history.jsonl").read_text().splitlines()]
     assert {"Task_ID", "tool", "P0", "P_final", "delta", "old_compensation", "new_compensation"} <= history[-1].keys()
     records = plc.drive_tray(timeout_s=5)
-    assert [r["func_code"] for r in records] == [1, 3, 3, 1, 9]
+    assert [r["func_code"] for r in records] == [1, 3, 1, 3, 1, 1, 9]
     expected1 = expected if tool == 1 else (1, 2, 3)
     expected2 = expected if tool == 2 else (0, 0, 0)
     assert records[1]["pick1_xyz"] == pytest.approx([1 + expected1[0], expected1[1], expected1[2]])
-    assert records[2]["pick2_xyz"] == pytest.approx([3 + expected2[0], expected2[1], expected2[2]])
+    assert records[3]["pick2_xyz"] == pytest.approx([3 + expected2[0], expected2[1], expected2[2]])
     assert {40960, 40966} <= {address for address, _ in plc.writes}
 
 

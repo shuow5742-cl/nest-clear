@@ -27,7 +27,7 @@ def prepared(tmp_path: Path, caplog: pytest.LogCaptureFixture):
         config = replace(
             config,
             plc=replace(config.plc, ip=plc.host, port=plc.port),
-            vision=replace(config.vision, camera_backend="mock"),
+            vision=replace(config.vision, camera_backend="mock", allow_placeholder_calibration=True),
             tool_calibration=replace(config.tool_calibration, enabled=False),
             record_directory=str(tmp_path),
         )
@@ -201,14 +201,15 @@ def test_mode_rejection_preserves_picking_state(prepared: tuple, caplog: pytest.
     assert "挑毛进行中收到对刀指令" in caplog.text
     task = plc.request(60)
     drive_until(app, lambda: plc.io.read("result_id") == task)
+    assert plc.io.read("reply_func") == 1
+    assert plc.wait_reply(task, 5)["scan_xyz"] == pytest.approx(scan)
+    plc.set_actual_xyz(scan)
+    task = plc.request(1)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
     assert plc.io.read("reply_func") == 3
     task = plc.request(60)
     drive_until(app, lambda: plc.io.read("result_id") == task)
     assert plc.io.read("reply_func") == 1
-    plc.set_actual_xyz(plc.wait_reply(task, 5)["scan_xyz"])
-    task = plc.request(1)
-    drive_until(app, lambda: plc.io.read("result_id") == task)
-    assert plc.io.read("reply_func") in (1, 3, 9)
     rows = [json.loads(line) for line in next(Path(app.config.record_directory).glob("*/events.jsonl")).read_text().splitlines()]
     rejected = next(row for row in rows if row["event"] == "mode_rejected")
     assert rejected["mode"] == "挑毛中" and rejected["request_func"] == 100

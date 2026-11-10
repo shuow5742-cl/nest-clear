@@ -54,6 +54,12 @@ class VisionConfig:
     dedup_radius_mm: float
     max_targets: int
     hair_detector: HairDetectConfig = field(default_factory=HairDetectConfig)
+    detector: str = "hair"
+    allow_placeholder_calibration: bool = False
+    review_radius_mm: float = 0.3
+    skip_radius_mm: float = 0.6
+    max_picks_per_view: int = 30
+    preview_window: bool = False
 
 
 @dataclass(frozen=True)
@@ -325,11 +331,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     )
     vision_data = root["vision"]
     if isinstance(vision_data, dict):
-        vision_data = {"hair_detector": {}, **vision_data}
+        vision_data = {"hair_detector": {}, "detector": "hair", "allow_placeholder_calibration": False, "review_radius_mm": 0.3, "skip_radius_mm": 0.6, "max_picks_per_view": 30, "preview": {"window": False}, **vision_data}
     v = _mapping(
         vision_data,
         "vision",
-        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets", "hair_detector"],
+        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets", "hair_detector", "detector", "allow_placeholder_calibration", "review_radius_mm", "skip_radius_mm", "max_picks_per_view", "preview"],
     )
     if v["camera_backend"] not in ("mock", "daheng"):
         _fail("vision.camera_backend", "应为 mock 或 daheng")
@@ -341,9 +347,17 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     radius = _number(v["dedup_radius_mm"], "vision.dedup_radius_mm")
     if radius < 0 or type(v["max_targets"]) is not int or v["max_targets"] < 1:
         _fail("vision", "去重半径应非负，最大目标数应为正整数")
+    if v["detector"] not in ("hair", "stub") or type(v["allow_placeholder_calibration"]) is not bool:
+        _fail("vision", "检测器或占位标定开关无效")
+    preview = _mapping(v["preview"], "vision.preview", ["window"])
+    if type(preview["window"]) is not bool or type(v["max_picks_per_view"]) is not int or v["max_picks_per_view"] < 1:
+        _fail("vision", "预览开关或每视野上限无效")
+    review = _number(v["review_radius_mm"], "vision.review_radius_mm", True)
+    skip = _number(v["skip_radius_mm"], "vision.skip_radius_mm", True)
     vision = VisionConfig(
         v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"],
-        _hair_config(v["hair_detector"])
+        _hair_config(v["hair_detector"]), v["detector"], v["allow_placeholder_calibration"],
+        review, skip, v["max_picks_per_view"], preview["window"]
     )
     tc_data = root["tool_calibration"]
     if isinstance(tc_data, dict) and "enabled" not in tc_data:

@@ -125,6 +125,24 @@ def report(root: str | Path, day: date) -> str:
         )
         if status == "中断":
             attention.append(f"{_time(tray.get('end_time', ''))} 中断的盘 {tray_id}")
+    lines.append("识别与挑取：")
+    def recognition(label, rows):
+        detected = sum(r.get('targets', 0) for r in rows)
+        eligible = sum(r.get('eligible', 0) for r in rows)
+        attempts = sum(sum(r.get('picks', {}).values()) for r in rows)
+        success = sum(r.get('success', 0) for r in rows)
+        failed = sum(r.get('failed', 0) for r in rows)
+        scans = sum(r.get('scans', 0) for r in rows)
+        ms = sum(r.get('detection_ms', 0) for r in rows)
+        reasons = Counter()
+        for r in rows:
+            reasons.update(r.get('rejections', {}))
+        rate = success / (success + failed) * 100 if success + failed else 0
+        return (f"  {label}：识别 {detected}，可挑 {eligible}，尝试 {attempts}，成功 {success}，失败 {failed}，"
+                f"成功率 {rate:.1f}%，拒绝 {dict(reasons)}，平均检测耗时 {ms / scans if scans else 0:.1f} ms")
+    for tray in trays:
+        lines.append(recognition(f"盘 {tray.get('tray_id')}", [tray]))
+    lines.append(recognition("当天", trays))
     lines.append("工具标定：")
     for calibration in calibrations:
         lines.append(

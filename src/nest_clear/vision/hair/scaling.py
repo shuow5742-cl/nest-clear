@@ -106,9 +106,9 @@ def scaled(cfg: HairDetectConfig) -> HairDetectConfig:
     return replace(cfg, **values)
 
 
-def effective_pixel_values(cfg: HairDetectConfig) -> dict:
+def effective_pixel_values(cfg: HairDetectConfig, *, already_scaled: bool = False) -> dict:
     """Return actual parameters for startup logging (call once on reference config)."""
-    result = scaled(cfg)
+    result = cfg if already_scaled else scaled(cfg)
     values = {name: getattr(result, name) for name, (_, category, _) in INVENTORY.items()
               if category != 'fixed'}
     ppm = 1000.0 / result.um_per_px

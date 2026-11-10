@@ -50,6 +50,7 @@ class TraySummary:
             "start_mono": row["mono"],
             "scans": 0,
             "targets": 0,
+            "eligible": 0, "success": 0, "failed": 0, "rejections": {}, "detection_ms": 0.0,
             "picks": {"1": 0, "2": 0},
             "errors_999": 0,
             "reasons_999": {},
@@ -78,6 +79,14 @@ class TraySummary:
         if event == "detection":
             d["scans"] += 1
             d["targets"] += row["count"]
+            d["eligible"] = d.get("eligible", 0) + row.get("eligible_count", 0)
+            d["detection_ms"] = d.get("detection_ms", 0) + row.get("elapsed_ms", 0)
+            for reason, count in row.get("rejections", {}).items():
+                reasons = d.setdefault("rejections", {})
+                reasons[reason] = reasons.get(reason, 0) + count
+        elif event == "pick_result":
+            key = "success" if row.get("success") else "failed"
+            d[key] = d.get(key, 0) + 1
         elif event == "image_dropped":
             d["images_dropped"] = d.get("images_dropped", 0) + 1
         elif event == "error":

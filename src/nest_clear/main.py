@@ -30,7 +30,7 @@ from nest_clear.vision.geometry import load_calibration
 from nest_clear.workers.camera import CameraWorker
 from nest_clear.workers.calib_camera import CalibCameraWorker
 from nest_clear.workers.plc import PlcWorker
-from nest_clear.workers.vision import VisionWorker
+from nest_clear.workers.vision import VisionWorker, HairDetector
 from nest_clear.tooltip.store import load_baseline
 
 logger = logging.getLogger("nest_clear.main")
@@ -140,6 +140,7 @@ class Application:
         if not calibration_path.is_absolute():
             calibration_path = Path(config_path).resolve().parent / calibration_path
         calibration = load_calibration(calibration_path)
+        self.events.calibration_placeholder = calibration.placeholder
         contract = load_contract(ROOT / "config/plc_contract.yaml")
         self.io = PLCClient(config.plc.ip, config.plc.port, config.plc.timeout_s, contract)
         self.plc = PlcWorker(Handshake(self.io, contract))
@@ -155,9 +156,9 @@ class Application:
             if config.tool_calibration.enabled:
                 self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras)
                 self.calib_camera.open()
-            detector = detector or StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels])
+            detector = detector or (HairDetector(config.vision.hair_detector) if config.vision.detector == "hair" else StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels]))
             vision = VisionWorker(
-                detector, calibration, config.vision.dedup_radius_mm, config.vision.max_targets
+                detector, calibration, config.vision.dedup_radius_mm, config.vision.max_targets, config.vision
             )
             self.board = WorldBoard()
             self.clock = BTClock(self.board)

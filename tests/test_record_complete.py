@@ -104,6 +104,8 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
         config["tool_calibration"]["enabled"] = False
         config["vision"].update(
             camera_backend="mock",
+            detector="stub",
+            allow_placeholder_calibration=True,
             calibration=str(ROOT / "config/calibration/camera.yaml"),
             pixels=[[640, 480, 0.9], [660, 480, 0.8]],
         )

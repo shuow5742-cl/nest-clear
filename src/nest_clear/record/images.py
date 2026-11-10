@@ -3,12 +3,15 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 import logging
+import os
+from queue import Empty, Full, Queue
 from pathlib import Path
 import shutil
 import threading
 from typing import Any
 
 import cv2
+import numpy as np
 
 from nest_clear.paths import daily_file
 from .events import EventRecorder
@@ -35,6 +38,9 @@ class ImageArchive:
         self.quality = quality
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.slots = threading.BoundedSemaphore(queue_size)
+        self.preview_queue: Queue[np.ndarray | None] = Queue(maxsize=1)
+        self.preview_thread: threading.Thread | None = None
+        self.preview_lock = threading.Lock()
         removed = []
         cutoff = date.today() - timedelta(days=retention_days)
         for directory in events.directory.glob("????-??-??"):
@@ -62,6 +68,65 @@ class ImageArchive:
     ) -> str | None:
         """检测成功后另行提交叠加图，与原图使用同一文件名前缀。"""
         return self._submit(image, targets, scan, task_id, raw_path)
+
+    def rendered(self, image: np.ndarray, scan: int, task_id: int, raw_path: str | None,
+                 preview: bool = False) -> None:
+        """异步归档画面及最新 JPEG，预览交给独立线程且只保留最新帧。"""
+        self._submit(image, [], scan, task_id, raw_path)
+        self.executor.submit(self._write_live, image.copy())
+        if preview:
+            self._offer_preview(image)
+
+    def _write_live(self, image: np.ndarray) -> None:
+        """在归档线程原子替换最新画面，失败时只记录警告。"""
+        try:
+            path = daily_file(self.events.directory, "live", self.events.clock().date()) / "latest.jpg"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            ok, data = cv2.imencode(".jpg", image)
+            if not ok:
+                raise OSError("JPEG 编码失败")
+            temp = path.with_suffix(".tmp")
+            temp.write_bytes(data.tobytes())
+            os.replace(temp, path)
+        except Exception as exc:
+            logger.warning("最新画面写入失败：%s", exc)
+
+    def _offer_preview(self, image: np.ndarray) -> None:
+        """无等待地替换待预览帧，窗口卡顿时丢弃旧帧而不阻塞检测。"""
+        with self.preview_lock:
+            if self.preview_thread is None:
+                self.preview_thread = threading.Thread(target=self._preview_loop, name="vision-preview", daemon=True)
+                self.preview_thread.start()
+            try:
+                self.preview_queue.put_nowait(image.copy())
+            except Full:
+                try:
+                    self.preview_queue.get_nowait()
+                except Empty:
+                    pass
+                try:
+                    self.preview_queue.put_nowait(image.copy())
+                except Full:
+                    pass
+
+    def _preview_loop(self) -> None:
+        """只在独立守护线程调用 OpenCV 窗口，失败不影响检测及图片归档。"""
+        try:
+            if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+                raise RuntimeError("没有可用的图形显示环境")
+            while True:
+                image = self.preview_queue.get()
+                if image is None:
+                    break
+                cv2.imshow("nest-clear", image)
+                cv2.waitKey(1)
+        except Exception as exc:
+            logger.warning("预览窗口失败：%s", exc)
+        finally:
+            try:
+                cv2.destroyWindow("nest-clear")
+            except Exception:
+                pass
 
     def calibration(self, image: Any, tool: int, task_id: int, iteration: int,
                     view: str, point: tuple[float, float] | None = None,
@@ -161,3 +226,14 @@ class ImageArchive:
     def close(self) -> None:
         """等待已提交的图像写完。"""
         self.executor.shutdown(wait=True)
+        if self.preview_thread is not None and self.preview_thread.is_alive():
+            try:
+                self.preview_queue.put_nowait(None)
+            except Full:
+                try:
+                    self.preview_queue.get_nowait()
+                    self.preview_queue.put_nowait(None)
+                except (Empty, Full):
+                    pass
+            # GUI 后端可能卡住；守护线程不能阻止主程序退出。
+            self.preview_thread.join(timeout=0.1)

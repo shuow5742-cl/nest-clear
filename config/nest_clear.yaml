@@ -33,7 +33,14 @@ supervisor:  # 父程序轮询和主程序活性监控
   watchdog_s: 6.0  # 活性文件超时，秒
   startup_grace_s: 60.0  # 启动后等待首个活性点的最长时间，秒，留出设备预检时间
   child_command: [python, -m, nest_clear.main]  # 主程序命令及参数
-vision:  # 首期使用固定像素占位检测器，真实算法采图后替换
+vision:
+  detector: hair  # 检测器：hair 为生产默认值，stub 用于仿真
+  allow_placeholder_calibration: false  # 默认禁止占位相机标定下发坐标；仿真可设 true
+  # 一代 40 / 80 像素 × 6.959 µm，分别约为 0.3 / 0.6 mm
+  review_radius_mm: 0.3  # 挑后复核身份半径，mm；约等于一代 40 像素
+  skip_radius_mm: 0.6  # 已尝试目标跳过半径，mm；约等于一代 80 像素
+  max_picks_per_view: 30  # 单扫描位最多挑取次数，默认 30 次防死循环
+  preview: {window: false}  # 本地 OpenCV 预览窗口，默认关闭
   camera_backend: daheng  # mock 用于仿真；daheng 按 camera.sn 打开
   calibration: calibration/camera.yaml  # 相对本配置文件所在目录
   pixels: []  # 固定 [u, v, score]；空列表表示无目标
@@ -64,9 +71,9 @@ vision:  # 首期使用固定像素占位检测器，真实算法采图后替换
     seed_grow_max_area: 220000  # 一代种子生长面积上限，参考像素平方
     trace_step: 6.0  # 一代轴追踪步距，参考像素
     pick_dens_sigma: 10.0  # 一代取点密度标准差，参考像素
-    min_length_mm: 2.0  # 兼容模式挑取长度门，毫米
-    min_area_mm2: 1.2  # 兼容模式挑取面积门，平方毫米
-    min_width_mm: 0.35  # 兼容模式等效宽度门，毫米
+    min_length_mm: 2.0  # 物理挑取长度门，毫米
+    min_area_mm2: 1.2  # 物理挑取面积门，平方毫米
+    min_width_mm: 0.35  # 物理等效宽度门，毫米
     max_gray_ratio: 0.70  # 暗度相对背景上限，零表示关闭
     min_dark_frac: 0.15  # 暗像素占比下限，零表示关闭
 

@@ -29,6 +29,8 @@ class SequenceDetector:
         self.calls += 1
         if self.calls == 1:
             return [PixelTarget(640, 480, 0.9), PixelTarget(660, 480, 0.8)]
+        if self.calls == 2:
+            return [PixelTarget(660, 480, 0.8)]
         return []
 
 
@@ -43,7 +45,7 @@ def running(tmp_path: Path) -> Iterator[tuple[FakePLC, Application, SequenceDete
             scan=Scan(((1.0, 0.0), (0.0, 0.0), (1.0, 0.0)), 1.0, 1.0, 0.0),
             record_directory=str(tmp_path),
             tools=((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)),
-            vision=replace(config.vision, camera_backend="mock"),
+            vision=replace(config.vision, camera_backend="mock", detector="stub", allow_placeholder_calibration=True),
             tool_calibration=replace(config.tool_calibration, enabled=False),
         )
         detector = SequenceDetector()
@@ -73,12 +75,12 @@ def test_full_tray_and_wrap(running: tuple[FakePLC, Application, SequenceDetecto
     """首位不拍照、同位挑两次，工具交替，末位无目标后结束。"""
     plc, app, detector, directory = running
     records = plc.drive_tray(timeout_s=5)
-    assert [item["func_code"] for item in records] == [1, 3, 3, 1, 9]
-    assert [item["request_func"] for item in records] == [1, 1, 60, 60, 1]
-    assert [item["task_id"] for item in records] == [1, 2, 3, 1, 2]
-    assert detector.calls == 2
+    assert [item["func_code"] for item in records] == [1, 3, 1, 3, 1, 1, 9]
+    assert [item["request_func"] for item in records] == [1, 1, 60, 1, 60, 1, 1]
+    assert [item["task_id"] for item in records] == [1, 2, 3, 1, 2, 3, 1]
+    assert detector.calls == 4
     assert records[1]["pick1_xyz"] == pytest.approx([2.0, 2.0, 3.0])
-    assert records[2]["pick2_xyz"] == pytest.approx([7.0, 5.0, 6.0])
+    assert records[3]["pick2_xyz"] == pytest.approx([7.0, 5.0, 6.0])
     writes = [address for address, _ in plc.writes]
     assert plc.contract["pick1_x"].address in writes
     assert plc.contract["pick2_x"].address in writes
@@ -138,7 +140,7 @@ def test_nonzero_baseline_ignored(tmp_path: Path, caplog: pytest.LogCaptureFixtu
             config,
             plc=replace(config.plc, ip=plc.host, port=plc.port),
             record_directory=str(tmp_path),
-            vision=replace(config.vision, camera_backend="mock"),
+            vision=replace(config.vision, camera_backend="mock", detector="stub", allow_placeholder_calibration=True),
             tool_calibration=replace(config.tool_calibration, enabled=False),
         )
         app = Application(config, ROOT / "config/nest_clear.yaml")
@@ -189,7 +191,7 @@ def test_next_tray_starts_with_tool_one(running: tuple[FakePLC, Application, Seq
     assert plc.drive_tray(timeout_s=5)[-1]["func_code"] == 9
     detector.calls = 0
     records = plc.drive_tray(timeout_s=5)
-    assert [record["func_code"] for record in records] == [1, 3, 3, 1, 9]
+    assert [record["func_code"] for record in records] == [1, 3, 1, 3, 1, 1, 9]
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         events = [
