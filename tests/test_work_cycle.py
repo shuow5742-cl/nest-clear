@@ -91,6 +91,25 @@ def test_tool_check(min_attempts, red, expected):
     assert r.event["tool_check_total"] == int(red)
 
 
+@pytest.mark.parametrize("status, reason, expected_status, red, code", [
+    ("other_view", None, "other_view", 0, 9),
+    ("rejected", "small", "failed", 1, 10),
+])
+def test_attempted_observation_respects_responsibility(status, reason, expected_status, red, code):
+    c = cycle(tool_check_min_attempts=1, cap_ratio=1)
+    c.start()
+    c.on_coarse((0, 0, 5), [obs(1)])
+    fine(c, 1)
+    c.on_picked()
+    observation = obs(1, status=status, reason=reason)
+    reply = c.on_coarse((0, 0, 5), [observation])
+    assert observation.status == expected_status
+    assert c.red_count == reply.event["red_count"] == red
+    assert reply.removable_count == 0
+    assert reply.event["tool_check_total"] == red
+    assert reply.func_code == code
+
+
 def test_coarse_limit_and_failure_cap():
     c = cycle(cap_ratio=100, max_coarse_shots_per_view=1, tool_check_min_attempts=99)
     c.start()

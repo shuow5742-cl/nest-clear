@@ -153,7 +153,7 @@ class WorkCycle:
         self._coarse_shots += 1
         self._coarse_pose = pose
         for obs in observations:
-            if self.is_attempted(obs.target.xyz):
+            if obs.status in ("eligible", "rejected", "failed", "attempted") and self.is_attempted(obs.target.xyz):
                 obs.status = "failed"
         self._red_count = sum(o.status in ("failed", "attempted") for o in observations)
         eligible = sorted((o for o in observations if o.status == "eligible" and o.reason is None),
