@@ -54,7 +54,7 @@ COLORS = {"eligible": (0, 255, 0), "rejected": (0, 255, 255),
 LABELS = {"eligible": "PICK", "rejected": "skip", "failed": "FAILED", "attempted": "REAPPEARED", "other_view": "OTHER"}
 
 
-def render(image: np.ndarray, observations: list[Observation], selected: Observation | None = None, ignore_regions: tuple[tuple[float, ...], ...] = ()) -> np.ndarray:
+def render(image: np.ndarray, observations: list[Observation], selected: Observation | None = None, ignore_regions: tuple[tuple[float, ...], ...] = (), targets: tuple[Observation, ...] = ()) -> np.ndarray:
     """按画面尺寸缩放标注，显示每个候选和本次选中目标的扎点。"""
     image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
     factor = max(0.5, max(image.shape[:2]) / 1280.0)
@@ -92,8 +92,29 @@ def render(image: np.ndarray, observations: list[Observation], selected: Observa
                                    ("mm", font_scale, thickness)):
             cv2.putText(image, text, (left, baseline), cv2.FONT_HERSHEY_SIMPLEX, scale, color, width, cv2.LINE_AA)
             left += cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, width)[0][0]
+        for index, target in enumerate(targets, 1):
+            if observation is target:
+                cv2.putText(image, str(index), (x1, max(15, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         if observation is selected:
             point = tuple(map(round, candidate.pick_uv))
             cv2.drawMarker(image, point, (0, 0, 255), cv2.MARKER_CROSS, max(7, round(18 * factor)), line_width)
             cv2.circle(image, point, max(3, round(6 * factor)), (0, 0, 255), line_width)
     return image
+
+
+def render_fine(image: np.ndarray, observations: list[Observation], result: object,
+                pose: tuple[float, float, float], calibration: Calibration, half_mm: float) -> np.ndarray:
+    """投影工作面精定位框，标出选中轮廓与裁剪后的新扎点。"""
+    selected = next ( (o for o in observations if o.candidate is result.candidate), None)
+    output = render(image, observations, selected)
+    center = pixel_to_module(calibration.K[0, 2], calibration.K[1, 2], pose, calibration)
+    origin = np.asarray(pose) + calibration.translation
+    corners = np.array([[center[0] + x, center[1] + y, calibration.plane_z]
+                        for x, y in ((-half_mm, -half_mm), (half_mm, -half_mm),
+                                     (half_mm, half_mm), (-half_mm, half_mm))])
+    camera = (corners - origin) @ calibration.rotation
+    uv, _ = cv2.projectPoints(camera, np.zeros(3), np.zeros(3), calibration.K, calibration.distortion)
+    cv2.polylines(output, [np.rint(uv.reshape(-1, 2)).astype(np.int32)], True, (255, 0, 255), 2)
+    if result.pick_uv is not None:
+        cv2.drawMarker(output, tuple(map(round, result.pick_uv)), (255, 255, 0), cv2.MARKER_TILTED_CROSS, 18, 2)
+    return output

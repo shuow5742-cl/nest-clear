@@ -51,7 +51,8 @@ class TraySummary:
             "scans": 0,
             "targets": 0,
             "eligible": 0, "success": 0, "failed": 0, "rejections": {}, "detection_ms": 0.0,
-            "picks": {"1": 0, "2": 0},
+            "picks": 0,
+            "coarse_shots": 0, "fine_shots": 0, "fine_failures": {},
             "errors_999": 0,
             "reasons_999": {},
             "pause_count": 0,
@@ -92,10 +93,16 @@ class TraySummary:
             d["images_dropped"] = d.get("images_dropped", 0) + 1
         elif event == "error":
             d["last_error"] = row.get("reason", "未知")
-        elif event == "reply" and row.get("func") == 3:
-            tool = str(row.get("tool"))
-            if tool in d["picks"]:
-                d["picks"][tool] += 1
+        elif event == "work_cycle" and row.get("type") == "coarse":
+            d["coarse_shots"] = d.get("coarse_shots", 0) + 1
+        elif event == "work_cycle" and row.get("type") == "fine":
+            d["fine_shots"] = d.get("fine_shots", 0) + 1
+            if row.get("reason") == "ok":
+                d["picks"] = (d.get("picks") if isinstance(d.get("picks"), int) else 0) + 1
+            else:
+                reasons = d.setdefault("fine_failures", {})
+                reason = row.get("reason", "未知")
+                reasons[reason] = reasons.get(reason, 0) + 1
         elif event == "reply" and row.get("func") == 999:
             d["errors_999"] += 1
             reason = d["last_error"] or "未知"

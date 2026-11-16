@@ -36,14 +36,14 @@ def test_midnight_and_summary(tmp_path: Path) -> None:
     mono[0] = 16
     events.emit("device_pause_end")
     events.emit("detection", count=2)
-    events.emit("reply", func=3, tool=1)
+    events.emit("work_cycle", type="fine", reason="ok", fine_xyz=[0, 0, 0])
     mono[0] = 20
     events.emit("tray_end")
     first = json.loads((tmp_path / "2026-01-01/events.jsonl").read_text().splitlines()[0])
     assert first["tray_id"] == "2026-01-01_0001"
     assert (tmp_path / "2026-01-02/events.jsonl").exists()
     row = json.loads((tmp_path / "2026-01-01/summary.jsonl").read_text())
-    assert (row["scans"], row["targets"], row["picks"]["1"], row["pause_s"], row["net_s"], row["status"]) == (
+    assert (row["scans"], row["targets"], row["picks"], row["pause_s"], row["net_s"], row["status"]) == (
         1,
         2,
         1,
@@ -198,7 +198,7 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
             assert rows[1]["status"] == "interrupted"
             text = report(tmp_path / "runs", date.today())
             assert "盘数：2" in text and "正常结束" in text
-            assert "挑取 1号 0 次、2号 0 次" in text
+            assert "挑取 0 次" in text
             assert "需要人看的：" in text and "代答 999" in text and "中断的盘" in text
             print("\n" + text)
         finally:
@@ -213,11 +213,11 @@ def test_recover_interrupted_checkpoint(tmp_path: Path) -> None:
     TraySummary(events)
     events.emit("request", task_id=1)
     mono[0] = 4
-    events.emit("reply", func=3, tool=1)
+    events.emit("work_cycle", type="fine", reason="ok", fine_xyz=[0, 0, 0])
     TraySummary(EventRecorder(tmp_path, monotonic=lambda: 50.0))
     path = tmp_path / date.today().isoformat() / "summary.jsonl"
     row = json.loads(path.read_text())
-    assert row["status"] == "interrupted" and row["duration_s"] == 3 and row["picks"]["1"] == 1
+    assert row["status"] == "interrupted" and row["duration_s"] == 3 and row["picks"] == 1
     assert not (tmp_path / "tray_active.json").exists()
 
 

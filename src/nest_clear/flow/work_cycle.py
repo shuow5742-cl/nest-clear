@@ -169,7 +169,9 @@ class WorkCycle:
         event = {"type": "coarse", "view_index": self._view_index, "coarse_shots": self._coarse_shots,
                  "n0": self._n0, "allowed_attempts": self._allowed, "attempts": self._attempts,
                  "removable_count": count, "red_count": self._red_count,
-                 "targets": [o.target.xyz for o in self._targets]}
+                 "targets": [o.target.xyz for o in self._targets],
+                 "red_xyz": [o.target.xyz for o in observations if o.status in ("failed", "attempted")],
+                 "match_radius_mm": self._params.skip_radius_mm}
         if reason is not None:
             change = (self._attempts >= self._params.tool_check_min_attempts and
                       self._red_count + count > self._params.tool_check_ratio * self._n0)
@@ -204,7 +206,7 @@ class WorkCycle:
         self._attempts += 1
         event = {"type": "fine", "view_index": self._view_index, "reason": result.status,
                  "coarse_xyz": coarse, "fine_xyz": fine, "pose": pose,
-                 "offset_mm": getattr(result, "offset_mm", None), "attempts": self._attempts}
+                 "offset_mm": math.dist(coarse[:2], fine[:2]) if fine is not None else None, "attempts": self._attempts}
         if tools is not None:
             self._state = State.WAIT_PICK
             event.update(tool1_xyz=tools[0], tool2_xyz=tools[1])

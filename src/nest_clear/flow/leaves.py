@@ -15,6 +15,8 @@ from nest_clear.guard import GuardError
 from nest_clear.vision.hair_integration import render
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.events import EventRecorder
+from nest_clear.record.images import record_image_error
+from .work_cycle import ProtocolViolation
 from .modes import Mode, transition
 
 logger = logging.getLogger("nest_clear.flow")
@@ -91,6 +93,7 @@ class WaitRequest(CallWorker):
         self._blackboard.write("raw_path", None, self.name)
         self._blackboard.write("started", time.monotonic(), self.name)
         self._blackboard.write("error", f"功能码 {func} 在当前状态不允许", self.name)
+        self._blackboard.write("error_type", None, self.name)
         self.events.emit("request", task_id=task, func=func, name=REQUEST_NAMES.get(func, "未知功能码"))
         return Status.SUCCESS
 
@@ -118,6 +121,7 @@ class Instant(TreeNode):
             return Status.SUCCESS
         except Exception as exc:
             self._blackboard.write("error", str(exc), self.name)
+            self._blackboard.write("error_type", type(exc).__name__, self.name)
             return Status.FAILURE
 
     def on_running(self) -> Status:
@@ -195,7 +199,10 @@ class RecordCapture(Instant):
         archive = getattr(self.events, "archive", None)
         path = None
         if archive is not None:
-            path = archive.raw(bb.read("image"), bb.read("next_index"), bb.read("task_id"))
+            try:
+                path = archive.raw(bb.read("image"), bb.read("next_index"), bb.read("task_id"), bb.read("work_action"))
+            except Exception as exc:
+                record_image_error(self.events, f"{bb.read('work_action')}原图", exc, bb.read("task_id"))
         bb.write("raw_path", path, self.name)
 
 
@@ -213,6 +220,11 @@ class PrepareError(Instant):
         bb = self._blackboard
         func = bb.read("request_func")
         reason = f"未知功能码 {func}" if self.unknown else bb.read("error")
+        cycle = bb.read("work_cycle")
+        error_type = bb.read("error_type")
+        if error_type != ProtocolViolation.__name__:
+            state = cycle.state.value if cycle is not None else "IDLE"
+            reason = f"当前状态 {state}，收到功能码 {func}，处理时出错：{error_type or '业务错误'}: {reason}"
         logger.error("Task_ID=%s 处理失败：%s", bb.read("task_id"), reason)
         self.events.emit(
             "error",
@@ -263,5 +275,5 @@ class CommitReply(Instant):
             raw_path=bb.read("raw_path"),
             elapsed_ms=round((time.monotonic() - bb.read("started")) * 1000, 3),
         )
-        if func == 9:
+        if func in (9, 10):
             self.events.emit("tray_end", task_id=bb.read("task_id"), scans=bb.read("next_index"))

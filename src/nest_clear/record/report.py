@@ -2,8 +2,9 @@
 
 import argparse
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any
@@ -98,11 +99,61 @@ def _log_groups(root: str | Path, day: date) -> tuple[Counter, list[str]]:
     return groups, sorted(errors)
 
 
+def _work_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """按下一次同视野粗拍结算已下发目标；未复拍保留待判定。"""
+    stats = {"coarse": 0, "fine": 0, "picks": 0, "success": 0, "failed": 0,
+             "fine_failures": Counter(), "limits": [], "checks": [], "replies": Counter()}
+    pending = []
+    for row in rows:
+        if row.get("event") == "reply" and row.get("func") in (9, 10, 999):
+            stats["replies"][row["func"]] += 1
+        if row.get("event") != "work_cycle":
+            continue
+        kind = row.get("type")
+        if kind == "fine":
+            stats["fine"] += 1
+            if row.get("reason") != "ok":
+                stats["fine_failures"][row.get("reason")] += 1
+            elif row.get("fine_xyz") is not None:
+                stats["picks"] += 1
+                pending.append(row)
+        elif kind == "coarse":
+            stats["coarse"] += 1
+            remaining = []
+            for attempt in pending:
+                if attempt.get("view_index") != row.get("view_index"):
+                    remaining.append(attempt)
+                    continue
+                points = [attempt.get("coarse_xyz"), attempt.get("fine_xyz")]
+                failed = any(math.dist(point[:2], red[:2]) <= row.get("match_radius_mm", 0)
+                             for point in points if point is not None for red in row.get("red_xyz", []))
+                stats["failed" if failed else "success"] += 1
+            pending = remaining
+            if row.get("reason") in ("cap", "coarse_limit"):
+                stats["limits"].append((row.get("view_index"), row.get("reason")))
+            if row.get("reason") in ("empty", "cap", "coarse_limit"):
+                stats["checks"].append({key: row.get(key) for key in ("view_index", "tool_change", "attempts", "tool_check_min_attempts", "tool_check_total", "tool_check_threshold")})
+    stats["pending"] = len(pending)
+    return stats
+
+
 def report(root: str | Path, day: date) -> str:
     """汇总一日盘记录、状态变化和需要人工处理的事项。"""
     events = _rows(daily_file(root, "events.jsonl", day))
     trays = _rows(daily_file(root, "summary.jsonl", day))
     calibrations = _rows(daily_file(root, "tooltip_summary.jsonl", day))
+    # 一盘跨午夜时摘要归开始日，继续收集后续同盘事件直至结束。
+    tray_events = list(events)
+    next_day = day + timedelta(days=1)
+    unfinished = {row.get("tray_id") for row in trays}
+    while unfinished and next_day <= date.today():
+        later = _rows(daily_file(root, "events.jsonl", next_day))
+        relevant = [row for row in later if row.get("tray_id") in unfinished]
+        tray_events.extend(relevant)
+        unfinished.difference_update(row.get("tray_id") for row in relevant if row.get("event") == "tray_end")
+        if not later:
+            break
+        next_day += timedelta(days=1)
     lines = [f"设备日报 {day.isoformat()}"]
     processes = [row for row in events if row.get("event") in ("process_start", "process_stop")]
     periods = []
@@ -112,37 +163,19 @@ def report(root: str | Path, day: date) -> str:
     lines.append("开机时段：" + ("；".join(periods) or "无记录"))
     lines.append(f"盘数：{len(trays)}")
     attention = []
-    for tray in trays:
-        picks = tray.get("picks", {})
-        status = "正常结束" if tray.get("status") == "normal" else "中断"
-        tray_id = tray.get("tray_id")
-        lines.append(
-            f"盘 {tray_id}：{status}，耗时 {tray.get('duration_s', 0):.1f} 秒，"
-            f"净耗时 {tray.get('net_s', 0):.1f} 秒，扫描位 {tray.get('scans', 0)}，"
-            f"目标 {tray.get('targets', 0)}，挑取 1号 {picks.get('1', 0)} 次、"
-            f"2号 {picks.get('2', 0)} 次，999 {tray.get('errors_999', 0)} 次，"
-            f"丢图 {tray.get('images_dropped', 0)} 张"
-        )
-        if status == "中断":
+    tray_ids = list(dict.fromkeys([row.get("tray_id") for row in trays] +
+                                  [row.get("tray_id") for row in events if row.get("tray_id") and row.get("event") == "work_cycle"]))
+    for tray_id in tray_ids:
+        tray = next((row for row in trays if row.get("tray_id") == tray_id), {})
+        stats = _work_stats([row for row in tray_events if row.get("tray_id") == tray_id])
+        status = "正常结束" if tray.get("status") == "normal" else "中断或进行中"
+        lines.append(f"盘 {tray_id}：{status}，净耗时 {tray.get('net_s', 0):.1f} 秒，粗拍 {stats['coarse']} 次，精定位 {stats['fine']} 次，"
+                     f"精定位失败 {dict(stats['fine_failures'])}，挑取 {stats['picks']} 次，"
+                     f"成功 {stats['success']}、失败 {stats['failed']}、待判定 {stats['pending']}，"
+                     f"上限视野 {stats['limits']}，回 10 判定 {stats['checks']}，"
+                     f"回 9/10/999 次数 {stats['replies'].get(9, 0)}/{stats['replies'].get(10, 0)}/{stats['replies'].get(999, 0)}")
+        if tray and tray.get("status") != "normal":
             attention.append(f"{_time(tray.get('end_time', ''))} 中断的盘 {tray_id}")
-    lines.append("识别与挑取：")
-    def recognition(label, rows):
-        detected = sum(r.get('targets', 0) for r in rows)
-        eligible = sum(r.get('eligible', 0) for r in rows)
-        attempts = sum(sum(r.get('picks', {}).values()) for r in rows)
-        success = sum(r.get('success', 0) for r in rows)
-        failed = sum(r.get('failed', 0) for r in rows)
-        scans = sum(r.get('scans', 0) for r in rows)
-        ms = sum(r.get('detection_ms', 0) for r in rows)
-        reasons = Counter()
-        for r in rows:
-            reasons.update(r.get('rejections', {}))
-        rate = success / (success + failed) * 100 if success + failed else 0
-        return (f"  {label}：识别 {detected}，可挑 {eligible}，尝试 {attempts}，成功 {success}，失败 {failed}，"
-                f"成功率 {rate:.1f}%，其他视野 {sum(r.get('other_view', 0) for r in rows)}，拒绝 {dict(reasons)}，平均检测耗时 {ms / scans if scans else 0:.1f} ms")
-    for tray in trays:
-        lines.append(recognition(f"盘 {tray.get('tray_id')}", [tray]))
-    lines.append(recognition("当天", trays))
     lines.append("工具标定：")
     for calibration in calibrations:
         lines.append(

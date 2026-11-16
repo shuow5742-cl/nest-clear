@@ -19,6 +19,17 @@ from .events import EventRecorder
 logger = logging.getLogger("nest_clear.record.images")
 
 
+def record_image_error(events: EventRecorder, image_name: str, exc: Exception,
+                       task_id: int | None = None) -> None:
+    """记录画面异常；事件记录失败也不能阻断业务应答。"""
+    reason = f"{image_name}失败：{type(exc).__name__}: {exc}"
+    logger.error("%s，Task_ID=%s", reason, task_id)
+    try:
+        events.emit("error", operation="image", image=image_name, task_id=task_id, reason=reason)
+    except Exception:
+        logger.exception("图像错误事件记录失败：%s", image_name)
+
+
 class ImageArchive:
     """限制待写图片总数，防止磁盘慢时占满内存。"""
 
@@ -54,9 +65,10 @@ class ImageArchive:
                 logger.warning("清理图像失败：%s", exc)
         events.emit("images_cleanup", removed=removed, retention_days=retention_days)
 
-    def raw(self, image: Any, scan: int, task_id: int) -> str | None:
+    def raw(self, image: Any, scan: int, task_id: int, stage: str | None = None) -> str | None:
         """拍照成功后立即提交原图并返回相对路径。"""
-        return self._submit(image, None, scan, task_id, None)
+        stem = f"{self.events.tray_id}_{scan:03d}_{stage}_{self.events.clock().strftime('%H%M%S_%f')}" if stage else None
+        return self._submit(image, None, scan, task_id, None, stem)
 
     def overlay(
         self,
@@ -89,7 +101,7 @@ class ImageArchive:
             temp.write_bytes(data.tobytes())
             os.replace(temp, path)
         except Exception as exc:
-            logger.warning("最新画面写入失败：%s", exc)
+            record_image_error(self.events, "最新画面", exc)
 
     def _offer_preview(self, image: np.ndarray) -> None:
         """无等待地替换待预览帧，窗口卡顿时丢弃旧帧而不阻塞检测。"""
@@ -178,7 +190,7 @@ class ImageArchive:
             future.add_done_callback(lambda future: self.slots.release())
         except Exception as exc:
             self.slots.release()
-            logger.warning("提交图像存档失败：%s", exc)
+            record_image_error(self.events, str(relative), exc, task_id)
             self.events.emit("image_dropped", kind=kind, path=str(relative), scan_index=scan, task_id=task_id)
             return None
         self.events.emit("image_submitted", kind=kind, path=str(relative), scan_index=scan, task_id=task_id)
@@ -221,7 +233,7 @@ class ImageArchive:
             if not cv2.imwrite(str(path), image, params):
                 raise OSError("图像编码或写入失败")
         except Exception as exc:
-            logger.warning("图像存档失败 %s：%s", path, exc)
+            record_image_error(self.events, str(path), exc)
 
     def close(self) -> None:
         """等待已提交的图像写完。"""

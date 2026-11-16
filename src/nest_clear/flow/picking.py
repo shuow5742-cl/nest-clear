@@ -7,8 +7,9 @@ from autoweaver.motion_policy.nodes.node import TreeNode
 
 from nest_clear.guard import GuardError
 from nest_clear.plan.scan_path import guard_position
+from nest_clear.record.images import record_image_error
 from nest_clear.vision.fine import fine_camera_xy
-from nest_clear.vision.hair_integration import render
+from nest_clear.vision.hair_integration import render, render_fine
 from .context import FlowContext
 from .leaves import CallWorker, CheckArrival, Instant, Predicate, RecordCapture
 from .work_cycle import WorkCycle
@@ -71,7 +72,7 @@ def apply_reply(bb: Any, reply: Any, ctx: FlowContext) -> None:
     if reply.event.get("warning"):
         logger.warning("视野 %s 粗拍次数超限，强制离开", reply.event.get("view_index"))
         ctx.events.emit("warning", task_id=bb.read("task_id"), reason="粗拍次数超限", scan_index=reply.event.get("view_index"))
-    ctx.events.emit("work_cycle", task_id=bb.read("task_id"), **reply.event)
+    ctx.events.emit("work_cycle", task_id=bb.read("task_id"), reply_func=reply.func_code, **reply.event)
 
 
 class FinishCapture(Instant):
@@ -84,14 +85,25 @@ class FinishCapture(Instant):
         bb = self._blackboard
         cycle = bb.read("work_cycle")
         detection = bb.read("detection")
-        if bb.read("work_action") == "coarse":
+        stage = bb.read("work_action")
+        if stage == "coarse":
             reply = cycle.on_coarse(bb.read("actual"), detection["observations"])
-            archive = getattr(self.ctx.events, "archive", None)
-            if archive:
-                overlay = render(bb.read("image"), detection["observations"], None, self.ctx.config.vision.ignore_regions_px)
-                archive.rendered(overlay, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"), self.ctx.config.vision.preview_window)
         else:
             reply = cycle.on_fine(bb.read("actual"), detection["fine_result"])
+        # 状态转移和应答不受可选画面处理的异常影响。
+        archive = getattr(self.ctx.events, "archive", None)
+        if archive:
+            try:
+                if stage == "coarse":
+                    overlay = render(bb.read("image"), detection["observations"], None,
+                                     self.ctx.config.vision.ignore_regions_px, cycle.targets)
+                else:
+                    overlay = render_fine(bb.read("image"), detection.get("observations", []), detection["fine_result"],
+                                          bb.read("actual"), self.ctx.calibration, self.ctx.config.vision.fine_box_half_mm)
+                archive.rendered(overlay, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"),
+                                 self.ctx.config.vision.preview_window)
+            except Exception as exc:
+                record_image_error(self.ctx.events, f"{stage}叠加图 {bb.read('raw_path')}", exc, bb.read("task_id"))
         apply_reply(bb, reply, self.ctx)
 
 

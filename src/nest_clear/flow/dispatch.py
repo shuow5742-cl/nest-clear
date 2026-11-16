@@ -12,6 +12,7 @@ from .context import FlowContext
 from .leaves import Instant, Predicate, PrepareError
 from .modes import Mode
 from .picking import next_branch, scan_branch
+from .work_cycle import ProtocolViolation
 
 logger = logging.getLogger("nest_clear.flow.dispatch")
 BranchFactory = Callable[[FlowContext], TreeNode]
@@ -45,8 +46,9 @@ class RejectMode(Instant):
         if mode == Mode.PICKING and cycle is not None:
             try:
                 cycle.expect(func)
-            except Exception as exc:
+            except ProtocolViolation as exc:
                 reason = str(exc)
+                bb.write("error_type", type(exc).__name__, self.name)
         elif mode == Mode.PICKING and func in (100, 101):
             reason = "挑毛进行中收到对刀指令，须先停止挑毛并由 PLC 重新初始化"
         else:

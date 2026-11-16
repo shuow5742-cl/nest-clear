@@ -69,6 +69,7 @@ def build_batch(
         "actual": None,
         "done": False,
         "error": "",
+        "error_type": None,
         "raw_path": None,
     }
     return Batch(lambda: build_tree(ctx, branches), params=params, name="一盘")

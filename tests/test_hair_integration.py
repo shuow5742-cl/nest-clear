@@ -50,7 +50,7 @@ def test_report_recognition(tmp_path):
     day = date(2026,1,2); directory = tmp_path / day.isoformat(); directory.mkdir()
     (directory/'summary.jsonl').write_text(json.dumps({'tray_id':'t', 'targets':5, 'eligible':3, 'scans':2, 'picks':{'1':2}, 'success':1, 'failed':1, 'rejections':{'short':2}, 'detection_ms':20})+'\n')
     text = report(tmp_path, day)
-    assert '识别与挑取' in text and '成功率 50.0%' in text and "'short': 2" in text and '10.0 ms' in text
+    assert '粗拍 0 次' in text and '精定位 0 次' in text and '挑取 0 次' in text
 
 
 

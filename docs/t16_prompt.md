@@ -1,3 +1,5 @@
+已并入 design.md §2/§3/§9-7，仅作历史
+
 # 任务 T16：nest-clear 工作模式改为「粗定位 + 精定位」两段流程（协议 V2.0）
 
 仓库 ~/nest-clear（当前 main @ 886d058，299 测试全绿）。先 `git checkout -b t16-two-stage`，全部改动在这个分支上提交（可多次提交），**不要 push、不要合并 main、不要改 ~/Auto_Weaver**。
