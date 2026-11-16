@@ -184,7 +184,7 @@ class FakePLC:
                 request_func = 20
             elif reply["func_code"] == 3:
                 request_func = 60
-            elif reply["func_code"] in (9, 10):
+            elif reply["func_code"] in (9, 10, 999):
                 return records
             else:
                 raise ValueError(f"模拟流程收到未处理的功能码 {reply['func_code']}")

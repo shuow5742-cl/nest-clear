@@ -1,75 +1,118 @@
-"""挑毛请求的行为子树。"""
+"""将工作模式请求接入纯状态机及异步视觉处理。"""
+import logging
+from typing import Any
 
-from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 from autoweaver.motion_policy.nodes.node import TreeNode
 
+from nest_clear.guard import GuardError
+from nest_clear.plan.scan_path import guard_position
+from nest_clear.vision.fine import fine_camera_xy
+from nest_clear.vision.hair_integration import render
 from .context import FlowContext
-from .leaves import CallWorker, CheckArrival, Predicate, PreparePick, PrepareScan, RecordCapture, RecordDetection, ReturnToScan
+from .leaves import CallWorker, CheckArrival, Instant, Predicate, RecordCapture
+from .work_cycle import WorkCycle
+
+logger = logging.getLogger("nest_clear.flow.picking")
 
 
-def choose_next(ctx: FlowContext) -> TreeNode:
-    """目标存在时挑取，否则下发下一扫描位或结束。"""
-    return Fallback(
-        [
-            Sequence(
-                [
-                    Predicate("有待挑目标", lambda bb: bool(bb.read("targets"))),
-                    PreparePick(ctx.config, getattr(ctx.events, "calibration_placeholder", False)),
-                ],
-                name="挑取目标",
-            ),
-            Sequence(
-                [
-                    Predicate("没有待挑目标", lambda bb: not bb.read("targets")),
-                    PrepareScan(ctx.path),
-                ],
-                name="继续扫描",
-            ),
-        ],
-        name="选择挑取或扫描",
-    )
+class WorkRequest(Instant):
+    """检查请求与状态，并在无需拍照时准备状态机应答。"""
+
+    def __init__(self, ctx: FlowContext) -> None:
+        super().__init__(name="检查工作状态")
+        self.ctx = ctx
+
+    def perform(self) -> None:
+        bb = self._blackboard
+        cycle = bb.read("work_cycle")
+        if cycle is None:
+            calibration = self.ctx.calibration
+            def fine_coord(target: tuple[float, float, float], pose: tuple[float, float, float]) -> tuple[float, float, float]:
+                """按标定主点计算精定位拍照坐标。"""
+                xyz = fine_camera_xy(target, pose, calibration)
+                guard_position(xyz, self.ctx.config.travel, "精定位拍照坐标")
+                return xyz
+            def pick_coords(target: tuple[float, float, float]) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+                """分别补偿两把工具并守卫行程。"""
+                if getattr(self.ctx.events, "calibration_placeholder", False) and not self.ctx.config.vision.allow_placeholder_calibration:
+                    raise GuardError("CALIBRATION-PLACEHOLDER", "相机标定为占位值，拒绝下发挑取坐标", "挑取坐标守卫", "完成相机标定。")
+                result = []
+                for offset in self.ctx.config.tools:
+                    xyz = (target[0] + offset[0], target[1] + offset[1], self.ctx.config.pick_depth_z + offset[2])
+                    guard_position(xyz, self.ctx.config.travel, "挑取坐标")
+                    result.append(xyz)
+                return result[0], result[1]
+            cycle = WorkCycle(self.ctx.path, fine_coord, pick_coords, self.ctx.config.vision)
+            bb.write("work_cycle", cycle, self.name)
+        action = cycle.expect(bb.read("request_func"))
+        bb.write("work_action", action, self.name)
+        if action == "start":
+            apply_reply(bb, cycle.start(), self.ctx)
+        elif action == "picked":
+            apply_reply(bb, cycle.on_picked(), self.ctx)
 
 
-def scan_branch(ctx: FlowContext) -> TreeNode:
-    """功能码 1：首次直接扫描，后续到位后拍照和检测。"""
-    first = Sequence(
-        [
-            Predicate("尚未下发扫描位", lambda bb: bb.read("scan") is None),
-            PrepareScan(ctx.path),
-        ],
-        name="首次扫描",
-    )
-    arrived = Sequence(
-        [
-            Predicate("等待扫描到位", lambda bb: bb.read("last_action") == 1),
-            CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", name="读取实时坐标"),
-            CheckArrival(ctx.config, ctx.events),
-            Predicate("到位合格", lambda bb: bb.read("arrival_ok")),
-            CallWorker(ctx.board, "camera", lambda bb: {}, "image", name="拍照"),
-            RecordCapture(ctx.events),
-            CallWorker(
-                ctx.board,
-                "vision",
-                lambda bb: {"image": bb.read("image"), "pose": bb.read("actual"), "attempted": bb.read("attempted"), "pending": bb.read("pending"), "scan": bb.read("scan"), "scan_path": ctx.path},
-                "detection",
-                name="检测并换算目标",
-            ),
-            RecordDetection(ctx.events, ctx.config),
-            choose_next(ctx),
-        ],
-        name="到位拍照检测",
-    )
-    return Fallback([first, arrived], name="首次或到位")
+def apply_reply(bb: Any, reply: Any, ctx: FlowContext) -> None:
+    """将状态机应答映射到统一握手出口。"""
+    payload = {}
+    if reply.scan_xyz is not None:
+        payload["scan_xyz"] = reply.scan_xyz
+        bb.write("scan", reply.scan_xyz, "工作状态机")
+    if reply.tool1_xyz is not None:
+        payload["pick1_xyz"] = reply.tool1_xyz
+        payload["pick2_xyz"] = reply.tool2_xyz
+    if reply.removable_count is not None:
+        payload["removable_count"] = reply.removable_count
+    bb.write("reply_func", reply.func_code, "工作状态机")
+    bb.write("reply_coordinates", payload, "工作状态机")
+    bb.write("reply_tool", None, "工作状态机")
+    bb.write("next_index", bb.read("work_cycle").view_index + 1, "工作状态机")
+    if reply.event.get("warning"):
+        logger.warning("视野 %s 粗拍次数超限，强制离开", reply.event.get("view_index"))
+        ctx.events.emit("warning", task_id=bb.read("task_id"), reason="粗拍次数超限", scan_index=reply.event.get("view_index"))
+    ctx.events.emit("work_cycle", task_id=bb.read("task_id"), **reply.event)
 
 
-def next_branch(ctx: FlowContext) -> TreeNode:
-    """功能码 60：返回当前扫描位，等待到位重拍。"""
-    return Sequence(
-        [
-            Predicate("等待挑取完成", lambda bb: bb.read("last_action") == 3),
-            ReturnToScan(),
-        ],
-        name="挑取完成后继续",
-    )
+class FinishCapture(Instant):
+    """把视觉结果送入相应状态转移。"""
+    def __init__(self, ctx: FlowContext) -> None:
+        super().__init__(name="处理工作拍照")
+        self.ctx = ctx
 
+    def perform(self) -> None:
+        bb = self._blackboard
+        cycle = bb.read("work_cycle")
+        detection = bb.read("detection")
+        if bb.read("work_action") == "coarse":
+            reply = cycle.on_coarse(bb.read("actual"), detection["observations"])
+            archive = getattr(self.ctx.events, "archive", None)
+            if archive:
+                overlay = render(bb.read("image"), detection["observations"], None, self.ctx.config.vision.ignore_regions_px)
+                archive.rendered(overlay, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"), self.ctx.config.vision.preview_window)
+        else:
+            reply = cycle.on_fine(bb.read("actual"), detection["fine_result"])
+        apply_reply(bb, reply, self.ctx)
+
+
+def work_branch(ctx: FlowContext) -> TreeNode:
+    """状态校验后按需校验到位、拍照并处理视觉结果。"""
+    from autoweaver.motion_policy.nodes.control.fallback import Fallback
+    capture = Sequence([
+        Predicate("需要拍照", lambda bb: bb.read("work_action") in ("coarse", "fine")),
+        CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", name="读取实时坐标"),
+        CheckArrival(ctx.config, ctx.events),
+        Predicate("到位合格", lambda bb: bb.read("arrival_ok")),
+        CallWorker(ctx.board, "camera", lambda bb: {}, "image", name="拍照"),
+        RecordCapture(ctx.events),
+        CallWorker(ctx.board, "vision", lambda bb: {"image": bb.read("image"), "pose": bb.read("actual"),
+                   "work_action": bb.read("work_action"), "cycle": bb.read("work_cycle"),
+                   "scan": ctx.path[bb.read("work_cycle").view_index], "scan_path": ctx.path},
+                   "detection", name="检测并换算目标"),
+        FinishCapture(ctx),
+    ], name="到位拍照")
+    return Sequence([WorkRequest(ctx), Fallback([capture, Predicate("无需拍照", lambda bb: bb.read("work_action") in ("start", "picked"))])], name="工作模式")
+
+
+scan_branch = work_branch
+next_branch = work_branch

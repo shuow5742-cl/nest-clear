@@ -24,20 +24,6 @@ def test_physical_gates(calibration):
     assert measure(candidate(ratio=.71), (0,0,0), calibration, cfg).reason == 'pale'
     assert measure(candidate(w=2,h=.6,length=2,ratio=.7,dark=.15), (0,0,0), calibration, replace(cfg,min_width_mm=.6)).reason is None
 
-def test_worker_review_and_skip(calibration):
-    cfg = load_config('config/nest_clear.yaml').vision
-    class Detector:
-        def detect(self, image): return [candidate(x=0), candidate(w=4,x=10)]
-    worker = VisionWorker(Detector(), calibration, 1, 10, cfg)
-    payload = {'image': np.zeros((20,20,3), np.uint8), 'pose': (0,0,0), 'attempted': [], 'pending': None}
-    d = worker.execute(payload)
-    assert d['eligible'][0].area == 4
-    identity = d['eligible'][0].identity
-    payload['pending'] = {'identity': identity, 'scan_index': 1, 'target_index': 1, 'tool': 1}
-    d = worker.execute(payload)
-    assert not d['result']['success'] and d['failed_count'] == 1 and len(d['eligible']) == 1
-    payload['pending']['identity'] = (100,100,1)
-    assert worker.execute(payload)['result']['success']
 
 def test_render_color(calibration):
     o = measure(candidate(w=10,h=5), (0,0,0), calibration, HairDetectConfig())
@@ -55,29 +41,7 @@ class Events:
     def __init__(self): self.rows = []
     def emit(self, event, **kw): self.rows.append((event, kw))
 
-def test_return_to_scan_and_placeholder(calibration):
-    from nest_clear.flow.leaves import ReturnToScan, PreparePick
-    from nest_clear.guard import GuardError
-    cfg = load_config('config/nest_clear.yaml')
-    bb = Board(scan=(1,2,3), targets=[measure(candidate(), (0,0,0), calibration, cfg.vision.hair_detector)], tool_index=0, task_id=2, next_index=1, view_picks=0)
-    leaf = ReturnToScan(); leaf._blackboard = bb; leaf.perform()
-    assert bb.read('reply_func') == 1 and bb.read('reply_coordinates') == {'scan_xyz': (1,2,3)}
-    leaf = PreparePick(cfg, True); leaf._blackboard = bb
-    with pytest.raises(GuardError, match='占位'):
-        leaf.perform()
-    assert bb.read('tool_index') == 0 and bb.read('pending') is None
 
-def test_view_limit(calibration):
-    from nest_clear.flow.leaves import RecordDetection
-    cfg = load_config('config/nest_clear.yaml')
-    class Detector:
-        def detect(self, image): return [candidate()]
-    worker = VisionWorker(Detector(), calibration, 1, 10, cfg.vision)
-    d = worker.execute({'image': np.zeros((20,20,3),np.uint8), 'pose': (0,0,0)})
-    bb = Board(detection=d, view_picks=cfg.vision.max_picks_per_view, next_index=1, task_id=1)
-    events = Events(); leaf = RecordDetection(events, cfg); leaf._blackboard = bb; leaf.perform()
-    assert bb.read('targets') == []
-    assert any(name == 'warning' for name, _ in events.rows)
 
 def test_report_recognition(tmp_path):
     import json
@@ -88,56 +52,8 @@ def test_report_recognition(tmp_path):
     text = report(tmp_path, day)
     assert '识别与挑取' in text and '成功率 50.0%' in text and "'short': 2" in text and '10.0 ms' in text
 
-def test_port_free_tray_sequence(calibration):
-    from nest_clear.flow.leaves import PrepareScan, PreparePick, ReturnToScan, RecordDetection
-    cfg = load_config('config/nest_clear.yaml')
-    cfg = replace(cfg, tools=((0,0,0),(0,0,0)), travel=((-100,100),(-100,100),(-100,100)))
-    class Detector:
-        calls = 0
-        def detect(self, image):
-            self.calls += 1
-            return [candidate(x=0), candidate(x=10)] if self.calls == 1 else ([candidate(x=10)] if self.calls == 2 else [])
-    worker = VisionWorker(Detector(), calibration, 1, 10, cfg.vision)
-    events = Events()
-    bb = Board(next_index=0, scan=None, view_picks=0, tool_index=0, attempted=[], pending=None, task_id=1, image=np.zeros((30,30,3),np.uint8), actual=(0,0,0))
-    def run(leaf):
-        leaf._blackboard = bb
-        leaf.perform()
-    run(PrepareScan([(0,0,0)]))
-    assert bb.read('reply_func') == 1
-    for number in range(3):
-        bb.write('detection', worker.execute({'image': bb.read('image'), 'pose': bb.read('actual'), 'attempted': bb.read('attempted'), 'pending': bb.read('pending')}))
-        run(RecordDetection(events, cfg))
-        if number < 2:
-            run(PreparePick(cfg))
-            assert bb.read('reply_func') == 3 and bb.read('reply_tool') == number + 1
-            run(ReturnToScan())
-            assert bb.read('reply_coordinates') == {'scan_xyz': (0,0,0)}
-        else:
-            run(PrepareScan([(0,0,0)]))
-            assert bb.read('reply_func') == 9
-    assert len([e for e, row in events.rows if e == 'pick_result' and row['success']]) == 2
 
 
-def test_placeholder_guard_returns_999_with_chinese_diagnostic(calibration):
-    from autoweaver.motion_policy.nodes.node import Status
-    from nest_clear.flow.leaves import PrepareError, PreparePick
-
-    cfg = load_config('config/nest_clear.yaml')
-    assert not cfg.vision.allow_placeholder_calibration
-    observation = measure(candidate(), (0, 0, 0), calibration, cfg.vision.hair_detector)
-    bb = Board(targets=[observation], tool_index=0, task_id=4, next_index=1, request_func=1, raw_path=None)
-    pick = PreparePick(cfg, placeholder=True)
-    pick._blackboard = bb
-    assert pick.on_start() == Status.FAILURE
-    events = Events()
-    error = PrepareError(events)
-    error._blackboard = bb
-    error.perform()
-    assert bb.read('reply_func') == 999 and bb.read('reply_coordinates') == {}
-    reason = bb.read('error')
-    assert all(part in reason for part in ('CALIBRATION-PLACEHOLDER', '发生了什么：', '位置：', '排查建议：', '占位'))
-    assert events.rows[-1][1]['reason'] == reason
 
 
 def test_render_scales_labels_and_distinguishes_reappeared(calibration, monkeypatch):
@@ -208,8 +124,3 @@ def test_responsibility_and_ignore(calibration):
     result = worker.execute({'image': np.zeros((30, 30, 3), np.uint8), 'pose': (0, 0, 0), 'scan': (0, 0, 0), 'scan_path': [(0, 0, 0), (10, 0, 0), (20, 0, 0)], 'attempted': []})
     assert result['ignored_count'] == 1 and result['other_view_count'] == 1
     assert len(result['eligible']) == 1 and result['count'] == 2
-    bb = Board(detection=result, attempted=[], view_picks=0, next_index=1, task_id=1)
-    leaf = __import__('nest_clear.flow.leaves', fromlist=['RecordDetection']).RecordDetection(Events(), load_config('config/nest_clear.yaml'))
-    leaf._blackboard = bb
-    leaf.perform()
-    assert bb.read('attempted') == []

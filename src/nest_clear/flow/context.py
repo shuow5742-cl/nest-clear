@@ -25,5 +25,6 @@ class FlowContext:
     path: list[tuple[float, float, float]]
     tracker: RequestTracker
     events: EventRecorder
+    calibration: Any = None
 
 

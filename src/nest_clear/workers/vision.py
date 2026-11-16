@@ -12,6 +12,7 @@ from autoweaver.worker import AsyncRequestWorker
 from nest_clear.config import VisionConfig
 from nest_clear.vision.detector import Detector, ModuleTarget, PixelTarget, postprocess
 from nest_clear.vision.geometry import Calibration, pixel_to_module
+from nest_clear.vision.fine import FineResult, select_fine_target
 from nest_clear.vision.hair import HairCandidate, HairDetectConfig, detect_candidates, effective_pixel_values, scaled
 from nest_clear.vision.hair_integration import Observation, measure
 
@@ -82,25 +83,29 @@ class VisionWorker(AsyncRequestWorker):
             if isinstance(p, HairCandidate) else stub_observation(p, pose, self.calibration)
             for p in pixels
         ]
-        pending = payload.get("pending")
+        if payload.get("work_action") in ("coarse", "fine"):
+            cycle = payload["cycle"]
+            path = payload.get("scan_path")
+            scan = payload.get("scan")
+            if payload["work_action"] == "coarse" and self.config.responsibility_zone and path and scan is not None:
+                center = pixel_to_module(self.calibration.K[0, 2], self.calibration.K[1, 2], pose, self.calibration)
+                centers = [(center[0] + p[0] - scan[0], center[1] + p[1] - scan[1]) for p in path]
+                for observation in observations:
+                    if observation.status == "eligible" and not owns_target(observation.target.xyz[:2], center[:2], centers):
+                        observation.status = "other_view"
+            result = {"observations": observations}
+            if payload["work_action"] == "fine":
+                by_candidate = {id(o.candidate): o for o in observations}
+                result["fine_result"] = select_fine_target(
+                    payload["image"], [o.candidate for o in observations], pose, self.calibration,
+                    box_half_mm=self.config.fine_box_half_mm,
+                    is_attempted=lambda c: cycle.is_attempted(by_candidate[id(c)].target.xyz),
+                    passes_gate=lambda c: by_candidate[id(c)].reason is None,
+                    cfg=self.config.hair_detector,
+                )
+            return result
         result = None
-        if pending:
-            nearest = min(observations, key=lambda o: math.dist(o.identity[:2], pending["identity"][:2]), default=None)
-            distance = math.dist(nearest.identity[:2], pending["identity"][:2]) if nearest else None
-            failed = distance is not None and distance <= self.config.review_radius_mm
-            result = {**pending, "success": not failed, "current_identity": nearest.identity if nearest else None,
-                      "distance_mm": distance}
-        attempted = list(payload.get("attempted", []))
-        if result:
-            attempted.append({"identity": pending["identity"], "success": result["success"]})
         warnings = []
-        for observation in observations:
-            match = next((a for a in attempted if math.dist(observation.identity[:2], a["identity"][:2])
-                          <= self.config.skip_radius_mm), None)
-            if match:
-                observation.status = "attempted" if match["success"] else "failed"
-                if match["success"]:
-                    warnings.append("成功目标再次出现")
         path = payload.get("scan_path")
         scan = payload.get("scan")
         if self.config.responsibility_zone and path and scan is not None:

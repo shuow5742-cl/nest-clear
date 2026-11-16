@@ -143,6 +143,7 @@ class Application:
         if not calibration_path.is_absolute():
             calibration_path = Path(config_path).resolve().parent / calibration_path
         calibration = load_calibration(calibration_path)
+        self.calibration = calibration
         self.events.calibration_placeholder = calibration.placeholder
         contract = load_contract(ROOT / "config/plc_contract.yaml")
         self.io = PLCClient(config.plc.ip, config.plc.port, config.plc.timeout_s, contract)
@@ -170,7 +171,7 @@ class Application:
             baseline = self.plc.initialize()
             self.events.emit("baseline", task_id=baseline, ignored=bool(baseline))
             self.tracker = RequestTracker(baseline)
-            context = FlowContext(self.board, config, self.path, self.tracker, self.events)
+            context = FlowContext(self.board, config, self.path, self.tracker, self.events, calibration)
             logger.info("主程序行为树结构：\n%s", format_tree(build_tree(context)))
             self.io.write("algorithm_ready", 1)
         except BaseException:
@@ -202,7 +203,7 @@ class Application:
                         "BATCH-FAILED", f"一盘执行失败：{result}", "主程序", "查看前面的 PLC 或行为树错误。"
                     )
             self.handle = self.clock.submit(
-                build_batch(self.board, self.config, self.path, self.tracker, self.events)
+                build_batch(self.board, self.config, self.path, self.tracker, self.events, calibration=self.calibration)
             )
         self.clock.tick_once()
 

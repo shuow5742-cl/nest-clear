@@ -145,10 +145,37 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
             deadline = time.monotonic() + 5
             while not path.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
+            # PLC 清除任务编号并重新拉起初始化位，父程序按既有边沿重启主程序。
+            state = tmp_path / "runs/supervisor.json"
+            events_path = tmp_path / "runs" / date.today().isoformat() / "events.jsonl"
+            plc.set_status(0)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if state.exists() and json.loads(state.read_text()).get("word") == 0:
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError("父程序未观察到初始化位清零")
+            plc.io.write("task_id", 0)
+            plc.task_id = 0
+            plc.set_status(128)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                assert process.poll() is None
+                events = [json.loads(line) for line in events_path.read_text().splitlines()]
+                starts = [row["child_pid"] for row in events if row["event"] == "child_start"]
+                if len(starts) >= 2 and plc.io.read("algorithm_ready") == 1:
+                    break
+                time.sleep(0.05)
+            else:
+                raise AssertionError("初始化后主程序未重启并就绪")
+            assert starts[-1] != starts[0]
+            assert plc.io.read("task_id") == 0
+            assert plc.io.read("result_id") == 0
+            child = starts[-1]
             first_task = plc.request(1)
             assert plc.wait_reply(first_task, 8)["func_code"] == 1
             plc.set_status(8)
-            state = tmp_path / "runs/supervisor.json"
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 if json.loads(state.read_text()).get("paused"):
@@ -156,10 +183,7 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
                 time.sleep(0.02)
             else:
                 raise AssertionError("父程序未发布暂停")
-            pending = plc.request(1)
-            events_path = tmp_path / "runs" / date.today().isoformat() / "events.jsonl"
-            events = [json.loads(line) for line in events_path.read_text().splitlines()]
-            child = next(row["child_pid"] for row in events if row["event"] == "child_start")
+            pending = plc.request(20)
             os.kill(child, signal.SIGKILL)
             assert plc.wait_reply(pending, 8)["func_code"] == 999
             plc.set_status(0)
@@ -174,7 +198,7 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
             assert rows[1]["status"] == "interrupted"
             text = report(tmp_path / "runs", date.today())
             assert "盘数：2" in text and "正常结束" in text
-            assert "挑取 1号 2 次、2号 2 次" in text
+            assert "挑取 1号 0 次、2号 0 次" in text
             assert "需要人看的：" in text and "代答 999" in text and "中断的盘" in text
             print("\n" + text)
         finally:

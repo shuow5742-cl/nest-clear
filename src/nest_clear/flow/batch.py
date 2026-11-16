@@ -49,10 +49,12 @@ def build_batch(
     tracker: RequestTracker,
     events: EventRecorder,
     branches: Mapping[int, Branch] | None = None,
+    calibration: Any = None,
 ) -> Batch:
     """创建全新树及私有 Blackboard，初始模式为空闲。"""
-    ctx = FlowContext(board, config, path, tracker, events)
+    ctx = FlowContext(board, config, path, tracker, events, calibration)
     params = {
+        "work_cycle": None,
         "mode": Mode.IDLE,
         "next_index": 0,
         "scan": None,

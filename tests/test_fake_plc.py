@@ -20,30 +20,51 @@ def test_exchange_and_wrap():
         client.close()
 
 def test_tray():
+    """模拟工作模式，验证首次请求、到位和挑取完成的功能码。"""
     with FakePLC() as plc:
         client = PLCClient(plc.host, plc.port, 1, plc.contract)
         hand = Handshake(client, plc.contract)
+        stop = threading.Event()
+        errors = []
+
         def responder():
-            import time
+            """有限等待请求，异常交给测试线程报告。"""
             last = 0
-            while True:
-                task, func = hand.read_request()
-                if not task or task == last:
-                    time.sleep(0.005); continue
-                last = task
-                if task == 1: hand.write_reply(task, 1, {'scan_xyz': [1, 2, 3]})
-                elif task == 2:
-                    assert client.read_real32_block(plc.contract['actual_x'].address, 3) == [1, 2, 3]
-                    hand.write_reply(task, 3, {'pick1_xyz': [4, 5, 6]})
-                else:
-                    assert func == 60
-                    hand.write_reply(task, 9)
-                    return
-        thread = threading.Thread(target=responder); thread.start()
-        records = plc.drive_tray()
-        thread.join(3); client.close()
-        assert [r['func_code'] for r in records] == [1, 3, 9]
-        assert [r['request_func'] for r in records] == [1, 1, 60]
+            try:
+                while not stop.is_set():
+                    task, func = hand.read_request()
+                    if not task or task == last:
+                        stop.wait(0.005)
+                        continue
+                    last = task
+                    if task == 1:
+                        assert func == 1
+                        hand.write_reply(task, 1, {"scan_xyz": [1, 2, 3]})
+                    elif task == 2:
+                        assert func == 20
+                        assert client.read_real32_block(plc.contract["actual_x"].address, 3) == [1, 2, 3]
+                        hand.write_reply(task, 3, {"pick1_xyz": [4, 5, 6], "pick2_xyz": [7, 8, 9]})
+                    else:
+                        assert func == 60
+                        hand.write_reply(task, 9)
+                        return
+            except Exception as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=responder, name="fake-plc-responder", daemon=True)
+        thread.start()
+        try:
+            records = plc.drive_tray()
+            assert [r["func_code"] for r in records] == [1, 3, 9]
+            assert [r["request_func"] for r in records] == [1, 20, 60]
+        finally:
+            stop.set()
+            thread.join(3)
+            client.close()
+            if thread.is_alive():
+                thread.join(3)
+        assert not thread.is_alive()
+        assert not errors
 
 
 def test_plc_exception_and_reconnect(caplog):

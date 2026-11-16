@@ -10,6 +10,7 @@ from nest_clear.config import load_config
 from nest_clear.flow.batch import format_tree
 from nest_clear.flow.dispatch import BRANCHES
 from nest_clear.flow.modes import Mode
+from nest_clear.flow.work_cycle import State
 from nest_clear.flow.leaves import PrepareScan
 from nest_clear.guard import GuardError
 from nest_clear.main import Application
@@ -27,7 +28,8 @@ def prepared(tmp_path: Path, caplog: pytest.LogCaptureFixture):
         config = replace(
             config,
             plc=replace(config.plc, ip=plc.host, port=plc.port),
-            vision=replace(config.vision, camera_backend="mock", allow_placeholder_calibration=True),
+            vision=replace(config.vision, camera_backend="mock", detector="stub", pixels=(),
+                           allow_placeholder_calibration=True),
             tool_calibration=replace(config.tool_calibration, enabled=False),
             record_directory=str(tmp_path),
         )
@@ -177,45 +179,27 @@ def test_poll_timeout_config_default_and_validation(tmp_path: Path) -> None:
 
 
 def test_mode_rejection_preserves_picking_state(prepared: tuple, caplog: pytest.LogCaptureFixture) -> None:
-    """挑毛期间拒绝对刀，保留目标和工具顺序并可继续完成本盘。"""
-    import json
-    from nest_clear.vision.detector import PixelTarget
-
+    """挑毛期间拒绝对刀，并保持原工作状态。"""
     plc, app = prepared
-    # 使用启动时的检测器，让首个扫描位产生可观察的待挑目标。
-    vision = next(worker for worker in app.clock._workers if hasattr(worker, "detector"))
-    vision.config = replace(vision.config, responsibility_zone=False)
-    vision.detector.detect = lambda image: [PixelTarget(640, 480, 0.9), PixelTarget(660, 480, 0.8)]
     task = plc.request(1)
     drive_until(app, lambda: plc.io.read("result_id") == task)
     scan = plc.wait_reply(task, 5)["scan_xyz"]
-    plc.set_actual_xyz(scan)
-    task = plc.request(1)
-    drive_until(app, lambda: plc.io.read("result_id") == task)
-    bb = app.handle.batch.blackboard
-    before = (bb.read("next_index"), list(bb.read("targets")), bb.read("tool_index"))
+    cycle = app.handle.batch.blackboard.read("work_cycle")
+    before = cycle.state
     task = plc.request(100)
-    with caplog.at_level(logging.WARNING):
-        drive_until(app, lambda: plc.io.read("result_id") == task)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
     assert plc.io.read("reply_func") == 999
-    assert (bb.read("next_index"), list(bb.read("targets")), bb.read("tool_index")) == before
-    assert "挑毛进行中收到对刀指令" in caplog.text
-    task = plc.request(60)
-    drive_until(app, lambda: plc.io.read("result_id") == task)
-    assert plc.io.read("reply_func") == 1
-    assert plc.wait_reply(task, 5)["scan_xyz"] == pytest.approx(scan)
+    assert cycle.state == before
     plc.set_actual_xyz(scan)
-    task = plc.request(1)
+    task = plc.request(20)
     drive_until(app, lambda: plc.io.read("result_id") == task)
-    assert plc.io.read("reply_func") == 3
-    task = plc.request(60)
-    drive_until(app, lambda: plc.io.read("result_id") == task)
-    assert plc.io.read("reply_func") == 1
-    rows = [json.loads(line) for line in next(Path(app.config.record_directory).glob("*/events.jsonl")).read_text().splitlines()]
-    rejected = next(row for row in rows if row["event"] == "mode_rejected")
-    assert rejected["mode"] == "挑毛中" and rejected["request_func"] == 100
-    assert rejected["tray_id"] and rejected["scan_index"] == before[0]
-    assert "重新初始化" in rejected["reason"]
+    reply = plc.wait_reply(task, 5)
+    assert reply["func_code"] == 1
+    assert cycle.view_index == 1
+    assert cycle.state == State.WAIT_COARSE
+    assert cycle.coarse_shots == 0
+    assert reply["scan_xyz"] == pytest.approx(app.path[1])
+    assert app.tracker.processed == task
 
 
 @pytest.mark.parametrize("code", [110, 120, 130])

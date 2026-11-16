@@ -72,43 +72,37 @@ def running(tmp_path: Path) -> Iterator[tuple[FakePLC, Application, SequenceDete
         assert not errors
 
 
-def test_full_tray_and_wrap(running: tuple[FakePLC, Application, SequenceDetector, Path]) -> None:
-    """首位不拍照、同位挑两次，工具交替，末位无目标后结束。"""
+def test_full_tray_and_wrap(running, monkeypatch):
+    """多视野依次经历三种精定位失败与成功，再检查两工具和提交顺序。"""
+    from types import SimpleNamespace
+    from nest_clear.vision.fine import FineResult
+    from nest_clear.workers.vision import VisionWorker
     plc, app, detector, directory = running
+    statuses = iter(("fine_empty", "fine_point_outside", "fine_rejected", "ok"))
+    def execute(worker, payload):
+        """注入确定的视觉结果，实际握手仍通过 TCP。"""
+        cycle = payload["cycle"]
+        if payload["work_action"] == "coarse":
+            observations = []
+            if cycle.view_index == 0 and cycle.attempt_count < 4:
+                for x in (10., 20., 30., 40.):
+                    observations.append(SimpleNamespace(target=SimpleNamespace(xyz=(x, 0., 0.)), status="eligible", reason=None, area=50 - x))
+            return {"observations": observations}
+        status = next(statuses)
+        return {"fine_result": FineResult(status, target_xyz=(40., 0., 0.) if status == "ok" else None)}
+    monkeypatch.setattr("nest_clear.flow.picking.render", lambda image, *args: image)
+    monkeypatch.setattr(VisionWorker, "execute", execute)
     records = plc.drive_tray(timeout_s=5)
-    assert [item["func_code"] for item in records] == [1, 3, 1, 3, 1, 1, 9]
-    assert [item["request_func"] for item in records] == [1, 1, 60, 1, 60, 1, 1]
-    assert [item["task_id"] for item in records] == [1, 2, 3, 1, 2, 3, 1]
-    assert detector.calls == 4
-    assert records[1]["pick1_xyz"] == pytest.approx([2.0, 2.0, 3.0])
-    assert records[3]["pick2_xyz"] == pytest.approx([7.0, 5.0, 6.0])
+    assert records[-1]["func_code"] == 9
+    assert sum(row["func_code"] == 3 for row in records) == 1
+    pick = next(row for row in records if row["func_code"] == 3)
+    assert pick["pick1_xyz"] == pytest.approx([41., 2., 3.])
+    assert pick["pick2_xyz"] == pytest.approx([44., 5., 6.])
     writes = [address for address, _ in plc.writes]
-    assert plc.contract["pick1_x"].address in writes
-    assert plc.contract["pick2_x"].address in writes
-    assert writes.index(plc.contract["pick1_x"].address) < writes.index(plc.contract["pick2_x"].address)
-    for name in ("pick1_x", "pick2_x"):
-        index = writes.index(plc.contract[name].address)
-        assert writes[index : index + 3] == [
-            plc.contract[name].address,
-            plc.contract["reply_func"].address,
-            plc.contract["result_id"].address,
-        ]
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        events = [
-            json.loads(line) for line in next(directory.glob("*/events.jsonl")).read_text().splitlines()
-        ]
-        if any(event["event"] == "tray_end" for event in events):
-            break
-        time.sleep(0.005)
-    replies = [event for event in events if event["event"] == "reply"]
-    assert [event["tool"] for event in replies if event["func"] == 3] == [1, 2]
-    assert len([event for event in events if event["event"] == "tray_end"]) == 1
-    changes = [event for event in events if event["event"] == "mode_change"]
-    assert [(event["previous_mode"], event["mode"]) for event in changes] == [
-        ("空闲", "挑毛中"), ("挑毛中", "空闲")
-    ]
-    assert all(event["tray_id"] and event["task_id"] and "scan_index" in event for event in changes)
+    i = writes.index(plc.contract["pick1_x"].address)
+    assert writes[i:i + 4] == [plc.contract[name].address for name in ("pick1_x", "pick2_x", "reply_func", "result_id")]
+    assert plc.wait_reply(plc.request(1), 5)["func_code"] == 999
+
 
 
 def test_unknown_and_arrival_error(running: tuple[FakePLC, Application, SequenceDetector, Path]) -> None:
@@ -121,10 +115,10 @@ def test_unknown_and_arrival_error(running: tuple[FakePLC, Application, Sequence
     assert reply["func_code"] == 1
     assert detector.calls == 0
     plc.set_actual_xyz([100, 100, 100])
-    task = plc.request(1)
+    task = plc.request(20)
     assert plc.wait_reply(task, 5)["func_code"] == 999
     events = [json.loads(line) for line in next(directory.glob("*/events.jsonl")).read_text().splitlines()]
-    assert any(event["event"] == "error" and "未知功能码" in event["reason"] for event in events)
+    assert any(event["event"] == "error" and "功能码 123" in event["reason"] for event in events)
     assert any(event["event"] == "arrival" and not event["ok"] for event in events)
 
 
@@ -176,7 +170,7 @@ def test_detector_failure_returns_999(running: tuple[FakePLC, Application, Seque
     task = plc.request(1)
     reply = plc.wait_reply(task, 5)
     plc.set_actual_xyz(reply["scan_xyz"])
-    task = plc.request(1)
+    task = plc.request(20)
     assert plc.wait_reply(task, 5)["func_code"] == 999
     app.archive.close()
     events = [json.loads(line) for line in next(directory.glob("*/events.jsonl")).read_text().splitlines()]
@@ -186,20 +180,10 @@ def test_detector_failure_returns_999(running: tuple[FakePLC, Application, Seque
     assert reply["raw_path"] == error["raw_path"]
 
 
-def test_next_tray_starts_with_tool_one(running: tuple[FakePLC, Application, SequenceDetector, Path]) -> None:
-    """回 9 后重新提交 Batch，新盘工具顺序从一号重新开始。"""
+def test_terminal_rejects_new_tray(running, monkeypatch):
+    """一盘结束后保持终态，直到 PLC 重启主程序。"""
+    from nest_clear.workers.vision import VisionWorker
     plc, app, detector, directory = running
+    monkeypatch.setattr(VisionWorker, "execute", lambda worker, payload: {"observations": []})
     assert plc.drive_tray(timeout_s=5)[-1]["func_code"] == 9
-    detector.calls = 0
-    records = plc.drive_tray(timeout_s=5)
-    assert [record["func_code"] for record in records] == [1, 3, 1, 3, 1, 1, 9]
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        events = [
-            json.loads(line) for line in next(directory.glob("*/events.jsonl")).read_text().splitlines()
-        ]
-        if sum(event["event"] == "tray_end" for event in events) == 2:
-            break
-        time.sleep(0.005)
-    picks = [event["tool"] for event in events if event["event"] == "reply" and event["func"] == 3]
-    assert picks == [1, 2, 1, 2]
+    assert plc.wait_reply(plc.request(1), 5)["func_code"] == 999

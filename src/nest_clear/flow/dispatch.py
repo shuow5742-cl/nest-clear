@@ -18,7 +18,8 @@ BranchFactory = Callable[[FlowContext], TreeNode]
 Branch = tuple[frozenset[Mode], BranchFactory]
 BRANCHES: dict[int, Branch] = {
     1: (frozenset((Mode.IDLE, Mode.PICKING)), scan_branch),
-    60: (frozenset((Mode.PICKING,)), next_branch),
+    20: (frozenset((Mode.IDLE, Mode.PICKING)), scan_branch),
+    60: (frozenset((Mode.IDLE, Mode.PICKING)), next_branch),
     100: (frozenset((Mode.IDLE,)), start_branch),
     101: (frozenset((Mode.IDLE,)), start_branch),
     110: (frozenset((Mode.CALIBRATING_1,)), continue_branch),
@@ -40,7 +41,13 @@ class RejectMode(Instant):
         bb = self._blackboard
         mode = bb.read("mode")
         func = bb.read("request_func")
-        if mode == Mode.PICKING and func in (100, 101):
+        cycle = bb.read("work_cycle", None)
+        if mode == Mode.PICKING and cycle is not None:
+            try:
+                cycle.expect(func)
+            except Exception as exc:
+                reason = str(exc)
+        elif mode == Mode.PICKING and func in (100, 101):
             reason = "挑毛进行中收到对刀指令，须先停止挑毛并由 PLC 重新初始化"
         else:
             reason = f"当前模式 {mode.value} 不允许功能码 {func}"
@@ -64,5 +71,5 @@ def build_dispatch(ctx: FlowContext, branches: Mapping[int, Branch] | None = Non
             name="模式检查",
         )
         nodes.append(Sequence([match, checked], name=f"功能码 {code}"))
-    nodes.append(PrepareError(ctx.events, unknown=True))
+    nodes.append(Sequence([RejectMode(ctx), PrepareError(ctx.events)], name="拒绝未知功能码"))
     return Fallback(nodes, name="模式检查+功能码分发")

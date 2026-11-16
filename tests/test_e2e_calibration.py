@@ -147,7 +147,7 @@ def test_failures_recover_to_idle(rig, case):
 
 
 @pytest.mark.parametrize("tool", [1, 2])
-def test_finish_saves_compensation(rig, tool):
+def test_finish_saves_compensation(rig, tool, monkeypatch):
     plc, app, path = rig
     offset(app, (0.5, 0.3, 0.2))
     before = load_tools(path / "tools.yaml")
@@ -162,13 +162,28 @@ def test_finish_saves_compensation(rig, tool):
     assert any(load_tools(p) == before for p in backups)
     history = [json.loads(line) for line in (path / "tools_history.jsonl").read_text().splitlines()]
     assert {"Task_ID", "tool", "P0", "P_final", "delta", "old_compensation", "new_compensation"} <= history[-1].keys()
+    from types import SimpleNamespace
+    from nest_clear.vision.fine import FineResult
+    from nest_clear.workers.vision import VisionWorker
+    def work_vision(worker, payload):
+        """以确定目标验证新工具补偿传入两工具输出。"""
+        if payload["work_action"] == "fine":
+            return {"fine_result": FineResult("ok", target_xyz=(1., 0., 0.))}
+        cycle = payload["cycle"]
+        observations = []
+        if cycle.view_index == 0 and not cycle.attempted:
+            observations = [SimpleNamespace(target=SimpleNamespace(xyz=(1., 0., 0.)), status="eligible", reason=None, area=1.)]
+        return {"observations": observations}
+    monkeypatch.setattr("nest_clear.flow.picking.render", lambda image, *args: image)
+    monkeypatch.setattr(VisionWorker, "execute", work_vision)
     records = plc.drive_tray(timeout_s=5)
-    assert [r["func_code"] for r in records] == [1, 3, 1, 3, 1, 1, 9]
+    assert records[-1]["func_code"] == 9
+    pick = next(r for r in records if r["func_code"] == 3)
     expected1 = expected if tool == 1 else (1, 2, 3)
     expected2 = expected if tool == 2 else (0, 0, 0)
-    assert records[1]["pick1_xyz"] == pytest.approx([1 + expected1[0], expected1[1], expected1[2]])
-    assert records[3]["pick2_xyz"] == pytest.approx([3 + expected2[0], expected2[1], expected2[2]])
-    assert {40960, 40966} <= {address for address, _ in plc.writes}
+    assert pick["pick1_xyz"] == pytest.approx([1 + expected1[0], expected1[1], expected1[2]])
+    assert pick["pick2_xyz"] == pytest.approx([1 + expected2[0], expected2[1], expected2[2]])
+    assert {plc.contract["pick1_x"].address, plc.contract["pick2_x"].address} <= {address for address, _ in plc.writes}
 
 
 def test_finish_inconsistent_and_unfinished(rig):

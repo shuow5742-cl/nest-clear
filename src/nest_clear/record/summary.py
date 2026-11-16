@@ -93,7 +93,9 @@ class TraySummary:
         elif event == "error":
             d["last_error"] = row.get("reason", "未知")
         elif event == "reply" and row.get("func") == 3:
-            d["picks"][str(row["tool"])] += 1
+            tool = str(row.get("tool"))
+            if tool in d["picks"]:
+                d["picks"][tool] += 1
         elif event == "reply" and row.get("func") == 999:
             d["errors_999"] += 1
             reason = d["last_error"] or "未知"

@@ -199,111 +199,6 @@ class RecordCapture(Instant):
         bb.write("raw_path", path, self.name)
 
 
-class ReturnToScan(Instant):
-    """挑取完成后准备回当前扫描位，让下一次请求重新拍照。"""
-
-    def __init__(self) -> None:
-        """创建回位应答叶。"""
-        super().__init__(name="返回扫描位重拍")
-
-    def perform(self) -> None:
-        """保留当前扫描坐标并准备功能码 1。"""
-        bb = self._blackboard
-        bb.write("reply_func", 1, self.name)
-        bb.write("reply_coordinates", {"scan_xyz": bb.read("scan")}, self.name)
-        bb.write("reply_tool", None, self.name)
-
-
-class RecordDetection(Instant):
-    """提交复核结果、更新本盘名单并归档本帧检测画面。"""
-
-    def __init__(self, events: EventRecorder, config: Config) -> None:
-        """保存事件记录器和每视野挑取上限。"""
-        super().__init__(name="记录检测目标数")
-        self.events, self.config = events, config
-
-    def perform(self) -> None:
-        """消费 Worker 结果并将可挑目标交给下一叶节点。"""
-        bb = self._blackboard
-        d = bb.read("detection")
-        if isinstance(d, list):
-            bb.write("targets", d, self.name)
-            self.events.emit("detection", task_id=bb.read("task_id"), count=len(d), scan_index=bb.read("next_index"))
-            return
-        result = d["result"]
-        if result:
-            self.events.emit("pick_result", **result)
-            attempted = bb.read("attempted") + [{"identity": result["identity"], "success": result["success"]}]
-            bb.write("attempted", attempted, self.name)
-            bb.write("pending", None, self.name)
-        for warning in d["warnings"]:
-            logger.warning("%s", warning)
-            self.events.emit("warning", reason=warning, scan_index=bb.read("next_index"))
-        eligible = d["eligible"]
-        if eligible and bb.read("view_picks") >= self.config.vision.max_picks_per_view:
-            logger.warning("扫描位达到挑取上限")
-            self.events.emit("warning", reason="扫描位达到挑取上限", scan_index=bb.read("next_index"))
-            eligible = []
-        bb.write("targets", eligible, self.name)
-        archive = getattr(self.events, "archive", None)
-        if archive:
-            overlay = render(bb.read("image"), d["observations"], eligible[0] if eligible else None, self.config.vision.ignore_regions_px)
-            archive.rendered(
-                overlay, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"),
-                self.config.vision.preview_window,
-            )
-        self.events.emit(
-            "detection", task_id=bb.read("task_id"), scan_index=bb.read("next_index"),
-            count=d["count"], eligible_count=d["eligible_count"], rejections=d["rejections"],
-            failed_count=d["failed_count"], other_view_count=d.get("other_view_count", 0), ignored_count=d.get("ignored_count", 0), elapsed_ms=d["elapsed_ms"],
-            unmeasurable=[o.candidate.paleness_unmeasurable_reason for o in d["observations"]
-                          if o.candidate.paleness_unmeasurable_reason],
-        )
-
-
-class PreparePick(Instant):
-    """按工具补偿计算挑取坐标，守卫通过后准备 3 应答。"""
-
-    def __init__(self, config: Config, placeholder: bool = False) -> None:
-        """保存工具、深度和行程配置。"""
-        super().__init__(name="计算并守卫挑取坐标")
-        self.config = config
-        self.placeholder = placeholder
-
-    def perform(self) -> None:
-        """只在坐标合法后消费目标并切换工具。"""
-        bb = self._blackboard
-        targets = bb.read("targets")
-        observation = targets[0]
-        target = getattr(observation, "target", observation)
-        if self.placeholder and not self.config.vision.allow_placeholder_calibration:
-            raise GuardError(
-                "CALIBRATION-PLACEHOLDER", "相机标定为占位值，拒绝下发挑取坐标",
-                "挑取坐标守卫", "检查并完成相机标定，核对 camera.yaml。",
-            )
-        tool_index = bb.read("tool_index")
-        offset = self.config.tools[tool_index]
-        xyz = (
-            target.xyz[0] + offset[0],
-            target.xyz[1] + offset[1],
-            self.config.pick_depth_z + offset[2],
-        )
-        where = f"Task_ID={bb.read('task_id')}，扫描位 {bb.read('next_index')}"
-        guard_position(xyz, self.config.travel, where)
-        tool = tool_index + 1
-        if hasattr(observation, "identity"):
-            bb.write(
-                "pending", {"identity": observation.identity, "scan_index": bb.read("next_index"),
-                            "target_index": bb.read("view_picks") + 1, "tool": tool}, self.name,
-            )
-            bb.write("view_picks", bb.read("view_picks") + 1, self.name)
-        bb.write("targets", targets[1:], self.name)
-        bb.write("tool_index", 1 - tool_index, self.name)
-        bb.write("reply_func", 3, self.name)
-        bb.write("reply_coordinates", {f"pick{tool}_xyz": xyz}, self.name)
-        bb.write("reply_tool", tool, self.name)
-
-
 class PrepareError(Instant):
     """将业务分支的失败原因转换为 999 应答并记录。"""
 
@@ -348,8 +243,6 @@ class CommitReply(Instant):
         target = None
         if func == 1 and current == Mode.IDLE:
             target = Mode.PICKING
-        elif func == 9 and current == Mode.PICKING:
-            target = Mode.IDLE
         if target is not None:
             bb.write("mode", transition(current, target), self.name)
             self.events.emit(
@@ -371,5 +264,4 @@ class CommitReply(Instant):
             elapsed_ms=round((time.monotonic() - bb.read("started")) * 1000, 3),
         )
         if func == 9:
-            bb.write("done", True, self.name)
             self.events.emit("tray_end", task_id=bb.read("task_id"), scans=bb.read("next_index"))
