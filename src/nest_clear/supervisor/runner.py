@@ -92,6 +92,7 @@ class Supervisor:
         self.events.emit("child_exit", reason=reason, code=code)
         self.child = None
         self._started_at = None
+        self._clear_ready()
         self._reply_after_failure(reason)
         return False
 
@@ -115,10 +116,23 @@ class Supervisor:
             return False
         self.child = None
         self._started_at = None
+        self._clear_ready()
         return True
+
+    def _clear_ready(self) -> bool:
+        """清除主程序就绪标志；通信失败时记录明确原因。"""
+        try:
+            self.plc.write("algorithm_ready", 0)
+            return True
+        except Exception as exc:
+            logger.error("算法启动完成标志清零失败：%s；请检查 PLC 连接", exc)
+            self.events.emit("error", operation="clear_algorithm_ready", reason=str(exc))
+            return False
 
     def _start(self) -> None:
         """清除旧活性点并启动配置的命令，失败后等待下一条边沿。"""
+        if not self._clear_ready():
+            return
         try:
             self._alive.unlink(missing_ok=True)
             self.child = subprocess.Popen(self.config.supervisor.child_command)

@@ -151,9 +151,6 @@ class Application:
         self.calib_camera = None
         self.clock = None
         try:
-            baseline = self.plc.initialize()
-            self.events.emit("baseline", task_id=baseline, ignored=bool(baseline))
-            self.tracker = RequestTracker(baseline)
             self.camera = CameraWorker(config.vision.camera_backend, config.camera_sn, camera)
             self.camera.open()
             if config.tool_calibration.enabled:
@@ -170,8 +167,12 @@ class Application:
             if self.calib_camera is not None:
                 self.clock.attach_worker(self.calib_camera)
             self.handle = None
+            baseline = self.plc.initialize()
+            self.events.emit("baseline", task_id=baseline, ignored=bool(baseline))
+            self.tracker = RequestTracker(baseline)
             context = FlowContext(self.board, config, self.path, self.tracker, self.events)
             logger.info("主程序行为树结构：\n%s", format_tree(build_tree(context)))
+            self.io.write("algorithm_ready", 1)
         except BaseException:
             if self.clock is not None:
                 self.clock.shutdown()

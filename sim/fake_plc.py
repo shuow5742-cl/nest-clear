@@ -168,20 +168,23 @@ class FakePLC:
             self.set_actual_xyz([a + b for a, b in zip(xyz, position_error)])
             request_func = 110 if tool == 1 else 120
 
-    def drive_tray(self, timeout_s: float = 3) -> list[dict[str, Any]]:
+    def drive_tray(self, timeout_s: float = 3, *, injected_func: int | None = None) -> list[dict[str, Any]]:
         """驱动一盘请求；按应答模拟到位或挑取完成，返回交互记录。"""
         records: list[dict[str, Any]] = []
         request_func = 1
         while True:
+            if injected_func is not None:
+                request_func = injected_func
+                injected_func = None
             task_id = self.request(request_func)
             reply = self.wait_reply(task_id, timeout_s)
             records.append({"request_func": request_func, **reply})
             if reply["func_code"] == 1:
                 self.set_actual_xyz(reply["scan_xyz"])
-                request_func = 1
+                request_func = 20
             elif reply["func_code"] == 3:
                 request_func = 60
-            elif reply["func_code"] == 9:
+            elif reply["func_code"] in (9, 10):
                 return records
             else:
                 raise ValueError(f"模拟流程收到未处理的功能码 {reply['func_code']}")

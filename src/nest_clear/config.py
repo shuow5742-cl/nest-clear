@@ -69,6 +69,12 @@ class VisionConfig:
     preview_window: bool = False
     responsibility_zone: bool = True
     ignore_regions_px: tuple[tuple[float, ...], ...] = ()
+    max_fine_targets: int = 10
+    fine_box_half_mm: float = 4.0
+    cap_ratio: float = 1.2
+    tool_check_min_attempts: int = 3
+    tool_check_ratio: float = 0.5
+    max_coarse_shots_per_view: int = 30
 
 
 @dataclass(frozen=True)
@@ -354,7 +360,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     v = _mapping(
         vision_data,
         "vision",
-        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets", "hair_detector", "detector", "allow_placeholder_calibration", "review_radius_mm", "skip_radius_mm", "max_picks_per_view", "preview", "responsibility_zone", "ignore_regions_px"],
+        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets", "hair_detector", "detector", "allow_placeholder_calibration", "review_radius_mm", "skip_radius_mm", "max_picks_per_view", "preview", "responsibility_zone", "ignore_regions_px", "max_fine_targets", "fine_box_half_mm", "cap_ratio", "tool_check_min_attempts", "tool_check_ratio", "max_coarse_shots_per_view"],
     )
     if v["camera_backend"] not in ("mock", "daheng"):
         _fail("vision.camera_backend", "应为 mock 或 daheng")
@@ -378,10 +384,20 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     regions = tuple(_vector(r, f"vision.ignore_regions_px[{i}]", 4) for i, r in enumerate(v["ignore_regions_px"]))
     if any(x1 > x2 or y1 > y2 for x1, y1, x2, y2 in regions):
         _fail("vision.ignore_regions_px", "矩形须按左上、右下顺序填写")
+    for key in ("max_fine_targets", "tool_check_min_attempts", "max_coarse_shots_per_view"):
+        if type(v[key]) is not int or v[key] < 1:
+            _fail(f"vision.{key}", "应为正整数")
+    fine_half = _number(v["fine_box_half_mm"], "vision.fine_box_half_mm", True)
+    cap_ratio = _number(v["cap_ratio"], "vision.cap_ratio", True)
+    tool_ratio = _number(v["tool_check_ratio"], "vision.tool_check_ratio")
+    if not 0 <= tool_ratio <= 1:
+        _fail("vision.tool_check_ratio", "应在 0 到 1 之间")
     vision = VisionConfig(
         v["camera_backend"], _string(v["calibration"], "vision.calibration"), pixels, radius, v["max_targets"],
         _hair_config(v["hair_detector"]), v["detector"], v["allow_placeholder_calibration"],
-        review, skip, v["max_picks_per_view"], preview["window"], v["responsibility_zone"], regions
+        review, skip, v["max_picks_per_view"], preview["window"], v["responsibility_zone"], regions,
+        v["max_fine_targets"], fine_half, cap_ratio, v["tool_check_min_attempts"], tool_ratio,
+        v["max_coarse_shots_per_view"]
     )
     if scan.fov_mm is None:
         scan = replace(scan, fov_mm=tuple(vision.hair_detector.um_per_px * n / 1000 for n in (4024, 3036)))

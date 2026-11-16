@@ -42,6 +42,12 @@ supervisor:  # 父程序轮询和主程序活性监控
   startup_grace_s: 60.0  # 启动后等待首个活性点的最长时间，秒，留出设备预检时间
   child_command: [python, -m, nest_clear.main]  # 主程序命令及参数
 vision:
+  max_fine_targets: 10  # 每轮粗拍选出的精定位目标数
+  fine_box_half_mm: 4.0  # 精定位框半宽，mm
+  cap_ratio: 1.2  # 首次可去数量对应的尝试次数比例
+  tool_check_min_attempts: 3  # 换工具判定所需最少尝试次数
+  tool_check_ratio: 0.5  # 剩余目标与首次可去数量的比例阈值
+  max_coarse_shots_per_view: 30  # 单视野粗拍防循环上限
   responsibility_zone: true  # 按离扎点最近的视野中心分配；false 恢复原行为
   ignore_regions_px: []  # 像素矩形 [x1,y1,x2,y2]，现场按针尖实际位置填写
   detector: hair  # 检测器：hair 为生产默认值，stub 用于仿真

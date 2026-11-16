@@ -64,6 +64,11 @@ registers:
   type: UINT16
   direction: PC→PLC
   description: 心跳
+- name: algorithm_ready
+  address: 40932
+  type: UINT16
+  direction: PC→PLC
+  description: 算法启动完成
 - name: result_id
   address: 40933
   type: UINT16
@@ -74,6 +79,11 @@ registers:
   type: UINT16
   direction: PC→PLC
   description: 应答功能码
+- name: removable_count
+  address: 40941
+  type: UINT16
+  direction: PC→PLC
+  description: 本视野可去异物数
 - name: scan_x
   address: 40942
   type: REAL32

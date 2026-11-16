@@ -38,8 +38,16 @@ class Handshake:
         if not isinstance(payload, Mapping):
             raise GuardError("HANDSHAKE-INVALID", f"坐标数据应为映射，实际 {payload!r}", context, "按坐标名称传入三个轴的数值。")
         blocks: list[tuple[int, list[float]]] = []
+        scalar_blocks: list[tuple[int, int]] = []
         for name, values in payload.items():
             where = f"{context}，坐标名={name!r}"
+            if name == "removable_count":
+                try:
+                    encode_u16(values)
+                except GuardError as exc:
+                    raise GuardError("HANDSHAKE-INVALID", f"可去数量无效：{values!r}", where, "检查目标数量是否为 UINT16。") from exc
+                scalar_blocks.append((self.contract[name].address, values))
+                continue
             if name not in ("scan_xyz", "pick1_xyz", "pick2_xyz", "calibration1_xyz", "calibration2_xyz"):
                 raise GuardError("HANDSHAKE-INVALID", f"未知坐标名，实际值 {values!r}", where, "检查坐标名是否与契约一致。")
             if not isinstance(values, (tuple, list)) or len(values) != 3:
@@ -53,6 +61,8 @@ class Handshake:
             blocks.append((self.contract[f"{prefix}_x"].address, list(values)))
         for address, values in blocks:
             self.io.write_real32_block(address, values)
+        for address, value in scalar_blocks:
+            self.io.write_u16(address, value)
         self.io.write_u16(self.contract["reply_func"].address, func_code)
         # Result_ID 是 PLC 的提交信号；提前写会使 PLC 读到旧功能码或旧坐标。
         self.io.write_u16(self.contract["result_id"].address, task_id)
