@@ -66,6 +66,7 @@ def setup_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "3",
             "--note",
             "test",
+            "--no-confirm",
         ]
 
         def run(positions: list = POSITIONS, extra: list | None = None, reset_answer: str = "") -> int:

@@ -205,6 +205,12 @@ def report(root: str | Path, day: date) -> str:
             f"Δ {_vector(calibration.get('delta'))}，补偿 {_vector(calibration.get('old_compensation'))} → "
             f"{_vector(calibration.get('new_compensation'))}"
         )
+        clicks = [c for c in calibration.get("tip_clicks", []) if c.get("source") == "manual"]
+        if clicks:
+            details = "；".join(f"{c.get('camera')} {c.get('correction_px')} px / {c.get('correction_mm')} mm" for c in clicks)
+            lines.append(f"    人工点击：是，修正 {details}")
+        else:
+            lines.append("    人工点击：否")
         widths = calibration.get("final_edge_width_px")
         if widths:
             def display_width(view: str) -> str:

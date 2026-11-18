@@ -67,7 +67,7 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
             raise ToolCalSchemaError("views must be a list")
         views = []
         for i, v in enumerate(raw["views"]):
-            _fields(v, {"name", "target_uv", "jacobian"}, set(), f"views[{i}]")
+            _fields(v, {"name", "target_uv", "jacobian"}, {"width_px", "click"}, f"views[{i}]")
             try:
                 views.append(ViewCalib(**v))
             except (GuardError, TypeError) as exc:
@@ -99,6 +99,8 @@ def save_baseline(baseline: ToolTipBaseline, path: str | Path) -> None:
                 "name": v.name,
                 "target_uv": list(v.target_uv),
                 "jacobian": [list(row) for row in v.jacobian],
+                **({"width_px": v.width_px} if v.width_px is not None else {}),
+                **({"click": v.click} if v.click is not None else {}),
             }
             for v in baseline.views
         ],

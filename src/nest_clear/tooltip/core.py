@@ -47,8 +47,13 @@ class ViewCalib:
     target_uv: tuple[float, float]  # image coordinates, pixels
     jacobian: tuple[tuple[float, float, float], tuple[float, float, float]]  # pixels/mm
 
+    width_px: float | None = None
+    click: dict | None = None
+
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""
+        if self.width_px is not None and (not np.isfinite(self.width_px) or self.width_px <= 0):
+            raise _error("width_px must be positive", locals())
         if not isinstance(self.name, str) or not self.name.strip():
             raise _error("view name must be a non-empty string", locals())
         object.__setattr__(self, "target_uv", _tuple(self.target_uv, (2,), "target_uv"))

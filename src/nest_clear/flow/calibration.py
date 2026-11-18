@@ -3,19 +3,22 @@
 from dataclasses import replace
 import logging
 import math
+import multiprocessing as mp
+import time
 from pathlib import Path
 
 import numpy as np
 import yaml
 from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
-from autoweaver.motion_policy.nodes.node import TreeNode
+from autoweaver.motion_policy.nodes.node import TreeNode, Status
 
 from nest_clear.guard import GuardError
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.summary import write_tooltip_summary
 from nest_clear.tooltip import SilhouetteTipDetector, check_quality, compute_compensation, is_aligned, solve_correction
 from nest_clear.tooltip.store import load_baseline, save_tools
+from nest_clear.tooltip.click import confirm_tip, _DISPLAY_ERROR
 from .context import FlowContext
 from .leaves import CallWorker, Instant
 from .modes import Mode, transition
@@ -224,15 +227,8 @@ class DetectTips(Instant):
         for view in ("front", "side"):
             detector = SilhouetteTipDetector(**self.ctx.config.tool_calibration.detection[view])
             detection = detector.detect(images[view])
-            if detection.point_uv is None:
-                diagnostic = {
-                    "no dark component": "图像中未找到暗色针尖区域",
-                    "largest component is too small": "图像中的暗色针尖区域过小",
-                }.get(detection.diagnostic, detection.diagnostic)
-                camera = "正面" if view == "front" else "侧面"
-                fail(f"{camera}相机无法识别针尖：{diagnostic}", "检查背光与曝光，以及针尖是否在画面内。")
-            points[view] = tuple(float(x) for x in detection.point_uv)
-            focus[view] = {"focused": detection.focused, "edge_width_px": detection.edge_width_px, "width_px": detection.width_px, "coarse": detection.coarse, "max_edge_width_px": detector.max_edge_width_px}
+            points[view] = tuple(float(x) for x in detection.point_uv) if detection.point_uv is not None else None
+            focus[view] = {"focused": detection.focused, "edge_width_px": detection.edge_width_px, "width_px": detection.width_px, "coarse": detection.coarse, "max_edge_width_px": detector.max_edge_width_px, "diagnostic": detection.diagnostic}
         bb.write("tooltip_focus", focus, self.name)
         session = bb.read("tooltip_session")
         paths = session["images"][-1]
@@ -256,6 +252,22 @@ class SolveTips(Instant):
         bb = self._blackboard
         baseline = bb.read("tooltip_baseline")
         points = bb.read("tooltip_points")
+        cfg = self.ctx.config.tool_calibration
+        focus = bb.read("tooltip_focus")
+        reasons = []
+        for view in baseline.views:
+            f = focus[view.name]
+            camera = {"front": "正面", "side": "侧面"}.get(view.name, view.name)
+            if points[view.name] is None:
+                diagnostic = {"no dark component": "图像中未找到暗色针尖区域",
+                              "largest component is too small": "图像中的暗色针尖区域过小"}.get(f.get("diagnostic"), f.get("diagnostic") or "检测失败")
+                reasons.append(f"{camera}相机无法识别针尖：{diagnostic}")
+            if f["coarse"]: reasons.append(f"{camera}相机 coarse 粗定位")
+            if view.width_px is not None and f["width_px"] is not None and abs(f["width_px"] / view.width_px - 1) > .3:
+                reasons.append(f"{camera}相机针尖宽度超差")
+        if any(points[v] is None for v in points):
+            self.ctx.events.emit("tooltip_reliability", task_id=bb.read("task_id"), reliable=False, reasons=reasons)
+            fail("；".join(reasons), "检查背光与曝光，以及针尖是否在画面内。")
         result = solve_correction(points, baseline, primary_view="front")
         estimates = result.axis_estimates["z"]
         if "front" not in estimates:
@@ -284,9 +296,115 @@ class SolveTips(Instant):
             self.ctx.events.emit("tooltip_quality_warning", task_id=bb.read("task_id"),
                                  residuals_mm=quality.residuals_mm, condition_number=quality.condition_number,
                                  z_disagreement_mm=disagreement, quality_ok=quality.ok)
-        if (not quality.ok or disagreement > cfg.z_disagreement_mm) and cfg.quality_hard_fail:
-            fail(f"对刀质量超限：残差 {quality.residuals_mm} mm（阈值 {cfg.max_residual_mm}），条件数 {quality.condition_number}（阈值 {cfg.max_condition}），Z 分歧 {disagreement} mm（阈值 {cfg.z_disagreement_mm}）", "检查相机标定、针尖识别和基准后重新对刀。")
+        if cfg.quality_hard_fail:
+            for name, value in quality.residuals_mm.items():
+                if value > cfg.max_residual_mm:
+                    camera = {"front": "正面", "side": "侧面"}.get(name, name)
+                    reasons.append(f"{camera}相机投影残差 {value:.3f} mm 超过阈值 {cfg.max_residual_mm:.3f} mm")
+            if result.condition_number > cfg.max_condition:
+                reasons.append(f"条件数 {result.condition_number:.3f} 超过阈值 {cfg.max_condition:.3f}")
+            if disagreement > cfg.z_disagreement_mm:
+                reasons.append(f"两视图 Z 分歧 {disagreement:.3f} mm 超过阈值 {cfg.z_disagreement_mm:.3f} mm")
+        if is_aligned(result, cfg.tip_tolerance_mm):
+            reasons.extend(f"{'正面' if v == 'front' else '侧面'}相机不清晰" for v in focus if not focus[v]["focused"])
+        self.ctx.events.emit("tooltip_reliability", task_id=bb.read("task_id"), reliable=not reasons, reasons=reasons)
+        if reasons: fail("对刀不可靠：" + "；".join(reasons))
         bb.write("tooltip_result", result, self.name)
+
+
+def _click_process(connection, images, points, tool):
+    try:
+        results = {}
+        for view in ("front", "side"):
+            results[view] = confirm_tip(images[view], points[view], f"{view} 工具{tool} 对刀")
+            if results[view].point_uv is None:
+                break
+        connection.send(results)
+    except BaseException as exc:
+        connection.send(str(exc))
+    finally:
+        connection.close()
+
+
+class ReliableTips(TreeNode):
+    """不可靠时在独立进程显示窗口，tick 只轮询管道。"""
+    def __init__(self, ctx):
+        super().__init__(name="针尖可靠性和人工确认")
+        self.ctx = ctx
+        self.process = None
+
+    def on_start(self):
+        self.process = None
+        bb = self._blackboard
+        try:
+            detect = DetectTips(self.ctx); detect._blackboard = bb; detect.perform()
+            solve = SolveTips(self.ctx); solve._blackboard = bb; solve.perform()
+            return Status.SUCCESS
+        except Exception as exc:
+            bb.write("error", str(exc), self.name)
+            self.reason = str(exc)
+            if not isinstance(exc, GuardError) or self.ctx.config.tool_calibration.unreliable_action != "click":
+                return Status.FAILURE
+            parent, child = mp.get_context("spawn").Pipe(False)
+            self.connection = parent
+            self.process = mp.get_context("spawn").Process(target=_click_process, args=(child, bb.read("tooltip_images"), bb.read("tooltip_points"), bb.read("tooltip_session")["tool"]))
+            self.process.start(); child.close()
+            self.started = time.monotonic()
+            return Status.RUNNING
+
+    def on_halted(self):
+        if self.process is not None and self.process.is_alive():
+            self.process.terminate()
+            self.process.join(timeout=0.1)
+        if self.process is not None:
+            self.connection.close()
+
+    def on_running(self):
+        bb = self._blackboard
+        if self.connection.poll():
+            try: result = self.connection.recv()
+            except EOFError: result = _DISPLAY_ERROR
+            self.process.join(timeout=0)
+            self.connection.close()
+            if isinstance(result, dict) and (len(result) != 2 or any(r.point_uv is None for r in result.values())):
+                for view, r in result.items():
+                    auto = bb.read("tooltip_points")[view]
+                    correction = float(np.linalg.norm(np.asarray(r.point_uv) - auto)) if r.point_uv is not None and auto is not None else None
+                    info = dict(camera=view, tool=bb.read("tooltip_session")["tool"], auto_point=auto, manual_point=r.point_uv,
+                                correction_px=correction, correction_mm=correction * .0152 if correction is not None else None,
+                                elapsed_s=r.elapsed_s, source=r.source)
+                    self.ctx.events.emit("tip_click", task_id=bb.read("task_id"), **info)
+                    bb.read("tooltip_session").setdefault("tip_clicks", []).append(info)
+            if not isinstance(result, dict) or len(result) != 2 or any(r.point_uv is None for r in result.values()):
+                bb.write("error", getattr(self, "reason", "") + "；人工点击取消或窗口失败：" + str(result), self.name)
+                return Status.FAILURE
+            points = bb.read("tooltip_points")
+            focus = bb.read("tooltip_focus")
+            session = bb.read("tooltip_session")
+            for view, r in result.items():
+                auto = points[view]
+                correction = float(np.linalg.norm(np.asarray(r.point_uv) - auto)) if auto is not None else None
+                info = dict(camera=view, tool=session["tool"], auto_point=auto, manual_point=r.point_uv,
+                            correction_px=correction, correction_mm=correction * .0152 if correction is not None else None,
+                            elapsed_s=r.elapsed_s, source=r.source)
+                self.ctx.events.emit("tip_click", task_id=bb.read("task_id"), **info)
+                session.setdefault("tip_clicks", []).append(info)
+                points[view] = r.point_uv
+                focus[view].update(coarse=False, focused=True, width_px=None)
+            bb.write("tooltip_points", points, self.name)
+            bb.write("tooltip_focus", focus, self.name)
+            try:
+                solve = SolveTips(self.ctx); solve._blackboard = bb; solve.perform()
+                return Status.SUCCESS
+            except Exception as exc:
+                bb.write("error", str(exc), self.name); return Status.FAILURE
+        if time.monotonic() - self.started >= self.ctx.config.tool_calibration.click_timeout_s or not self.process.is_alive():
+            reason = "人工点击超时" if self.process.is_alive() else _DISPLAY_ERROR
+            if self.process.is_alive(): self.process.terminate()
+            self.process.join(timeout=0.1); self.connection.close()
+            bb.write("error", getattr(self, "reason", "") + "；" + reason, self.name)
+            return Status.FAILURE
+        return Status.RUNNING
 
 
 class PrepareCalibrationReply(Instant):
@@ -377,7 +495,7 @@ def calibration_branch(ctx: FlowContext, start: bool) -> TreeNode:
                    "request_func": bb.read("request_func"), "actual": bb.read("actual"),
                    "target": bb.read("tooltip_session")["last_position"],
                    "iteration": len(bb.read("tooltip_session")["images"]) + 1}, "tooltip_images", name="采集对刀双视图"),
-        ArchiveTips(ctx), DetectTips(ctx), SolveTips(ctx), PrepareCalibrationReply(ctx),
+        ArchiveTips(ctx), ReliableTips(ctx), PrepareCalibrationReply(ctx),
     ])
     return Fallback([Sequence(steps, name="对刀迭代"), CalibrationFailed(ctx)], name="对刀业务或 131")
 

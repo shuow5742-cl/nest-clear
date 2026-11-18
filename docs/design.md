@@ -178,3 +178,7 @@ bit7 初始化中 bit8 初始化完成 bit9 信息提示 bit10 一般报警 bit1
 PLC 在空闲发送 40904=80。算法读取 40911/40913/40915 实时 XYZ 为起始位并拍首图；每次需要移动时将目标 XYZ 以 REAL32 CDAB 连续写入 40972/40974/40976，40934 回 80，PLC 到位后再次发送 80。算法逐轴核对实时坐标，超出 position_tolerance_mm 回 999 并结束会话；到位后拍下一张。目标须同时满足相对起始位 xy_limit_mm/z_limit_mm 及绝对 travel 行程。成功保存并热更新标定后回 81；业务失败回 82 并结束会话。PLC 收到 81/82 后结束标定流程。82 是用户已定的失败码，等待电气补入协议表。
 
 失败码由标定会话提供：CAMCAL-GLARE（板区亮斑及邻近角点缺失）、CAMCAL-NO-BOARD（未检出标定板）、CAMCAL-OFFCENTER（板位置不合适）、CAMCAL-OVEREXPOSED（全图过曝）、CAMCAL-COVERAGE（覆盖不足）、CAMCAL-RMS（重投影误差超限）、CAMCAL-REPEAT（重复性超限）、CAMCAL-AXIS-SCALE（轴比例误差超限）、CAMCAL-SOLVE（求解失败）；采图、目标行程守卫和保存异常也回 82 并记录原因。每张图记录 camcal capture、步骤与标注，会话观测写入运行目录 camcal/<会话时间>/session_record.json。PLC 初始化或急停沿用父程序中断规则，不对被放弃的请求应答。
+
+### 可靠性判定与人工点击兜底
+
+每轮检查检测失败、粗定位、针尖宽度与基准相差超过 30%、双视图 Z 分歧、求解残差和条件数；对准的最终轮还检查清晰度。基准缺少宽度时跳过宽度比较。`quality_hard_fail=false` 时残差、条件数和 Z 分歧只告警，检测层判据仍触发不可靠处理。`tool_calibration.unreliable_action` 默认 `fail`，不可靠时返回 131 并记录原因；设为 `click` 时在独立进程请求两视图人工确认，主行为树持续 tick，取消或 `click_timeout_s`（默认 120 秒）超时返回 131。人工点替换检测点后重新求解并检查几何质量。点击事件及修正量写入记录和日报。基准工具参考帧必须确认，`--no-confirm` 仅供模拟测试；步进帧检测失败或离焦时也请求确认。
