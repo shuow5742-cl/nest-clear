@@ -121,3 +121,27 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
   max_residual_mm: 0.03  # 投影残差告警阈值，mm
   max_condition: 100.0  # 条件数告警阈值
   z_disagreement_mm: 0.03  # 两视图 Z 分歧告警阈值，mm
+
+# 主相机标定，未列出的字段使用 CameraCalibConfig 缺省值
+camera_calibration:
+  cols: 21
+  rows: 16
+  square_mm: 5.0
+  marker_mm: 3.75
+  dictionary: DICT_5X5_250
+  board_thickness_mm: 3.0
+  xy_limit_mm: 25.0
+  z_limit_mm: 5.0
+  grid_half_mm: 20.0
+  z_outer_mm: 5.0
+  z_inner_mm: 2.5
+  position_tolerance_mm: 0.05
+  min_corner_ratio: 0.6
+  saturation_level: 250
+  max_saturated_fraction: 0.01
+  glare_blob_min_px: 2000
+  max_rms_px: 0.25
+  max_image_rms_px: 0.5
+  max_repeat_px: 0.5
+  max_axis_scale_error: 0.002
+  min_coverage: 0.9

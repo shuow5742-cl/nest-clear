@@ -1,0 +1,157 @@
+"""主相机标定的单次请求行为树。"""
+import json
+import math
+from pathlib import Path
+from types import SimpleNamespace
+
+from autoweaver.motion_policy.nodes.control.fallback import Fallback
+from autoweaver.motion_policy.nodes.control.sequence import Sequence
+
+from nest_clear.plan.scan_path import guard_position
+from nest_clear.record.images import record_image_error
+from .calibration import change_mode
+from .leaves import CallWorker, Instant, PrepareError
+from .modes import Mode
+
+
+def finish(ctx, bb, outcome, **fields):
+    session = bb.read("camcal_session", None)
+    if session:
+        engine = session.get("engine")
+        if engine is not None and ctx.events.run_directory is not None:
+            try:
+                path = ctx.events.run_directory / "camcal" / session["directory"] / "session_record.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(engine.session_record(), ensure_ascii=False, allow_nan=False, indent=2), encoding="utf-8")
+            except Exception as exc:
+                ctx.events.emit("error", operation="camcal_record", reason=str(exc))
+        ctx.events.emit("camcal_" + outcome, task_id=bb.read("task_id"), start_time=session["start_time"],
+                        end_time=ctx.events.clock().isoformat(), n_images=session["shots"], **fields)
+    if bb.read("mode") == Mode.CAMERA_CALIBRATING:
+        change_mode(bb, ctx, Mode.IDLE, "结束相机标定")
+    bb.write("camcal_session", None, "结束相机标定")
+    ctx.events.active_camcal = None
+    ctx.events.abort_camcal = None
+
+
+class Prepare(Instant):
+    def __init__(self, ctx):
+        super().__init__(name="检查相机标定位置")
+        self.ctx = ctx
+
+    def perform(self):
+        bb = self._blackboard
+        session = bb.read("camcal_session", None)
+        actual = bb.read("actual")
+        if not isinstance(actual, (tuple, list)) or len(actual) != 3 or not all(math.isfinite(x) for x in actual):
+            raise ValueError("相机标定实时坐标无效")
+        if session is None:
+            now = self.ctx.events.clock()
+            session = {"start": tuple(actual), "target": None, "shots": 0, "engine": None,
+                       "start_time": now.isoformat(), "directory": now.strftime("%Y%m%d_%H%M%S_%f")}
+            bb.write("camcal_session", session, self.name)
+            self.ctx.events.active_camcal = session
+            self.ctx.events.abort_camcal = lambda reason: finish(self.ctx, bb, "aborted", reason=reason)
+            change_mode(bb, self.ctx, Mode.CAMERA_CALIBRATING, self.name)
+            self.ctx.events.emit("camcal_start", task_id=bb.read("task_id"), start_xyz=actual)
+        elif session["target"] is not None:
+            tolerance = self.ctx.config.camera_calibration.get("position_tolerance_mm", 0.05)
+            if any(abs(a-b) > tolerance for a,b in zip(actual, session["target"])):
+                reason = f"相机标定到位超差：期望 {session['target']}，实际 {actual}，公差 {tolerance} mm"
+                finish(self.ctx, bb, "aborted", reason=reason)
+                raise ValueError(reason)
+
+
+class Process(Instant):
+    def __init__(self, ctx):
+        super().__init__(name="相机标定采样及求解")
+        self.ctx = ctx
+
+    def perform(self):
+        bb, ctx = self._blackboard, self.ctx
+        session = bb.read("camcal_session")
+        captured = bb.read("image")
+        image, meta = captured if isinstance(captured, tuple) else (captured, {})
+        session["shots"] += 1
+        shot = f"s{session['shots']:02d}"
+        seq, capture_id = ctx.events.next_capture()
+        archive = getattr(ctx.events, "archive", None)
+        raw = None
+        if archive:
+            try:
+                raw = archive.capture_raw(image, sequence=seq, capture_id=capture_id, kind="camcal", tray="0", view=0, shot=shot, task_id=bb.read("task_id"))
+            except Exception as exc:
+                record_image_error(ctx.events, "相机标定原图", exc, bb.read("task_id"))
+        bb.write("raw_path", raw, self.name)
+        ctx.events.emit("capture", kind="camcal", capture_id=capture_id, task_id=bb.read("task_id"),
+                        tray=0, view=0, shot=shot, actual_xyz=bb.read("actual"), target_xyz=session["target"], raw_path=raw, **{k:v for k,v in meta.items() if k != "capture_seq"})
+        if session["engine"] is None:
+            if ctx.camcal_factory is None:
+                from nest_clear.camcal.config import CameraCalibConfig
+                from nest_clear.camcal.session import CameraCalibrationSession
+                factory = CameraCalibrationSession
+                cfg = CameraCalibConfig(**ctx.config.camera_calibration)
+            else:
+                factory = ctx.camcal_factory
+                cfg = SimpleNamespace(**{"xy_limit_mm":25.0, "z_limit_mm":5.0, "position_tolerance_mm":0.05, **ctx.config.camera_calibration})
+            session["cfg"] = cfg
+            session["engine"] = factory(cfg, ctx.calibration, (image.shape[1], image.shape[0]), session["start"])
+        step = session["engine"].add(image, tuple(bb.read("actual")))
+        if step.overlay is not None and archive:
+            archive.rendered(step.overlay, 0, bb.read("task_id"), raw, capture_id=capture_id)
+        ctx.events.emit("camcal_step", task_id=bb.read("task_id"), sequence=session["shots"],
+                        target_xyz=step.target_xyz, actual_xyz=bb.read("actual"), detail=step.detail, raw_path=raw)
+        if step.kind == "fail":
+            finish(ctx, bb, "failed", code=step.code, reason=step.reason, detail=step.detail, raw_path=raw)
+            reply = 82
+        elif step.kind == "done":
+            if ctx.camcal_save is None:
+                from nest_clear.camcal.session import save_calibration
+                save = save_calibration
+            else:
+                save = ctx.camcal_save
+            path = Path(ctx.calibration_path or ctx.config.vision.calibration)
+            backup = save(step.result, path, path.parent / "history")
+            if ctx.calibration_updated:
+                ctx.calibration_updated(step.result.calibration)
+            ctx.calibration = step.result.calibration
+            ctx.events.calibration_placeholder = False
+            ctx.events.meta_update(task_id=bb.read("task_id"), request_func=80, calibration=str(path), backup=str(backup) if backup else None, report=step.result.report)
+            finish(ctx, bb, "done", report=step.result.report)
+            reply = 81
+        elif step.kind == "move":
+            target = tuple(step.target_xyz)
+            cfg = session["cfg"]
+            if len(target) != 3 or any(not math.isfinite(v) for v in target) or any(abs(target[i]-session["start"][i]) > (cfg.xy_limit_mm if i < 2 else cfg.z_limit_mm) for i in range(3)):
+                raise ValueError(f"相机标定目标超出起始位置相对行程：{target}")
+            guard_position(target, ctx.config.travel, "相机标定")
+            session["target"] = target
+            bb.write("reply_coordinates", {"camcal_xyz": target}, self.name)
+            reply = 80
+        else:
+            raise ValueError(f"未知相机标定步骤 {step.kind!r}")
+        if reply != 80:
+            bb.write("reply_coordinates", {}, self.name)
+        bb.write("reply_func", reply, self.name)
+        bb.write("reply_tool", None, self.name)
+
+
+class Failed(Instant):
+    def __init__(self, ctx):
+        super().__init__(name="相机标定失败并准备 82")
+        self.ctx = ctx
+
+    def perform(self):
+        bb = self._blackboard
+        reason = str(bb.read("error"))
+        if bb.read("camcal_session", None):
+            finish(self.ctx, bb, "failed", code="CAMCAL-FLOW", reason=reason, detail={}, raw_path=bb.read("raw_path"))
+        bb.write("reply_func", 82, self.name)
+        bb.write("reply_coordinates", {}, self.name)
+        bb.write("reply_tool", None, self.name)
+
+
+def camera_branch(ctx):
+    # 位置检查失败由统一 999 出口处理；采图和业务失败返回 82。
+    sample = Fallback([Sequence([CallWorker(ctx.board, "camera", lambda bb: {"stage":"camcal", "task_id":bb.read("task_id")}, "image", name="采集相机标定图"), Process(ctx)], name="采样及求解"), Failed(ctx)], name="相机标定或 82")
+    return Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual"}, "actual", name="读取相机标定坐标"), Prepare(ctx), sample], name="相机标定")

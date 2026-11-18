@@ -219,6 +219,20 @@ def report(root: str | Path, day: date) -> str:
             lines.extend((f"    {detail}", f"    {hint}"))
     if not calibrations:
         lines.append("  无")
+    lines.append("相机标定：")
+    camera_rows = [row for row in events if row.get("event") in ("camcal_done", "camcal_failed", "camcal_aborted")]
+    for row in camera_rows:
+        status = {"camcal_done": "成功", "camcal_failed": "失败", "camcal_aborted": "中断"}[row["event"]]
+        lines.append(f"  {_time(row.get('start_time', ''))} → {_time(row.get('end_time', ''))}，{row.get('n_images', 0)} 张，{status}")
+        if row["event"] == "camcal_done":
+            r = row.get("report") or {}
+            lines.append(f"    RMS {r.get('rms_px')} px，主点 {r.get('um_per_px_at_principal')} µm/px，各轴比例误差 {r.get('axis_scale')}，相机倾角 {r.get('camera_tilt_deg')}°")
+        else:
+            lines.append(f"    {row.get('code', '中断')}：{row.get('reason', '未知')}")
+            if row["event"] == "camcal_failed":
+                attention.append(f"{_time(row.get('end_time', ''))} 相机标定 82 {row.get('code')}：{row.get('reason')}")
+    if not camera_rows:
+        lines.append("  无")
     rejected = {(row.get("tray_id"), row.get("task_id")) for row in events
                 if row.get("event") == "mode_rejected"}
     rejected_logs = {(str(row.get("task_id")), str(row.get("reason", ""))) for row in events

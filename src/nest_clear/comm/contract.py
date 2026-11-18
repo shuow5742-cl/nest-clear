@@ -62,7 +62,7 @@ def load_contract(path: str | Path) -> Contract:
         if not entries:
             raise ValueError("寄存器列表为空")
         # 握手按连续三轴一次写入，契约加载时即验证这一静态约束。
-        for prefix in ("scan", "pick1", "pick2"):
+        for prefix in ("scan", "pick1", "pick2", "camcal"):
             names = [f"{prefix}_{axis}" for axis in "xyz"]
             if any(name not in entries for name in names):
                 raise ValueError(f"坐标 {prefix} 缺少轴寄存器")

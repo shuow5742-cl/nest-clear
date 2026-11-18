@@ -7,6 +7,7 @@ from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 from autoweaver.motion_policy.nodes.node import TreeNode
 
+from .camera_calibration import camera_branch, finish
 from .calibration import finish_branch, start_branch, continue_branch
 from .context import FlowContext
 from .leaves import Instant, Predicate, PrepareError
@@ -21,6 +22,7 @@ BRANCHES: dict[int, Branch] = {
     1: (frozenset((Mode.IDLE, Mode.PICKING)), scan_branch),
     20: (frozenset((Mode.IDLE, Mode.PICKING)), scan_branch),
     60: (frozenset((Mode.IDLE, Mode.PICKING)), next_branch),
+    80: (frozenset((Mode.IDLE, Mode.CAMERA_CALIBRATING)), camera_branch),
     100: (frozenset((Mode.IDLE,)), start_branch),
     101: (frozenset((Mode.IDLE,)), start_branch),
     110: (frozenset((Mode.CALIBRATING_1,)), continue_branch),
@@ -36,6 +38,7 @@ class RejectMode(Instant):
         """绑定事件记录器。"""
         super().__init__(name="记录模式拒绝")
         self.events = ctx.events
+        self.ctx = ctx
 
     def perform(self) -> None:
         """记录模式、盘号、扫描位和请求，保留挑毛状态。"""
@@ -43,6 +46,8 @@ class RejectMode(Instant):
         mode = bb.read("mode")
         func = bb.read("request_func")
         cycle = bb.read("work_cycle", None)
+        if mode == Mode.CAMERA_CALIBRATING:
+            finish(self.ctx, bb, "aborted", reason=f"标定中收到非 80 功能码 {func}")
         if mode == Mode.PICKING and cycle is not None:
             try:
                 cycle.expect(func)

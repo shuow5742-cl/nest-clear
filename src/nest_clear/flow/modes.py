@@ -10,12 +10,14 @@ class Mode(Enum):
 
     IDLE = "空闲"
     PICKING = "挑毛中"
+    CAMERA_CALIBRATING = "相机标定中"
     CALIBRATING_1 = "对刀中(工具1)"
     CALIBRATING_2 = "对刀中(工具2)"
 
 
 _ALLOWED = {
-    Mode.IDLE: frozenset((Mode.PICKING, Mode.CALIBRATING_1, Mode.CALIBRATING_2)),
+    Mode.IDLE: frozenset((Mode.PICKING, Mode.CALIBRATING_1, Mode.CALIBRATING_2, Mode.CAMERA_CALIBRATING)),
+    Mode.CAMERA_CALIBRATING: frozenset((Mode.IDLE,)),
     Mode.PICKING: frozenset((Mode.IDLE,)),
     Mode.CALIBRATING_1: frozenset((Mode.IDLE,)),
     Mode.CALIBRATING_2: frozenset((Mode.IDLE,)),

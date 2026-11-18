@@ -45,7 +45,7 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -
         [
             WaitRequest(ctx.board, ctx.tracker, ctx.events),
             build_dispatch(ctx, branches),
-            Sequence([reply, CommitReply(ctx.events)], name="统一应答出口"),
+            Sequence([reply, CommitReply(ctx.events, ctx)], name="统一应答出口"),
         ],
         name="处理一次请求",
     )
@@ -60,9 +60,13 @@ def build_batch(
     events: EventRecorder,
     branches: Mapping[int, Branch] | None = None,
     calibration: Any = None,
+    camcal_factory: Any = None,
+    camcal_save: Any = None,
+    calibration_updated: Any = None,
+    calibration_path: Any = None,
 ) -> Batch:
     """创建全新树及私有 Blackboard，初始模式为空闲。"""
-    ctx = FlowContext(board, config, path, tracker, events, calibration)
+    ctx = FlowContext(board, config, path, tracker, events, calibration, camcal_factory, camcal_save, calibration_updated, calibration_path)
     params = {
         "work_cycle": None,
         "mode": Mode.IDLE,

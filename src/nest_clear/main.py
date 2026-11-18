@@ -251,6 +251,8 @@ class Application:
             vision = VisionWorker(
                 detector, calibration, config.vision.dedup_radius_mm, config.vision.max_targets, config.vision
             )
+            self.vision = vision
+            self.calibration_path = calibration_path
             self.board = WorldBoard()
             self.clock = BTClock(self.board)
             for worker in (self.plc, self.camera, vision):
@@ -275,6 +277,11 @@ class Application:
             self.archive.close()
             raise
 
+    def update_calibration(self, calibration):
+        self.vision.update_calibration(calibration)
+        self.calibration = calibration
+        self.camera.principal = (float(calibration.K[0][2]), float(calibration.K[1][2]))
+
     def mark(self, event: str, **fields: Any) -> None:
         """将父程序暂停变化接入事件与盘计时。"""
         self.events.emit(event, **fields)
@@ -293,7 +300,7 @@ class Application:
                         "BATCH-FAILED", f"一盘执行失败：{result}", "主程序", "查看前面的 PLC 或行为树错误。"
                     )
             self.handle = self.clock.submit(
-                build_batch(self.board, self.config, self.path, self.tracker, self.events, calibration=self.calibration)
+                build_batch(self.board, self.config, self.path, self.tracker, self.events, calibration=self.calibration, calibration_updated=self.update_calibration, calibration_path=self.calibration_path)
             )
         self.clock.tick_once()
 
@@ -301,6 +308,9 @@ class Application:
         """释放时钟、相机和 PLC；当前流程没有设备动作收尾树。"""
         if self.clock is not None:
             self.clock.shutdown()
+        abort_camcal = getattr(self.events, "abort_camcal", None)
+        if abort_camcal is not None:
+            abort_camcal("主程序停止，PLC 初始化或急停时会话中断")
         cycle = getattr(self.events, "active_cycle", None)
         if cycle is not None:
             cycle.pending()

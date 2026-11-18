@@ -3,6 +3,7 @@ from collections import Counter
 import logging
 import math
 import time
+import threading
 from dataclasses import replace
 from typing import Any
 
@@ -87,13 +88,26 @@ class VisionWorker(AsyncRequestWorker):
                  maximum: int, config: VisionConfig | None = None) -> None:
         """保存检测器及投影、筛选参数，兼容旧版目标后处理调用。"""
         super().__init__()
+        self._calibration_lock = threading.RLock()
         self.detector = detector
         self.calibration = calibration
         self.radius = radius
         self.maximum = maximum
         self.config = config
 
+    def update_calibration(self, calibration: Calibration) -> None:
+        with self._calibration_lock:
+            self.calibration = calibration
+            if isinstance(self.detector, HairDetector):
+                self.detector.calibration = calibration
+                self.detector.cache.clear()
+                self.detector._logged_keys.clear()
+
     def execute(self, payload: dict[str, Any]) -> Any:
+        with self._calibration_lock:
+            return self._execute(payload)
+
+    def _execute(self, payload: dict[str, Any]) -> Any:
         """检测当前帧并以模组坐标复核待挑目标、过滤本盘已尝试目标。"""
         start = time.perf_counter()
         pose = payload["pose"]

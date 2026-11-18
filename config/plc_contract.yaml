@@ -159,3 +159,19 @@ registers:
   type: REAL32
   direction: PC→PLC
   description: 二号工具挑取坐标Z
+
+- name: camcal_x
+  address: 40972
+  type: REAL32
+  direction: PC→PLC
+  description: 相机标定坐标X
+- name: camcal_y
+  address: 40974
+  type: REAL32
+  direction: PC→PLC
+  description: 相机标定坐标Y
+- name: camcal_z
+  address: 40976
+  type: REAL32
+  direction: PC→PLC
+  description: 相机标定坐标Z

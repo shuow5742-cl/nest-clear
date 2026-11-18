@@ -259,10 +259,11 @@ class PrepareError(Instant):
 class CommitReply(Instant):
     """应答提交成功后记录结果，并更新本盘上次应答状态。"""
 
-    def __init__(self, events: EventRecorder) -> None:
+    def __init__(self, events: EventRecorder, ctx: Any = None) -> None:
         """保存事件记录器。"""
         super().__init__(name="记录已提交应答")
         self.events = events
+        self.ctx = ctx
 
     def perform(self) -> None:
         """只有 PLC 确认写入后才记录应答和盘结束。"""
@@ -271,6 +272,9 @@ class CommitReply(Instant):
         if func is None:
             func = bb.read("reply_func")
         if func != bb.read("reply_func"):
+            if bb.read("mode") == Mode.CAMERA_CALIBRATING:
+                from .camera_calibration import finish
+                finish(self.ctx, bb, "aborted", reason="标定应答未提交")
             bb.write("reply_coordinates", {}, self.name)
         current = bb.read("mode")
         target = None

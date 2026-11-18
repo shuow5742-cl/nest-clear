@@ -122,6 +122,7 @@ class Config:
     image_queue_size: int = 32
     camera_image_size: tuple[int, int] = (4024, 3036)
     machine_id: str = "M01"
+    camera_calibration: dict[str, Any] = field(default_factory=dict)
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -246,6 +247,40 @@ def _hair_config(value: Any) -> HairDetectConfig:
     return result
 
 
+def _camera_calibration(data: Any) -> dict[str, Any]:
+    """校验共享接口字段；缺省值由运行时 CameraCalibConfig 提供。"""
+    integers = {"cols", "rows", "saturation_level", "glare_blob_min_px"}
+    fractions = {"min_corner_ratio", "max_saturated_fraction", "min_coverage", "max_axis_scale_error"}
+    numbers = {"square_mm", "marker_mm", "board_thickness_mm", "xy_limit_mm", "z_limit_mm",
+               "grid_half_mm", "z_outer_mm", "z_inner_mm", "position_tolerance_mm", "max_rms_px",
+               "max_image_rms_px", "max_repeat_px"} | fractions
+    allowed = integers | numbers | {"dictionary"}
+    if not isinstance(data, dict):
+        _fail("camera_calibration", "应为映射")
+    if set(data) - allowed:
+        _fail("camera_calibration", f"未知字段 {sorted(set(data) - allowed)}")
+    for key, value in data.items():
+        path = f"camera_calibration.{key}"
+        if key == "dictionary":
+            _string(value, path)
+        elif key in integers:
+            if type(value) is not int or value < (2 if key in {"cols", "rows"} else 1) or (key == "saturation_level" and value > 255):
+                _fail(path, "整数超出允许范围")
+        else:
+            n = _number(value, path)
+            nonnegative = {"board_thickness_mm", "max_saturated_fraction", "max_axis_scale_error"}
+            if n < 0 or (n == 0 and key not in nonnegative) or (key in fractions and n > 1):
+                _fail(path, "应为正数" + ("且不超过 1" if key in fractions else ""))
+    defaults = {"square_mm": 5.0, "marker_mm": 3.75, "xy_limit_mm": 25.0,
+                "z_limit_mm": 5.0, "grid_half_mm": 20.0, "z_outer_mm": 5.0, "z_inner_mm": 2.5}
+    v = {**defaults, **data}
+    if v["marker_mm"] >= v["square_mm"]:
+        _fail("camera_calibration.marker_mm", "必须小于 square_mm")
+    if v["grid_half_mm"] > v["xy_limit_mm"] or v["z_outer_mm"] > v["z_limit_mm"] or v["z_inner_mm"] > v["z_outer_mm"]:
+        _fail("camera_calibration", "标定网格或 Z 偏移超出相对行程限制")
+    return dict(data)
+
+
 def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     """读取 YAML 并校验所有字段和行程，供启动预检调用。"""
     try:
@@ -255,6 +290,8 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         raise GuardError(
             "CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。"
         ) from exc
+    if isinstance(data, dict):
+        data = {"camera_calibration": {}, **data}
     root = _mapping(
         data,
         "根",
@@ -264,6 +301,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "arrival_tolerance_mm",
             "pick_depth_z",
             "tool_calibration",
+            "camera_calibration",
             "travel",
             "camera",
             "record",
@@ -513,4 +551,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         record["image_queue_size"],
         tuple(image_size),
         _string(record["machine_id"], "record.machine_id"),
+        _camera_calibration(root["camera_calibration"]),
     )

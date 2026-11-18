@@ -16,7 +16,7 @@ class RequestTracker:
         self.processed = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class FlowContext:
     """构树依赖；不保存当前盘的可变业务状态。"""
 
@@ -26,5 +26,9 @@ class FlowContext:
     tracker: RequestTracker
     events: EventRecorder
     calibration: Any = None
+    camcal_factory: Any = None
+    camcal_save: Any = None
+    calibration_updated: Any = None
+    calibration_path: Any = None
 
 

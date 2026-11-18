@@ -132,7 +132,7 @@ class FakePLC:
         while time.monotonic() < deadline:
             if self.io.read("result_id") == task_id:
                 result: dict[str, Any] = {"task_id": task_id, "func_code": self.io.read("reply_func")}
-                for name in ("scan", "pick1", "pick2", "calibration1", "calibration2"):
+                for name in ("scan", "pick1", "pick2", "calibration1", "calibration2", "camcal"):
                     result[name + "_xyz"] = self.io.read_real32_block(self.contract[name + "_x"].address, 3)
                 return result
             time.sleep(0.01)
@@ -167,6 +167,23 @@ class FakePLC:
             final_xyz = xyz
             self.set_actual_xyz([a + b for a, b in zip(xyz, position_error)])
             request_func = 110 if tool == 1 else 120
+
+    def start_camera_calibration(self, actual_xyz: Sequence[float], timeout_s: float = 3,
+                                 position_error: Sequence[float] = (0, 0, 0)) -> list[dict[str, Any]]:
+        """循环驱动相机标定，并可模拟到位误差。"""
+        if len(actual_xyz) != 3 or len(position_error) != 3:
+            raise ValueError("坐标和误差必须包含三个轴")
+        self.set_actual_xyz(actual_xyz)
+        records = []
+        while True:
+            task = self.request(80)
+            reply = self.wait_reply(task, timeout_s)
+            records.append({"request_func": 80, **reply})
+            if reply["func_code"] in (81, 82, 999):
+                return records
+            if reply["func_code"] != 80:
+                raise ValueError(f"相机标定收到未处理的功能码 {reply['func_code']}")
+            self.set_actual_xyz([a + b for a, b in zip(reply["camcal_xyz"], position_error)])
 
     def drive_tray(self, timeout_s: float = 3, *, injected_func: int | None = None) -> list[dict[str, Any]]:
         """驱动一盘请求；按应答模拟到位或挑取完成，返回交互记录。"""
