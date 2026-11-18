@@ -107,6 +107,19 @@ class EventRecorder:
             self.request_task, self.request_func = task_id, request_func
             return self.xid
 
+    def meta_update(self, **fields: Any) -> None:
+        if self.run_directory is None:
+            return
+        try:
+            with self._lock:
+                self.run_directory.mkdir(parents=True, exist_ok=True)
+                row = {"run_id": self.run_id, "machine_id": self.machine_id,
+                       "wall": self.clock().isoformat(), "mono": self.monotonic(), **fields}
+                with (self.run_directory / "meta_updates.jsonl").open("a", encoding="utf-8") as file:
+                    file.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+        except Exception:
+            logger.exception("meta_updates.jsonl 写入失败")
+
     def plc(self, event: str, **fields: Any) -> None:
         """Append a communication edge without letting recording affect the handshake."""
         if self.run_directory is None:

@@ -3,6 +3,9 @@
 import argparse
 import logging
 import hashlib
+import json
+from dataclasses import asdict, replace
+from importlib.metadata import version, PackageNotFoundError
 import signal
 import yaml
 from pathlib import Path
@@ -75,6 +78,86 @@ def repository_commit(path: Path) -> str:
         return "unknown"
 
 
+def repository_dirty(path: Path) -> bool | None:
+    """记录工作树状态；无法查询时明确标记未知。"""
+    try:
+        result = subprocess.check_output(["git", "-C", str(path), "status", "--porcelain"],
+                                         text=True, stderr=subprocess.DEVNULL, timeout=2)
+        return bool(result.strip())
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def file_snapshot(path: Path) -> dict[str, Any]:
+    content = path.read_bytes()
+    return {"path": str(path), "content": content.decode("utf-8"),
+            "sha256": hashlib.sha256(content).hexdigest(), "mtime": path.stat().st_mtime}
+
+
+def write_meta(events: EventRecorder, config_path: Path, calibration_path: Path,
+               config: Config, camera: CameraWorker, detector: Any, path: list,
+               calib_camera: CalibCameraWorker | None = None) -> None:
+    """记录启动快照；记录故障不改变设备握手。"""
+    if events.run_directory is None:
+        return
+    try:
+        try:
+            framework_version = version("autoweaver")
+        except PackageNotFoundError:
+            framework_version = "unknown"
+        from nest_clear.vision.geometry import scale_um_per_px
+        from nest_clear.vision.hair import scaled
+        calibration = load_calibration(calibration_path)
+        scales = []
+        for z in sorted({point[2] for point in path}):
+            if isinstance(detector, HairDetector) and detector.calibration is not None:
+                parameters = detector.for_z(z)
+            else:
+                scale = scale_um_per_px(calibration, calibration.plane_z, z)
+                parameters = scaled(replace(config.vision.hair_detector, um_per_px=scale))
+            scales.append({"z_mm": z, "um_per_px": parameters.um_per_px,
+                           "parameters": asdict(parameters)})
+        calibration_cameras = {}
+        if calib_camera is not None:
+            for name, device in calib_camera.cameras.items():
+                info = {"sn": device.config.get("sn"), "model": None,
+                        "width": None, "height": None, "settings": device.config,
+                        "readback": {"exposure_us": None, "gain_db": None, "balance_ratio": None}}
+                try:
+                    if device.backend == "mock":
+                        height, width = device.config.get("size", [480, 640])
+                        info.update(model="mock", width=width, height=height)
+                    elif device.backend == "uvc":
+                        import cv2
+                        info.update(model="uvc", width=int(device.device.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                    height=int(device.device.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+                    elif device.device:
+                        width, height = device.device.get_frame_size()
+                        info.update(model=type(device.device).__name__, width=width, height=height)
+                except Exception:
+                    logger.warning("对刀相机 %s 参数回读不可用", name, exc_info=True)
+                calibration_cameras[name] = info
+        metadata = {
+            "run_id": events.run_id, "machine_id": config.machine_id,
+            "code": {"sha": repository_commit(ROOT), "dirty": repository_dirty(ROOT)},
+            "auto_weaver": {"version": framework_version, "sha": framework_commit()},
+            "config": file_snapshot(config_path),
+            "contract": file_snapshot(ROOT / "config/plc_contract.yaml"),
+            "calibration": file_snapshot(calibration_path),
+            "tools": file_snapshot(Path(config.tool_calibration.directory) / "tools.yaml"),
+            "camera": {"sn": camera.sn, "model": camera.model or type(camera.camera).__name__,
+                       "width": camera.size[0] if camera.size else None,
+                       "height": camera.size[1] if camera.size else None,
+                       "settings": camera.settings, "readback": camera.readback},
+            "calibration_cameras": calibration_cameras,
+            "detection_scales": scales,
+        }
+        events.run_directory.mkdir(parents=True, exist_ok=True)
+        (events.run_directory / "meta.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+    except Exception:
+        logger.exception("启动快照 meta.json 写入失败")
+
+
 class Application:
     """持有一次进程的设备、时钟和跨盘握手基线。"""
 
@@ -107,7 +190,7 @@ class Application:
                         "TOOLTIP-BASELINE", f"基准工具号不匹配：{baseline.tool_name}", str(baseline_path),
                         "请重新建立对应工具的基准。",
                     )
-        self.events = events or EventRecorder(config.record_directory)
+        self.events = events or EventRecorder(config.record_directory, machine_id=config.machine_id, run=True)
         config_bytes = Path(config_path).read_bytes()
         calibration_path = Path(config.vision.calibration)
         if not calibration_path.is_absolute():
@@ -164,6 +247,7 @@ class Application:
                 self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras, timeout_s=config.capture_timeout_s, events=self.events)
                 self.calib_camera.open()
             detector = detector or (HairDetector(config.vision.hair_detector, calibration, config.scan.z, config.vision.scale_z_bin_mm) if config.vision.detector == "hair" else StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels]))
+            write_meta(self.events, Path(config_path), calibration_path, config, self.camera, detector, self.path, self.calib_camera)
             vision = VisionWorker(
                 detector, calibration, config.vision.dedup_radius_mm, config.vision.max_targets, config.vision
             )
@@ -232,10 +316,11 @@ def run(
     config_path: str | Path = ROOT / "config/nest_clear.yaml",
     gate: Gate | None = None,
     supervised: bool = False,
+    events: EventRecorder | None = None,
 ) -> None:
     """持续处理各盘；暂停时仍按节拍向父程序报告活性。"""
     config = load_config(config_path)
-    app = Application(config, config_path)
+    app = Application(config, config_path, events=events)
     if gate is None and (supervised or supervisor_state_file(config.record_directory).exists()):
         gate = SupervisorGate(config.record_directory, mark=app.mark)
     try:
@@ -264,9 +349,10 @@ def main() -> None:
         root_logger = logging.getLogger()
         for existing in list(root_logger.handlers):
             root_logger.removeHandler(existing)
-        configure(config.record_directory, "main")
+        events = EventRecorder(config.record_directory, machine_id=config.machine_id, run=True)
+        configure(config.record_directory, "main", run_directory=events.run_directory)
         root_logger.addHandler(handler)
-        run(args.config, supervised=args.supervised)
+        run(args.config, supervised=args.supervised, events=events)
     except GuardError as exc:
         logger.error("启动或运行失败：%s", exc)
         raise SystemExit(1) from exc

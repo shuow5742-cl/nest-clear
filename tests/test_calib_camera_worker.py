@@ -37,6 +37,35 @@ def test_capture_and_mock_offset() -> None:
         shifted.on_stop()
 
 
+def test_calibration_run_captures_share_sequence_and_archive(tmp_path):
+    import json
+    from nest_clear.record.events import EventRecorder
+    from nest_clear.record.images import ImageArchive
+    events = EventRecorder(tmp_path, run=True)
+    events.begin_request(7, 110)
+    events.next_capture()  # 前一张主相机图。
+    archive = ImageArchive(events, True, "png", 3, 30)
+    events.archive = archive
+    worker = CalibCameraWorker({name: {"backend": "mock"} for name in ("front", "side")}, events=events)
+    worker.open()
+    try:
+        images = worker.execute({"task_id": 7, "request_func": 110, "iteration": 4,
+                                 "actual": [1, 2, 3], "target": [1, 2, 3]})
+        archive.close()
+        rows = [json.loads(line) for line in (events.run_directory / "events.jsonl").read_text().splitlines()]
+        captures = [row for row in rows if row["event"] == "capture"]
+        assert [row["capture_seq"] for row in captures] == [2, 3]
+        assert [row["kind"] for row in captures] == ["calib_front", "calib_side"]
+        for row in captures:
+            assert row["shot"] == "i04" and row["actual_xyz"] == [1, 2, 3]
+            assert row["pc_time_before"] <= row["pc_time_after"]
+            assert (tmp_path / row["raw_path"]).exists()
+            assert any(w["event"] == "image_written" and w["capture_id"] == row["capture_id"] for w in rows)
+        assert all(images.raw_paths.values())
+    finally:
+        worker.on_stop()
+
+
 def test_capture_failure_identifies_camera(monkeypatch: pytest.MonkeyPatch) -> None:
     """单台采图失败时保留视图、后端和现场排查建议。"""
     worker = CalibCameraWorker({name: {"backend": "mock"} for name in ("front", "side")})

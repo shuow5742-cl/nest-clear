@@ -92,15 +92,18 @@ def _log_groups(root: str | Path, day: date) -> tuple[Counter, list[str]]:
     """按级别、日志器及首句统计，并保留每条 ERROR 给人工清单。"""
     groups: Counter = Counter()
     errors = []
-    for name in ("main.log", "supervisor.log"):
-        path = daily_file(root, name, day)
+    paths = [daily_file(root, name, day) for name in ("main.log", "supervisor.log")]
+    paths.extend(Path(root).glob("????-??-??/*/main.log"))
+    for path in paths:
         if not path.exists():
             continue
         for line in path.read_text(encoding="utf-8").splitlines():
             match = LOG_LINE.match(line)
             if not match:
                 continue
-            _, clock, level, logger, message = match.groups()
+            log_day, clock, level, logger, message = match.groups()
+            if log_day != day.isoformat():
+                continue
             sentence = re.split(r"[。！？；;]", message, maxsplit=1)[0]
             groups[(level, logger, sentence)] += 1
             if level == "ERROR":

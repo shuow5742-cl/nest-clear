@@ -132,7 +132,8 @@ class FinishCapture(Instant):
                     overlay = render_fine(bb.read("image"), detection.get("observations", []), detection["fine_result"],
                                           bb.read("actual"), self.ctx.calibration, self.ctx.config.vision.fine_box_half_mm)
                 archive.rendered(overlay, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"),
-                                 self.ctx.config.vision.preview_window)
+                                 self.ctx.config.vision.preview_window,
+                                 **({"capture_id": bb.read("capture_id")} if getattr(self.ctx.events, "run_directory", None) is not None else {}))
             except Exception as exc:
                 record_image_error(self.ctx.events, f"{stage}叠加图 {bb.read('raw_path')}", exc, bb.read("task_id"))
         apply_reply(bb, reply, self.ctx)

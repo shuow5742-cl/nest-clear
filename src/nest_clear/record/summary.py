@@ -161,6 +161,10 @@ def write_tooltip_summary(events: EventRecorder, session: dict[str, Any], result
     row = {**session, "end_time": now.isoformat(), "result": result, "reason": reason}
     path = (events.run_directory / "tooltip_summary.jsonl" if events.run_directory else
             daily_file(events.directory, "tooltip_summary.jsonl", now.date()))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+    except (OSError, ValueError, TypeError):
+        import logging
+        logging.getLogger("nest_clear.record.summary").exception("对刀摘要写入失败")

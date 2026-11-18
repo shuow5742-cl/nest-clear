@@ -142,7 +142,7 @@ def test_failures_recover_to_idle(rig, case):
     assert records[-1]["func_code"] == 131
     task = plc.request(1)
     assert plc.wait_reply(task, 5)["func_code"] == 1
-    events = [json.loads(line) for line in next((path / "runs").glob("*/events.jsonl")).read_text().splitlines()]
+    events = [json.loads(line) for line in next((path / "runs").glob("*/*/events.jsonl")).read_text().splitlines()]
     assert any(event["event"] == "tooltip_failed" for event in events)
 
 
@@ -237,9 +237,13 @@ def test_calibration_record_and_report(rig):
     assert failure[-1]["func_code"] == 131
     assert plc.wait_reply(plc.request(130), 5)["func_code"] == 999
     app.archive.close()
-    directory = next((path / "runs").glob("????-??-??"))
+    directory = app.events.run_directory
     rows = [json.loads(line) for line in (directory / "tooltip_summary.jsonl").read_text().splitlines()]
     good, bad = rows
+    updates = [json.loads(line) for line in (directory / "meta_updates.jsonl").read_text().splitlines()]
+    assert updates[-1]["task_id"] in good["task_ids"]
+    assert updates[-1]["old"] == pytest.approx(good["old_compensation"])
+    assert updates[-1]["new"] == pytest.approx(good["new_compensation"])
     assert {"start_time", "end_time", "tool", "iterations", "result", "reason", "delta", "old_compensation", "new_compensation", "task_ids", "images"} <= good.keys()
     assert good["result"] == "成功" and good["iterations"] == 1
     assert good["delta"] == pytest.approx([0.5, 0.3, 0.2], abs=0.03)
@@ -250,12 +254,19 @@ def test_calibration_record_and_report(rig):
     for capture in good["images"]:
         for image_path in (*capture["raw"].values(), *capture["overlay"].values()):
             assert image_path and (path / "runs" / image_path).is_file()
-            assert "calib_1_" in image_path
+            assert "calib_front_" in image_path or "calib_side_" in image_path
     assert all((path / "runs" / image_path).is_file() for image_path in bad["images"][0]["raw"].values())
     events = [json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()]
+    captures = [row for row in events if row["event"] == "capture"]
+    assert {row["kind"] for row in captures} == {"calib_front", "calib_side"}
+    assert len({row["capture_id"] for row in captures}) == len(captures)
+    for capture in captures:
+        assert capture["pc_time_after"] >= capture["pc_time_before"]
+        assert capture["actual_xyz"] is not None and capture["target_xyz"] is not None
+        assert any(row["event"] == "image_written" and row["capture_id"] == capture["capture_id"] and row["path"] == capture["raw_path"] for row in events)
     assert any(row["event"] == "tooltip_detect" and row["images"]["overlay"]["front"] for row in events)
     assert any(row["event"] == "tooltip_failed" and row["images"][0]["raw"]["front"] for row in events)
-    text = report(path / "runs", date.fromisoformat(directory.name))
+    text = report(path / "runs", date.fromisoformat(directory.parent.name))
     assert "工具标定：" in text and "迭代 1 次，成功" in text
     assert "需要人看的：" in text and "对刀 131" in text and "无法识别针尖" in text
     assert "模式 空闲 → 对刀中(工具1)" in text
@@ -278,7 +289,7 @@ def test_calibration_record_images_disabled(rig):
     app.archive.enabled = False
     records = plc.start_tool_calibration(1, P0, timeout_s=5, finish=True)
     assert records[-1]["func_code"] == 130
-    row = json.loads(next((path / "runs").glob("*/tooltip_summary.jsonl")).read_text())
+    row = json.loads(next((path / "runs").glob("*/*/tooltip_summary.jsonl")).read_text())
     assert row["result"] == "成功"
     assert all(value is None for value in row["images"][0]["raw"].values())
     assert all(value is None for value in row["images"][0]["overlay"].values())
@@ -292,7 +303,7 @@ def test_calibration_capture_failure_returns_131(rig, monkeypatch):
     plc.set_actual_xyz(P0)
     task = plc.request(100)
     assert plc.wait_reply(task, 5)['func_code'] == 131
-    rows = [json.loads(line) for line in next((path / 'runs').glob('*/events.jsonl')).read_text().splitlines()]
+    rows = [json.loads(line) for line in next((path / 'runs').glob('*/*/events.jsonl')).read_text().splitlines()]
     assert any(r['event'] == 'tooltip_failed' and r['task_id'] == task and '取图超时' in r['reason'] for r in rows)
 
 
@@ -316,7 +327,7 @@ def test_calibration_quality_limits(rig, monkeypatch, kind, hard):
     task = plc.request(100)
     reply = plc.wait_reply(task, 5)
     assert reply['func_code'] == (131 if hard else 111)
-    rows = [json.loads(line) for line in next((path / 'runs').glob('*/events.jsonl')).read_text().splitlines()]
+    rows = [json.loads(line) for line in next((path / 'runs').glob('*/*/events.jsonl')).read_text().splitlines()]
     assert any(r['event'] == 'tooltip_quality_warning' and r['task_id'] == task for r in rows)
     if hard:
         reason = next(r['reason'] for r in rows if r['event'] == 'tooltip_failed' and r['task_id'] == task)

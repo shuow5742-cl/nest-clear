@@ -28,6 +28,8 @@ class CameraWorker(AsyncRequestWorker):
         super().__init__()
         self.sn, self.backend, self.timeout_s = sn, backend, timeout_s
         self.settings = {"exposure_us": exposure_us, "gain_db": gain_db, "balance_ratio": balance_ratio}
+        self.readback = {"exposure_us": None, "gain_db": None, "balance_ratio": None}
+        self.model = None
         self.principal = principal
         self.role = role
         self.needs_reopen = False
@@ -42,6 +44,8 @@ class CameraWorker(AsyncRequestWorker):
         try:
             if self.backend == "daheng" and hasattr(self.camera, "_gx"):
                 _, devices = self.camera._gx.DeviceManager().update_device_list()
+                match = next((d for d in devices if str(d.get("sn", d.get("serial_number", ""))) == self.sn), {})
+                self.model = match.get("model_name", match.get("model"))
                 serials = [str(d.get("sn", d.get("serial_number", "未知"))) for d in devices]
                 logger.info("发现相机 SN：%s", serials)
                 if self.sn not in serials:
@@ -79,6 +83,7 @@ class CameraWorker(AsyncRequestWorker):
                     actual = getattr(self.camera, key)
                 if abs(actual - wanted) > max(0.01, abs(wanted) * 0.001):
                     raise ValueError(f"{key} 期望 {wanted}，实际 {actual}")
+                self.readback[key] = actual
             if self.settings["balance_ratio"] is not None:
                 if device is None:
                     self.camera.balance_ratio = self.settings["balance_ratio"]
@@ -92,8 +97,32 @@ class CameraWorker(AsyncRequestWorker):
                         actual.append(device.BalanceRatio.get())
                 if any(abs(a-b) > 0.003 for a, b in zip(actual, self.settings["balance_ratio"])):
                     raise ValueError(f"balance_ratio 期望 {self.settings['balance_ratio']}，实际 {actual}")
+                self.readback["balance_ratio"] = list(actual)
             else:
                 logger.info("相机 SN=%s balance_ratio 未设置", self.sn)
+            for key, feature in (("exposure_us", "ExposureTime"), ("gain_db", "Gain")):
+                if self.readback[key] is None:
+                    try:
+                        self.readback[key] = getattr(device, feature).get() if device else getattr(self.camera, key, None)
+                    except Exception:
+                        logger.warning("相机 %s %s 回读不可用", self.sn, key)
+            if self.readback["balance_ratio"] is None and device is None:
+                self.readback["balance_ratio"] = getattr(self.camera, "balance_ratio", None)
+            elif self.readback["balance_ratio"] is None:
+                try:
+                    selector = device.BalanceRatioSelector
+                    previous = selector.get()
+                    channels = self.camera._gx.GxBalanceRatioSelectorEntry
+                    try:
+                        values = []
+                        for channel in (channels.RED, channels.GREEN, channels.BLUE):
+                            selector.set(channel)
+                            values.append(device.BalanceRatio.get())
+                        self.readback["balance_ratio"] = values
+                    finally:
+                        selector.set(previous)
+                except Exception:
+                    logger.warning("相机 %s 白平衡回读不可用", self.sn)
         except Exception as exc:
             raise GuardError("CAMERA-OPEN", f"打开或参数回读失败：{exc}", f"相机 SN={self.sn}", "检查供电、连接、SDK、序列号及相机参数。") from exc
 

@@ -43,10 +43,19 @@ class DailyHandler(logging.Handler):
         super().close()
 
 
-def configure(root: str | Path, process: str) -> None:
+def configure(root: str | Path, process: str, *, run_directory: Path | None = None) -> None:
     """为入口进程设置控制台和每日文件输出。"""
+    if run_directory is not None:
+        try:
+            run_directory.mkdir(parents=True, exist_ok=True)
+            handler = logging.FileHandler(run_directory / f"{process}.log", encoding="utf-8")
+        except OSError:
+            logging.getLogger(__name__).exception("运行日志文件创建失败：%s", run_directory)
+            handler = logging.NullHandler()
+    else:
+        handler = DailyHandler(root, process)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        handlers=[logging.StreamHandler(), DailyHandler(root, process)],
+        handlers=[logging.StreamHandler(), handler],
     )

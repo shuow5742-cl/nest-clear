@@ -54,6 +54,7 @@ class ImageArchive:
         self.preview_thread: threading.Thread | None = None
         self.preview_lock = threading.Lock()
         self.capture_paths: dict[str, str] = {}
+        self.capture_context: dict[str, dict[str, Any]] = {}
         removed = []
         cutoff = date.today() - timedelta(days=retention_days)
         for directory in events.directory.glob("????-??-??"):
@@ -95,9 +96,14 @@ class ImageArchive:
         return self._submit(image, targets, scan, task_id, raw_path)
 
     def rendered(self, image: np.ndarray, scan: int, task_id: int, raw_path: str | None,
-                 preview: bool = False) -> None:
+                 preview: bool = False, capture_id: str | None = None) -> None:
         """异步归档画面及最新 JPEG，预览交给独立线程且只保留最新帧。"""
-        self._submit(image, [], scan, task_id, raw_path)
+        if self.events.run_directory is not None and raw_path is None:
+            if self.enabled:
+                self.events.emit("image_dropped", task_id=task_id, capture_id=capture_id,
+                                 kind="overlay", reason="raw_image_unavailable")
+        else:
+            self._submit(image, [], scan, task_id, raw_path, capture_id=capture_id)
         self.executor.submit(self._write_live, image.copy())
         if preview:
             self._offer_preview(image)
@@ -105,7 +111,8 @@ class ImageArchive:
     def _write_live(self, image: np.ndarray) -> None:
         """在归档线程原子替换最新画面，失败时只记录警告。"""
         try:
-            path = daily_file(self.events.directory, "live", self.events.clock().date()) / "latest.jpg"
+            path = ((self.events.run_directory / "live") if self.events.run_directory else
+                    daily_file(self.events.directory, "live", self.events.clock().date())) / "latest.jpg"
             path.parent.mkdir(parents=True, exist_ok=True)
             ok, data = cv2.imencode(".jpg", image)
             if not ok:
@@ -177,6 +184,9 @@ class ImageArchive:
         now = self.events.clock()
         kind = "raw" if targets is None else "overlay"
         capture_id = capture_id or self.capture_paths.get(raw_path or "")
+        if capture_id and capture_id not in self.capture_context:
+            self.capture_context[capture_id] = {"request_func": self.events.request_func, "xid": self.events.xid}
+        context = self.capture_context.get(capture_id, {})
         if self.events.run_directory is not None and (stem or raw_path):
             if raw_path:
                 relative = Path(raw_path).with_name(Path(raw_path).name.replace("_raw.png", "_ovl.jpg"))
@@ -199,6 +209,7 @@ class ImageArchive:
                 scan_index=scan,
                 task_id=task_id,
                 capture_id=capture_id, reason="queue_full",
+                **context,
             )
             return None
         try:
@@ -207,31 +218,32 @@ class ImageArchive:
                 self.events.directory / relative,
                 image.copy(),
                 None if targets is None else list(targets),
-                capture_id, task_id,
+                capture_id, task_id, context,
             )
             future.add_done_callback(lambda future: self.slots.release())
         except Exception as exc:
             self.slots.release()
             record_image_error(self.events, str(relative), exc, task_id)
-            self.events.emit("image_dropped", kind=kind, path=str(relative), scan_index=scan, task_id=task_id, capture_id=capture_id, reason=str(exc))
+            self.events.emit("image_dropped", kind=kind, path=str(relative), scan_index=scan, task_id=task_id, capture_id=capture_id, reason=str(exc), **context)
             return None
         if capture_id:
             self.capture_paths[str(relative)] = capture_id
-        self.events.emit("image_submitted", kind=kind, path=str(relative), scan_index=scan, task_id=task_id, capture_id=capture_id)
+        self.events.emit("image_submitted", kind=kind, path=str(relative), scan_index=scan, task_id=task_id, capture_id=capture_id, **context)
         return str(relative)
 
     def _write_with_context(self, path: Path, image: Any, targets: list[Any] | None,
-                            capture_id: str | None, task_id: int | None) -> None:
+                            capture_id: str | None, task_id: int | None,
+                            context: dict[str, Any]) -> None:
         try:
             self._write(path, image, targets)
             data = path.read_bytes()
             self.events.emit("image_written", capture_id=capture_id, task_id=task_id,
                              path=str(path.relative_to(self.events.directory)), bytes=len(data),
-                             sha1=hashlib.sha1(data).hexdigest()[:12])
+                             sha1=hashlib.sha1(data).hexdigest()[:12], **context)
         except Exception as exc:
             record_image_error(self.events, str(path), exc, task_id)
             self.events.emit("image_dropped", capture_id=capture_id, task_id=task_id,
-                             path=str(path.relative_to(self.events.directory)), reason=str(exc))
+                             path=str(path.relative_to(self.events.directory)), reason=str(exc), **context)
 
     def _write(self, path: Path, image: Any, targets: list[Any] | None) -> None:
         """压缩写原图或带序号、分数的叠加图，失败只告警。"""

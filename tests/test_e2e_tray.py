@@ -117,7 +117,7 @@ def test_unknown_and_arrival_error(running: tuple[FakePLC, Application, Sequence
     plc.set_actual_xyz([100, 100, 100])
     task = plc.request(20)
     assert plc.wait_reply(task, 5)["func_code"] == 999
-    events = [json.loads(line) for line in next(directory.glob("*/events.jsonl")).read_text().splitlines()]
+    events = [json.loads(line) for line in next(directory.glob("*/*/events.jsonl")).read_text().splitlines()]
     assert any(event["event"] == "error" and "功能码 123" in event["reason"] for event in events)
     assert any(event["event"] == "arrival" and not event["ok"] for event in events)
 
@@ -172,7 +172,7 @@ def test_detector_failure_returns_999(running: tuple[FakePLC, Application, Seque
     task = plc.request(20)
     assert plc.wait_reply(task, 5)["func_code"] == 999
     app.archive.close()
-    events = [json.loads(line) for line in next(directory.glob("*/events.jsonl")).read_text().splitlines()]
+    events = [json.loads(line) for line in next(directory.glob("*/*/events.jsonl")).read_text().splitlines()]
     error = next(event for event in events if event["event"] == "error" and "检测器离线" in event["reason"])
     assert error["raw_path"] and (directory / error["raw_path"]).exists()
     reply = next(event for event in events if event["event"] == "reply" and event["func"] == 999)
@@ -186,6 +186,47 @@ def test_terminal_rejects_new_tray(running, monkeypatch):
     monkeypatch.setattr(VisionWorker, "execute", lambda worker, payload: {"observations": []})
     assert plc.drive_tray(timeout_s=5)[-1]["func_code"] == 9
     assert plc.wait_reply(plc.request(1), 5)["func_code"] == 999
+
+
+def test_run_record_end_to_end(running):
+    """一盘实际握手后，以运行目录核对快照、每张图片及 PLC 流水。"""
+    import re
+    plc, app, _, root = running
+    assert plc.drive_tray(timeout_s=10)[-1]["func_code"] == 9
+    run = app.events.run_directory
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        rows = [json.loads(line) for line in (run / "events.jsonl").read_text().splitlines()]
+        if any(row["event"] == "tray_end" for row in rows):
+            break
+        time.sleep(.01)
+    else:
+        pytest.fail("没有盘结束事件")
+    app.archive.close()
+    rows = [json.loads(line) for line in (run / "events.jsonl").read_text().splitlines()]
+    assert re.fullmatch(r"\d{4}-\d\d-\d\d", run.parent.name)
+    assert re.fullmatch(r"\d{6}_\d+", run.name)
+    meta = json.loads((run / "meta.json").read_text())
+    assert {"run_id", "machine_id", "code", "auto_weaver", "config", "contract", "calibration", "tools", "camera", "detection_scales"} <= meta.keys()
+    assert {"sha", "dirty"} <= meta["code"].keys()
+    assert {"content", "sha256", "mtime"} <= meta["calibration"].keys()
+    assert {"sn", "model", "width", "height", "settings", "readback"} <= meta["camera"].keys()
+    captures = [row for row in rows if row["event"] == "capture"]
+    assert captures
+    required = {"capture_id", "kind", "tray", "view", "shot", "task_id", "request_func", "xid", "actual_xyz", "target_xyz", "frame_id", "device_timestamp", "pc_time_before", "pc_time_after", "pc_mono_before", "pc_mono_after", "exposure_us", "gain_db", "width", "height", "flushed_frames", "raw_path", "ovl_path", "queued_wall"}
+    written = [row for row in rows if row["event"] == "image_written"]
+    for capture in captures:
+        assert required <= capture.keys()
+        assert (root / capture["raw_path"]).is_file()
+        assert re.search(r"\d{6}_(coarse|fine)_t.+_v\d{2}_[cf]\d+_raw\.png$", capture["raw_path"])
+        assert any(item["capture_id"] == capture["capture_id"] and item["path"] == capture["raw_path"] and item["bytes"] > 0 and len(item["sha1"]) == 12 for item in written)
+    edges = [json.loads(line) for line in (run / "plc.jsonl").read_text().splitlines()]
+    requests = [edge for edge in edges if edge["event"] == "request"]
+    assert requests
+    for edge in requests:
+        assert any(row["event"] == "request" and row["task_id"] == edge["task_id"] and row["xid"] == edge["xid"] for row in rows)
+    for edge in (edge for edge in edges if edge["event"] == "reply"):
+        assert any(row["event"] == "reply" and row["task_id"] == edge["task_id"] and row["xid"] == edge["xid"] for row in rows)
 
 
 @pytest.mark.parametrize('stage', ['coarse', 'fine'])
@@ -210,6 +251,6 @@ def test_capture_failure_returns_999_and_context(running, monkeypatch, stage):
         monkeypatch.setattr(app.camera.camera, 'snapshot', broken)
     task = plc.request(20)
     assert plc.wait_reply(task, 5)['func_code'] == 999
-    rows = [json.loads(line) for line in next(directory.glob('*/events.jsonl')).read_text().splitlines()]
+    rows = [json.loads(line) for line in next(directory.glob('*/*/events.jsonl')).read_text().splitlines()]
     event = next(row for row in rows if row['event'] == 'error' and row.get('task_id') == task)
     assert all(value in event['reason'] for value in (app.config.camera_sn, '粗拍' if stage == 'coarse' else '精定位', str(task), '取图超时'))

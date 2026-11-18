@@ -90,6 +90,8 @@ class SaveCompensation(Instant):
         offsets = list(self.ctx.config.tools)
         offsets[tool - 1] = new
         object.__setattr__(self.ctx.config, "tools", tuple(offsets))
+        self.ctx.events.meta_update(task_id=bb.read("task_id"), request_func=bb.read("request_func"),
+                                    tool=tool, old=old, new=new)
         self.ctx.events.emit("tooltip_compensation", task_id=bb.read("task_id"), tool=tool,
                              old=old, new=new, delta=delta)
         session.update(delta=delta, old_compensation=list(old), new_compensation=list(new))
@@ -172,8 +174,12 @@ class ArchiveTips(Instant):
         iteration = len(session["images"]) + 1
         paths = {"task_id": task, "iteration": iteration, "raw": {}, "overlay": {}}
         archive = getattr(self.ctx.events, "archive", None)
-        for view, image in bb.read("tooltip_images").items():
-            paths["raw"][view] = archive.calibration(image, session["tool"], task, iteration, view) if archive else None
+        images = bb.read("tooltip_images")
+        for view, image in images.items():
+            if self.ctx.events.run_directory is not None:
+                paths["raw"][view] = getattr(images, "raw_paths", {}).get(view)
+            else:
+                paths["raw"][view] = archive.calibration(image, session["tool"], task, iteration, view) if archive else None
         session["images"].append(paths)
 
 
@@ -235,7 +241,7 @@ class DetectTips(Instant):
         for view in ("front", "side"):
             paths["overlay"][view] = archive.calibration(
                 images[view], session["tool"], bb.read("task_id"), paths["iteration"], view,
-                points[view], targets[view], paths["raw"].get(view)) if archive else None
+                points[view], targets[view], paths["raw"].get(view)) if archive and (self.ctx.events.run_directory is None or paths["raw"].get(view)) else None
         bb.write("tooltip_points", points, self.name)
 
 
@@ -367,7 +373,10 @@ def calibration_branch(ctx: FlowContext, start: bool) -> TreeNode:
     steps.extend([
         CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", name="读取对刀实时坐标"),
         CheckPosition(ctx, start),
-        CallWorker(ctx.board, "calib_camera", lambda bb: {"task_id": bb.read("task_id")}, "tooltip_images", name="采集对刀双视图"),
+        CallWorker(ctx.board, "calib_camera", lambda bb: {"task_id": bb.read("task_id"),
+                   "request_func": bb.read("request_func"), "actual": bb.read("actual"),
+                   "target": bb.read("tooltip_session")["last_position"],
+                   "iteration": len(bb.read("tooltip_session")["images"]) + 1}, "tooltip_images", name="采集对刀双视图"),
         ArchiveTips(ctx), DetectTips(ctx), SolveTips(ctx), PrepareCalibrationReply(ctx),
     ])
     return Fallback([Sequence(steps, name="对刀迭代"), CalibrationFailed(ctx)], name="对刀业务或 131")

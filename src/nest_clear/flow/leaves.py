@@ -196,11 +196,13 @@ class RecordCapture(Instant):
                     raw = str(base / f"{stem}_raw.png") if archive.enabled else None
                     overlay = str(base / f"{stem}_ovl.jpg") if archive.enabled else None
                     bb.write("capture_id", capture_id, self.name)
+                    meta = dict(bb.read("capture_meta"))
+                    meta["capture_seq"] = sequence
                     self.events.emit("capture", capture_id=capture_id, kind=stage, tray=tray,
                                      view=view, shot=shot, task_id=bb.read("task_id"),
                                      request_func=bb.read("request_func"), actual_xyz=bb.read("actual"),
                                      target_xyz=bb.read("scan"), raw_path=raw, ovl_path=overlay,
-                                     queued_wall=self.events.clock().isoformat(), **bb.read("capture_meta"))
+                                     queued_wall=self.events.clock().isoformat(), **meta)
                     path = archive.capture_raw(bb.read("image"), sequence=sequence, capture_id=capture_id,
                                                kind=stage, tray=tray, view=view, shot=shot,
                                                task_id=bb.read("task_id"))

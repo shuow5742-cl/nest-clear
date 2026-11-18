@@ -141,9 +141,8 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
                 time.sleep(0.05)
             assert alive.exists()
             assert plc.drive_tray(timeout_s=8)[-1]["func_code"] == 9
-            path = tmp_path / "runs" / date.today().isoformat() / "summary.jsonl"
             deadline = time.monotonic() + 5
-            while not path.exists() and time.monotonic() < deadline:
+            while not list((tmp_path / "runs").glob("*/*/summary.jsonl")) and time.monotonic() < deadline:
                 time.sleep(0.02)
             # PLC 清除任务编号并重新拉起初始化位，父程序按既有边沿重启主程序。
             state = tmp_path / "runs/supervisor.json"
@@ -192,7 +191,8 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
             plc.set_status(128)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
-                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                rows = [json.loads(line) for path in sorted((tmp_path / "runs").glob("*/*/summary.jsonl"))
+                        for line in path.read_text().splitlines()]
                 if len(rows) == 2:
                     break
                 time.sleep(0.05)
