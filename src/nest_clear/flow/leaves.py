@@ -310,6 +310,8 @@ class CommitReply(Instant):
                 info = dict(render_data["info"])
                 coordinates = bb.read("reply_coordinates") or {}
                 info.update(tool1=coordinates.get("pick1_xyz"), tool2=coordinates.get("pick2_xyz"))
+                if func != 3 and render_data["result"].status == "ok":
+                    info["not_sent_reason"] = "reply_failed"
                 result = render_data["result"] if func == 3 else replace(render_data["result"], pick_uv=None, target_xyz=None)
                 overlay = render_fine(render_data["image"], render_data["observations"], result,
                                       render_data["pose"], render_data["calibration"], render_data["half_mm"],

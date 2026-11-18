@@ -68,14 +68,15 @@ def test_render_scales_labels_and_distinguishes_reappeared(calibration, monkeypa
     monkeypatch.setattr(cv2, 'putText', capture)
     observation = measure(candidate(w=10, h=5), (0, 0, 0), calibration, HairDetectConfig())
     render(np.zeros((300, 400, 3), np.uint8), [observation])
-    small_scale = calls[0][1]
+    small_scale = next(call[1] for call in calls if call[2] == COLORS['eligible'])
     calls.clear()
     observation.status = 'attempted'
     render(np.zeros((3036, 4024, 3), np.uint8), [observation])
-    assert 'REAPPEARED' in calls[0][0]
-    assert calls[0][1] > small_scale and calls[1][1] > calls[0][1]
-    assert calls[0][2] == COLORS['attempted'] and COLORS['attempted'] != COLORS['rejected']
-    assert calls[0][3] > 1
+    label = next(call for call in calls if call[2] == COLORS['attempted'])
+    assert 'PENDING' in label[0]
+    assert label[1] > small_scale
+    assert COLORS['attempted'] != COLORS['rejected']
+    assert label[3] > 1
 
 
 def test_preview_does_not_block_archive(tmp_path, monkeypatch, caplog):

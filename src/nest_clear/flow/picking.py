@@ -208,16 +208,26 @@ class FinishCapture(Instant):
         # 状态转移和应答不受可选画面处理的异常影响。
         archive = getattr(self.ctx.events, "archive", None)
         if archive:
+            info = {"capture_id": bb.read("capture_id"), "wall": "",
+                    "tray": getattr(self.ctx.events, "tray_id", None), "view": view + 1,
+                    "shot": bb.read("capture_shot"), "task_id": bb.read("task_id"),
+                    "eligible": reply.removable_count if stage == "coarse" else None,
+                    "failed": None, "um_per_px": None}
             try:
                 capture_meta = bb.read("capture_meta") or {}
                 timestamp = capture_meta.get("pc_time_after")
                 wall = datetime.fromtimestamp(timestamp).astimezone().isoformat() if timestamp is not None else ""
-                info = {"capture_id": bb.read("capture_id"), "wall": wall,
-                        "tray": getattr(self.ctx.events, "tray_id", None), "view": view + 1,
-                        "shot": bb.read("capture_shot"), "task_id": bb.read("task_id"),
-                        "eligible": sum(o.status == "eligible" for o in detection.get("observations", [])),
-                        "failed": sum(o.status == "failed" for o in detection.get("observations", [])),
-                        "um_per_px": detection.get("um_per_px")}
+                scale = detection.get("um_per_px")
+                if scale is None:
+                    try:
+                        from nest_clear.vision.geometry import scale_um_per_px
+                        scale = scale_um_per_px(self.ctx.calibration, self.ctx.calibration.plane_z, bb.read("actual")[2])
+                    except Exception:
+                        logger.warning("无法计算画面尺度", exc_info=True)
+                info.update(wall=wall,
+                            eligible=reply.removable_count if stage == "coarse" else sum(o.status == "eligible" for o in detection.get("observations", [])),
+                            failed=sum(o.status == "failed" for o in detection.get("observations", [])),
+                            um_per_px=round(scale, 3) if scale is not None else None)
                 if stage == "coarse":
                     overlay = render(bb.read("image"), detection["observations"], None,
                                      self.ctx.config.vision.ignore_regions_px, cycle.targets, info=info)
@@ -231,7 +241,7 @@ class FinishCapture(Instant):
                         uv, _ = cv2.projectPoints(camera_xyz.reshape(1, 3), np.zeros(3), np.zeros(3), self.ctx.calibration.K, self.ctx.calibration.distortion)
                         coarse_uv = tuple(uv.reshape(2))
                     info.update(attempt_id=cycle.active_attempt["attempt_id"] if cycle.active_attempt else None,
-                                tool1=None, tool2=None)
+                                tool1=None, tool2=None, not_sent_reason=detection["fine_result"].status)
                     result = detection["fine_result"]
                     if getattr(self.ctx.events, "run_directory", None) is not None:
                         bb.write("fine_render_data", {"image": bb.read("image"), "observations": detection.get("observations", []),
@@ -250,6 +260,14 @@ class FinishCapture(Instant):
                                      **({"capture_id": bb.read("capture_id")} if getattr(self.ctx.events, "run_directory", None) is not None else {}))
             except Exception as exc:
                 record_image_error(self.ctx.events, f"{stage}叠加图 {bb.read('raw_path')}", exc, bb.read("task_id"))
+                if stage == "coarse":
+                    try:
+                        fallback = render(bb.read("image"), [], info=info)
+                        archive.rendered(fallback, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"),
+                                         self.ctx.config.vision.preview_window,
+                                         **({"capture_id": bb.read("capture_id")} if getattr(self.ctx.events, "run_directory", None) is not None else {}))
+                    except Exception as fallback_exc:
+                        record_image_error(self.ctx.events, "粗拍信息栏", fallback_exc, bb.read("task_id"))
         apply_reply(bb, reply, self.ctx)
 
 

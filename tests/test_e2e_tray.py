@@ -76,6 +76,9 @@ def test_full_tray_and_wrap(running, monkeypatch):
     """多视野依次经历三种精定位失败与成功，再检查两工具和提交顺序。"""
     from types import SimpleNamespace
     from nest_clear.vision.fine import FineResult
+    from nest_clear.vision.detector import ModuleTarget
+    from nest_clear.vision.hair import HairCandidate
+    from nest_clear.vision.hair_integration import Observation
     from nest_clear.workers.vision import VisionWorker
     plc, app, detector, directory = running
     statuses = iter(("fine_empty", "fine_point_outside", "fine_rejected", "ok"))
@@ -86,14 +89,26 @@ def test_full_tray_and_wrap(running, monkeypatch):
             observations = []
             if cycle.view_index == 0 and cycle.attempt_count < 4:
                 for x in (10., 20., 30., 40.):
-                    observations.append(SimpleNamespace(target=SimpleNamespace(xyz=(x, 0., 0.)), status="eligible", reason=None, area=50 - x))
+                    u, v = int(300 + x * 50), 1000
+                    candidate = HairCandidate((u, v), None, ((u-20,v-10),(u+20,v-10),(u+20,v+10),(u-20,v+10)),
+                                              (u-20,v-10,u+20,v+10), (u,v), 40, 800, .4, .6, None, "test")
+                    observations.append(Observation(ModuleTarget(PixelTarget(u, v, .9), (x, 0., 0.)),
+                                                    (x, 0., 0.), candidate, 3., 50-x, None))
             return {"observations": observations}
         status = next(statuses)
         return {"fine_result": FineResult(status, target_xyz=(40., 0., 0.) if status == "ok" else None)}
-    monkeypatch.setattr("nest_clear.flow.picking.render", lambda image, *args, **kwargs: image)
     monkeypatch.setattr(VisionWorker, "execute", execute)
     records = plc.drive_tray(timeout_s=5)
     assert records[-1]["func_code"] == 9
+    app.archive.executor.submit(lambda: None).result(timeout=10)
+    import cv2
+    import numpy as np
+    images = list(app.events.run_directory.glob("images/000001_coarse_t0001_v01_c01_ovl.jpg"))
+    assert len(images) == 1
+    overlay = cv2.imread(str(images[0]))
+    assert np.max(overlay[:300, :1800]) > 245
+    assert np.any(np.max(overlay[-500:, -1200:], axis=2) - np.min(overlay[-500:, -1200:], axis=2) > 50)
+    assert np.any((overlay[:, :, 1] > 180) & (overlay[:, :, 0] < 100) & (overlay[:, :, 2] < 100))
     assert sum(row["func_code"] == 3 for row in records) == 1
     pick = next(row for row in records if row["func_code"] == 3)
     assert pick["pick1_xyz"] == pytest.approx([41., 2., 3.])
