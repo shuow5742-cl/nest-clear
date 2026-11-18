@@ -2,13 +2,11 @@
 import json
 import math
 from pathlib import Path
-from types import SimpleNamespace
 
 from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 
 from nest_clear.plan.scan_path import guard_position
-from nest_clear.record.images import record_image_error
 from .calibration import change_mode
 from .leaves import CallWorker, Instant, PrepareError
 from .modes import Mode
@@ -70,37 +68,9 @@ class Process(Instant):
     def perform(self):
         bb, ctx = self._blackboard, self.ctx
         session = bb.read("camcal_session")
-        captured = bb.read("image")
-        image, meta = captured if isinstance(captured, tuple) else (captured, {})
-        session["shots"] += 1
-        shot = f"s{session['shots']:02d}"
-        seq, capture_id = ctx.events.next_capture()
-        archive = getattr(ctx.events, "archive", None)
-        raw = None
-        if archive:
-            try:
-                raw = archive.capture_raw(image, sequence=seq, capture_id=capture_id, kind="camcal", tray="0", view=0, shot=shot, task_id=bb.read("task_id"))
-            except Exception as exc:
-                record_image_error(ctx.events, "相机标定原图", exc, bb.read("task_id"))
+        result = bb.read("camcal_result")
+        step, raw = result['step'], result['raw_path']
         bb.write("raw_path", raw, self.name)
-        ctx.events.emit("capture", kind="camcal", capture_id=capture_id, task_id=bb.read("task_id"),
-                        tray=0, view=0, shot=shot, actual_xyz=bb.read("actual"), target_xyz=session["target"], raw_path=raw, **{k:v for k,v in meta.items() if k != "capture_seq"})
-        if session["engine"] is None:
-            if ctx.camcal_factory is None:
-                from nest_clear.camcal.config import CameraCalibConfig
-                from nest_clear.camcal.session import CameraCalibrationSession
-                factory = CameraCalibrationSession
-                cfg = CameraCalibConfig(**ctx.config.camera_calibration)
-            else:
-                factory = ctx.camcal_factory
-                cfg = SimpleNamespace(**{"xy_limit_mm":25.0, "z_limit_mm":5.0, "position_tolerance_mm":0.05, **ctx.config.camera_calibration})
-            session["cfg"] = cfg
-            session["engine"] = factory(cfg, ctx.calibration, (image.shape[1], image.shape[0]), session["start"])
-        step = session["engine"].add(image, tuple(bb.read("actual")))
-        if step.overlay is not None and archive:
-            archive.rendered(step.overlay, 0, bb.read("task_id"), raw, capture_id=capture_id)
-        ctx.events.emit("camcal_step", task_id=bb.read("task_id"), sequence=session["shots"],
-                        target_xyz=step.target_xyz, actual_xyz=bb.read("actual"), detail=step.detail, raw_path=raw)
         if step.kind == "fail":
             finish(ctx, bb, "failed", code=step.code, reason=step.reason, detail=step.detail, raw_path=raw)
             reply = 82
@@ -153,5 +123,8 @@ class Failed(Instant):
 
 def camera_branch(ctx):
     # 位置检查失败由统一 999 出口处理；采图和业务失败返回 82。
-    sample = Fallback([Sequence([CallWorker(ctx.board, "camera", lambda bb: {"stage":"camcal", "task_id":bb.read("task_id")}, "image", name="采集相机标定图"), Process(ctx)], name="采样及求解"), Failed(ctx)], name="相机标定或 82")
+    sample = Fallback([Sequence([CallWorker(ctx.board, "camera", lambda bb: {"stage":"camcal", "task_id":bb.read("task_id")}, "image", name="采集相机标定图"), CallWorker(ctx.board, "camcal", lambda bb: {
+        "context": ctx, "session": bb.read("camcal_session"), "captured": bb.read("image"),
+        "actual": bb.read("actual"), "task_id": bb.read("task_id")}, "camcal_result", name="异步相机标定"),
+        Process(ctx)], name="采样及求解"), Failed(ctx)], name="相机标定或 82")
     return Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual"}, "actual", name="读取相机标定坐标"), Prepare(ctx), sample], name="相机标定")

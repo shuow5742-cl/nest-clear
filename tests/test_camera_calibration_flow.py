@@ -10,6 +10,7 @@ from autoweaver.motion_policy.world_board import WorldBoard
 from autoweaver.worker.clock import BTClock
 from autoweaver.worker import AsyncRequestWorker
 
+from nest_clear.workers.camcal import CamcalWorker
 from nest_clear.config import load_config
 from nest_clear.flow.batch import build_batch
 from nest_clear.flow.context import RequestTracker
@@ -66,7 +67,7 @@ def rig(tmp_path):
     board, plc = WorldBoard(), PLC()
     clock = BTClock(board)
     camera = Camera()
-    for w in (plc, camera): clock.attach_worker(w)
+    for w in (plc, camera, CamcalWorker()): clock.attach_worker(w)
     updated = []
     path = tmp_path / 'camera.yaml'
     state = {'save_fail': False}
@@ -178,3 +179,16 @@ def test_vision_replaces_calibration_and_clears_scale_cache():
     worker.update_calibration('new')
     assert worker.calibration == detector.calibration == 'new'
     assert detector.cache == {} and detector._logged_keys == set()
+
+
+def test_slow_calibration_runs_outside_tick(rig, monkeypatch, caplog):
+    original = FakeSession.add
+    def slow(self, image, xyz):
+        time.sleep(.12)
+        return original(self, image, xyz)
+    monkeypatch.setattr(FakeSession, 'add', slow)
+    caplog.set_level('WARNING')
+    assert rig.request(1, 80)[0] == 80
+    rig.plc.actual = (1., 0., 0.)
+    assert rig.request(2, 80)[0] == 81
+    assert not [r for r in caplog.records if 'slow tick' in r.getMessage().lower()]

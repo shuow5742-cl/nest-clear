@@ -169,11 +169,14 @@ class FakePLC:
             request_func = 110 if tool == 1 else 120
 
     def start_camera_calibration(self, actual_xyz: Sequence[float], timeout_s: float = 3,
-                                 position_error: Sequence[float] = (0, 0, 0)) -> list[dict[str, Any]]:
-        """循环驱动相机标定，并可模拟到位误差。"""
+                                 position_error: Sequence[float] = (0, 0, 0), *,
+                                 x_scale_error: float = 0., feedback_actual: bool = False,
+                                 error_step: int | None = None) -> list[dict[str, Any]]:
+        """循环驱动相机标定，支持物理轴比例及指定步的到位误差。"""
         if len(actual_xyz) != 3 or len(position_error) != 3:
             raise ValueError("坐标和误差必须包含三个轴")
         self.set_actual_xyz(actual_xyz)
+        self.physical_xyz = list(actual_xyz)
         records = []
         while True:
             task = self.request(80)
@@ -183,7 +186,12 @@ class FakePLC:
                 return records
             if reply["func_code"] != 80:
                 raise ValueError(f"相机标定收到未处理的功能码 {reply['func_code']}")
-            self.set_actual_xyz([a + b for a, b in zip(reply["camcal_xyz"], position_error)])
+            target = reply["camcal_xyz"]
+            error = position_error if error_step is None or len(records) == error_step else (0, 0, 0)
+            physical = [a + b for a, b in zip(target, error)]
+            physical[0] = actual_xyz[0] + (target[0] - actual_xyz[0]) * (1 + x_scale_error) + error[0]
+            self.physical_xyz = physical
+            self.set_actual_xyz(physical if feedback_actual else [a + b for a, b in zip(target, error)])
 
     def drive_tray(self, timeout_s: float = 3, *, injected_func: int | None = None) -> list[dict[str, Any]]:
         """驱动一盘请求；按应答模拟到位或挑取完成，返回交互记录。"""

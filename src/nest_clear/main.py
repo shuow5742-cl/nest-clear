@@ -30,6 +30,7 @@ from nest_clear.paths import supervisor_state_file
 from nest_clear.supervisor.gate import SupervisorGate
 from nest_clear.vision.detector import PixelTarget, StubDetector
 from nest_clear.vision.geometry import load_calibration
+from nest_clear.workers.camcal import CamcalWorker
 from nest_clear.workers.camera import CameraWorker
 from nest_clear.workers.calib_camera import CalibCameraWorker
 from nest_clear.workers.plc import PlcWorker
@@ -255,7 +256,7 @@ class Application:
             self.calibration_path = calibration_path
             self.board = WorldBoard()
             self.clock = BTClock(self.board)
-            for worker in (self.plc, self.camera, vision):
+            for worker in (self.plc, self.camera, vision, CamcalWorker()):
                 self.clock.attach_worker(worker)
             if self.calib_camera is not None:
                 self.clock.attach_worker(self.calib_camera)

@@ -9,6 +9,7 @@ from autoweaver.motion_policy.world_board import WorldBoard
 from autoweaver.worker import AsyncRequestWorker
 from autoweaver.worker.clock import BTClock
 
+from nest_clear.workers.camcal import CamcalWorker
 from nest_clear.comm import Handshake, PLCClient
 from nest_clear.config import load_config
 from nest_clear.flow.batch import build_batch
@@ -42,7 +43,7 @@ def test_camcal_tcp(tmp_path):
         io = PLCClient(plc.host, plc.port, 1, plc.contract)
         board = WorldBoard()
         clock = BTClock(board)
-        for worker in (PlcWorker(Handshake(io, plc.contract)), Camera()): clock.attach_worker(worker)
+        for worker in (PlcWorker(Handshake(io, plc.contract)), Camera(), CamcalWorker()): clock.attach_worker(worker)
         events = EventRecorder(tmp_path, run=True)
         path = tmp_path / 'camera.yaml'
         updated = []

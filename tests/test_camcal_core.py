@@ -1,4 +1,5 @@
 from dataclasses import replace
+from sim.charuco_scene import sample_board
 import time
 import cv2
 import numpy as np
@@ -96,7 +97,7 @@ def test_rendered_multiview_solve():
         module_x=x+rays[:,:,0]*z; module_y=y-rays[:,:,1]*z
         map_x=((module_x+52.5)*2099/105).astype('float32')
         map_y=((40-module_y)*1599/80).astype('float32')
-        image=cv2.remap(tex,map_x,map_y,cv2.INTER_LINEAR,borderMode=cv2.BORDER_CONSTANT,borderValue=180)
+        image=sample_board(tex,map_x,map_y)
         if z!=110: image=cv2.GaussianBlur(image,(3,3),.5)
         corners,ids,_,_=det.detectBoard(image)
         assert ids is not None and len(ids)>35
