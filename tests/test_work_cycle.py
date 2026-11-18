@@ -144,3 +144,27 @@ def test_protocol_all_states():
     for code in (1, 20, 60, 100, 999):
         with pytest.raises(ProtocolViolation):
             d.expect(code)
+
+
+def test_attempt_matching_uses_identity_not_pick():
+    c = cycle(tool_check_min_attempts=99)
+    c.start()
+    original = obs(10)
+    original.identity = (1., 0., 0.)
+    c.on_coarse((0, 0, 5), [original])
+    c.on_fine((0, 0, 5), FineResult('fine_empty'))
+    repeat = obs(20)
+    repeat.identity = (1.02, 0., 0.)
+    c.on_coarse((0, 0, 5), [repeat])
+    assert repeat.status == 'failed'
+    assert not c.is_attempted((10., 0., 0.))
+
+
+def test_attempt_matches_either_coarse_or_fine_identity():
+    c = cycle(skip_radius_mm=0.1)
+    c.start()
+    c.on_coarse((0, 0, 5), [obs(1)])
+    c.on_fine((0, 0, 5), FineResult("ok", target_xyz=(5., 0., 0.), identity=(9., 0., 0.)))
+    assert c.is_attempted((1.05, 0, 0))
+    assert c.is_attempted((9.05, 0, 0))
+    assert not c.is_attempted((5., 0, 0))

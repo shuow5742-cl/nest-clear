@@ -3,6 +3,7 @@ from collections import Counter
 import logging
 import math
 import time
+from dataclasses import replace
 from typing import Any
 
 import cv2
@@ -11,7 +12,9 @@ from autoweaver.worker import AsyncRequestWorker
 
 from nest_clear.config import VisionConfig
 from nest_clear.vision.detector import Detector, ModuleTarget, PixelTarget, postprocess
-from nest_clear.vision.geometry import Calibration, pixel_to_module
+from nest_clear.vision.geometry import Calibration, pixel_to_module, scale_um_per_px
+from nest_clear.guard import GuardError
+from nest_clear.vision.hair.scaling import INVENTORY
 from nest_clear.vision.fine import FineResult, select_fine_target
 from nest_clear.vision.hair import HairCandidate, HairDetectConfig, detect_candidates, effective_pixel_values, scaled
 from nest_clear.vision.hair_integration import Observation, measure
@@ -22,10 +25,41 @@ logger = logging.getLogger(__name__)
 class HairDetector:
     """缓存一次缩放后的毛检测参数，为视觉 Worker 提供全部候选。"""
 
-    def __init__(self, config: HairDetectConfig) -> None:
-        """按实际像素尺度换算一次并记录生效参数。"""
-        self.config = scaled(config)
-        logger.info("毛检测 effective_pixel_values：%s", effective_pixel_values(self.config, already_scaled=True))
+    def __init__(self, config: HairDetectConfig, calibration: Calibration | None = None, camera_z: float = 0., scale_z_bin_mm: float = 0.1) -> None:
+        self.reference = config
+        self.calibration = calibration
+        if not math.isfinite(scale_z_bin_mm) or scale_z_bin_mm <= 0:
+            raise ValueError("scale_z_bin_mm 必须为正有限数")
+        self.scale_z_bin_mm = scale_z_bin_mm
+        self.cache = {}
+        self._logged_keys = set()
+        self.config = self.for_z(camera_z) if calibration is not None else scaled(config)
+        for name, (_, category, _) in INVENTORY.items():
+            before, after = getattr(config, name), getattr(self.config, name)
+            kind = "面积" if category == "area" else "长度" if category in ("length", "kernel", "fiber_kernel", "radius_optional") else "无关"
+            logger.info("参数 %s：%s → %s（类型：%s）", name, before, after, kind)
+            k = config.reference_um_per_px / self.config.um_per_px
+            floor_hit = (category == "kernel" and before * k < 3) or (category == "fiber_kernel" and before * config.fiber_ds * k / self.config.fiber_ds < 3)
+            if category in ("length", "area", "kernel", "fiber_kernel") and isinstance(after, (int, float)) and (floor_hit or after <= (4 if category == "area" else 2)):
+                logger.warning("参数 %s 换算后仅 %s %s，低分辨率下可能失效，需用真图复核", name, after, "px²" if category == "area" else "px")
+
+    def for_z(self, z: float) -> HairDetectConfig:
+        if not math.isfinite(z):
+            raise GuardError("VISION-SCALE", f"拍照 Z 非有限值：{z}", "视觉尺度", "检查 PLC 实时坐标。")
+        key = math.floor(z / self.scale_z_bin_mm + 0.5)
+        bin_z = key * self.scale_z_bin_mm
+        if key not in self.cache:
+            scale = scale_um_per_px(self.calibration, self.calibration.plane_z, bin_z)
+            expected = self.reference.expected_um_per_px
+            if abs(scale / expected - 1) > self.reference.scale_tolerance:
+                raise GuardError("VISION-SCALE", f"标定推出的尺度 {scale:.3f} µm/px 与配置期望 {expected:.3f} 不符", f"拍照 Z={z}", "检查标定文件/工作距离/配置。")
+            if key not in self._logged_keys and len(self._logged_keys) < 16:
+                logger.info("拍照 Z 分档=%s mm，标定尺度 %.5f µm/px", bin_z, scale)
+                self._logged_keys.add(key)
+            if len(self.cache) >= 16:
+                del self.cache[next(iter(self.cache))]
+            self.cache[key] = scaled(replace(self.reference, um_per_px=scale))
+        return self.cache[key]
 
     def detect(self, image: np.ndarray) -> list[HairCandidate]:
         """将单通道图转为 BGR 后执行完整检测流水线。"""
@@ -62,8 +96,10 @@ class VisionWorker(AsyncRequestWorker):
     def execute(self, payload: dict[str, Any]) -> Any:
         """检测当前帧并以模组坐标复核待挑目标、过滤本盘已尝试目标。"""
         start = time.perf_counter()
-        pixels = self.detector.detect(payload["image"])
         pose = payload["pose"]
+        if isinstance(self.detector, HairDetector) and self.detector.calibration is not None:
+            self.detector.config = self.detector.for_z(pose[2])
+        pixels = self.detector.detect(payload["image"])
         if self.config is None:
             targets = [ModuleTarget(p, pixel_to_module(p.u, p.v, pose, self.calibration)) for p in pixels]
             return postprocess(targets, self.radius, self.maximum)
@@ -99,9 +135,9 @@ class VisionWorker(AsyncRequestWorker):
                 result["fine_result"] = select_fine_target(
                     payload["image"], [o.candidate for o in observations], pose, self.calibration,
                     box_half_mm=self.config.fine_box_half_mm,
-                    is_attempted=lambda c: cycle.is_attempted(by_candidate[id(c)].target.xyz),
+                    is_attempted=lambda c: cycle.is_attempted(by_candidate[id(c)].identity),
                     passes_gate=lambda c: by_candidate[id(c)].reason is None,
-                    cfg=self.config.hair_detector,
+                    cfg=self.detector.config if isinstance(self.detector, HairDetector) else self.config.hair_detector,
                 )
             return result
         result = None

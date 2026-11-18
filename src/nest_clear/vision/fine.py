@@ -18,6 +18,7 @@ class FineResult:
     pick_uv: tuple[float, float] | None = None
     target_xyz: tuple[float, float, float] | None = None
     offset_mm: float | None = None
+    identity: tuple[float, float, float] | None = None
 
 
 def fine_camera_xy(target_xyz: tuple[float, float, float], pose: tuple[float, float, float],
@@ -84,7 +85,7 @@ def select_fine_target(image: np.ndarray, candidates: list[HairCandidate],
         area = abs(sum(a[0] * b[1] - b[0] * a[1]
                        for a, b in zip(points, points[1:] + points[:1]))) / 2
         original = pixel_to_module(*c.pick_uv, pose, calibration)
-        result = FineResult("ok", c, uv_pick, xyz, math.dist(xyz[:2], original[:2]))
+        result = FineResult("ok", c, uv_pick, xyz, math.dist(xyz[:2], original[:2]), pixel_to_module(*c.identity_uv, pose, calibration))
         if best is None or area > best[0]:
             best = (area, result)
     if best is not None:

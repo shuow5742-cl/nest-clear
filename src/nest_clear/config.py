@@ -77,6 +77,7 @@ class VisionConfig:
     tool_check_min_attempts: int = 3
     tool_check_ratio: float = 0.5
     max_coarse_shots_per_view: int = 30
+    scale_z_bin_mm: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,8 @@ def _hair_config(value: Any) -> HairDetectConfig:
     if not isinstance(value, dict):
         _fail(path, "应为映射")
     data = dict(value)
+    if "um_per_px" in data:
+        _fail(path + ".um_per_px", "旧配置键已停用，请改为 expected_um_per_px；实际尺度由标定推算")
     pick = data.pop("pick_point", {})
     if not isinstance(pick, dict):
         _fail(path + ".pick_point", "应为映射")
@@ -202,7 +205,7 @@ def _hair_config(value: Any) -> HairDetectConfig:
     if extra:
         _fail(path, f"未知字段 {sorted(extra)}")
     values = {}
-    fractions = {"fiber_dens_th", "fiber_mean_dens_min", "contain_overlap", "hair_mid_band", "trace_adapt", "max_gray_ratio", "min_dark_frac"}
+    fractions = {"scale_tolerance", "fiber_dens_th", "fiber_mean_dens_min", "contain_overlap", "hair_mid_band", "trace_adapt", "max_gray_ratio", "min_dark_frac"}
     scales = {"line_blur_scale", "seed_grow_scale"}
     nonnegative = {"dens_pow", "central_pow", "thick_pow", "min_width_mm", "max_gray_ratio", "min_dark_frac", "seed_grow_close"}
     gray = {"hair_dark_max", "line_dark_max", "fiber_fine_gray_max", "trace_ridge_max"}
@@ -374,11 +377,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     )
     vision_data = root["vision"]
     if isinstance(vision_data, dict):
-        vision_data = {"responsibility_zone": True, "ignore_regions_px": [], "hair_detector": {}, "detector": "hair", "allow_placeholder_calibration": False, "review_radius_mm": 0.3, "skip_radius_mm": 0.6, "max_picks_per_view": 30, "preview": {"window": False}, **vision_data}
+        vision_data = {"scale_z_bin_mm": 0.1, "responsibility_zone": True, "ignore_regions_px": [], "hair_detector": {}, "detector": "hair", "allow_placeholder_calibration": False, "review_radius_mm": 0.3, "skip_radius_mm": 0.6, "max_picks_per_view": 30, "preview": {"window": False}, **vision_data}
     v = _mapping(
         vision_data,
         "vision",
-        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets", "hair_detector", "detector", "allow_placeholder_calibration", "review_radius_mm", "skip_radius_mm", "max_picks_per_view", "preview", "responsibility_zone", "ignore_regions_px", "max_fine_targets", "fine_box_half_mm", "cap_ratio", "tool_check_min_attempts", "tool_check_ratio", "max_coarse_shots_per_view"],
+        ["camera_backend", "calibration", "pixels", "dedup_radius_mm", "max_targets", "hair_detector", "detector", "allow_placeholder_calibration", "review_radius_mm", "skip_radius_mm", "max_picks_per_view", "preview", "responsibility_zone", "ignore_regions_px", "max_fine_targets", "fine_box_half_mm", "cap_ratio", "tool_check_min_attempts", "tool_check_ratio", "max_coarse_shots_per_view", "scale_z_bin_mm"],
     )
     if v["camera_backend"] not in ("mock", "daheng"):
         _fail("vision.camera_backend", "应为 mock 或 daheng")
@@ -415,10 +418,10 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _hair_config(v["hair_detector"]), v["detector"], v["allow_placeholder_calibration"],
         review, skip, v["max_picks_per_view"], preview["window"], v["responsibility_zone"], regions,
         v["max_fine_targets"], fine_half, cap_ratio, v["tool_check_min_attempts"], tool_ratio,
-        v["max_coarse_shots_per_view"]
+        v["max_coarse_shots_per_view"], _number(v["scale_z_bin_mm"], "vision.scale_z_bin_mm", True)
     )
     if scan.fov_mm is None:
-        scan = replace(scan, fov_mm=tuple(vision.hair_detector.um_per_px * n / 1000 for n in (4024, 3036)))
+        scan = replace(scan, fov_mm=tuple(vision.hair_detector.expected_um_per_px * n / 1000 for n in (4024, 3036)))
     tc_data = root["tool_calibration"]
     if isinstance(tc_data, dict):
         tc_data = {"enabled": True, "quality_hard_fail": True, **tc_data}

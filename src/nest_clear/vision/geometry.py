@@ -64,3 +64,17 @@ def pixel_to_module(u: float, v: float, pose: tuple[float, float, float], calibr
         return tuple(float(x) for x in result)
     except (ValueError, TypeError, cv2.error) as exc:
         raise GuardError("GEOMETRY-INTERSECTION", f"像素 {u}, {v} 换算失败：{exc}", f"拍照实时坐标 {pose}", "检查标定、相机方向、工作平面和检测输出。") from exc
+
+
+def scale_um_per_px(calibration: Calibration, plane_z: float, camera_z: float) -> float:
+    """主点处两条正交射线在工作平面的平均物方尺度。"""
+    from dataclasses import replace
+    import math
+    calib = replace(calibration, plane_z=plane_z)
+    u, v = calibration.K[0, 2], calibration.K[1, 2]
+    pose = (0., 0., camera_z)
+    center = pixel_to_module(u, v, pose, calib)
+    sx = 1000 * math.dist(center, pixel_to_module(u + 1, v, pose, calib))
+    sy = 1000 * math.dist(center, pixel_to_module(u, v + 1, pose, calib))
+    logger.info("主点尺度：u=%.5f、v=%.5f µm/px，方向差=%.5f µm/px", sx, sy, abs(sx-sy))
+    return (sx + sy) / 2

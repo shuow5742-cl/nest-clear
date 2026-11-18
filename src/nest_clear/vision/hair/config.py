@@ -95,7 +95,9 @@ class HairDetectConfig:
     trace_seed_min_area: int = 150
     trace_step: float = 6.0
     reference_um_per_px: float = 6.959
-    um_per_px: float = 27.75
+    um_per_px: float = 23.6
+    expected_um_per_px: float = 23.6
+    scale_tolerance: float = 0.05
     min_length_mm: float = 2.0
     min_area_mm2: float = 1.2
     min_width_mm: float = 0.35

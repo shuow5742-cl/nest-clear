@@ -124,12 +124,14 @@ def config_with_hair(tmp_path, hair):
 
 
 def test_load_hair_config(tmp_path):
-    config = config_with_hair(tmp_path, {'um_per_px': 27.75, 'pick_point': {'central_pow': 3}})
+    config = config_with_hair(tmp_path, {'expected_um_per_px': 23.6, 'pick_point': {'central_pow': 3}})
     assert config.central_pow == 3
     assert config.line_min_area == 150
     assert config.reference_um_per_px == 6.959
-    integer_sigma = config_with_hair(tmp_path, {'um_per_px': 27.836, 'line_blur_sigma': 15})
-    assert scaled(integer_sigma).line_blur_sigma == pytest.approx(3.75)
+    integer_sigma = config_with_hair(tmp_path, {'expected_um_per_px': 27.836, 'line_blur_sigma': 15})
+    assert scaled(replace(integer_sigma, um_per_px=27.836)).line_blur_sigma == pytest.approx(3.75)
+    with pytest.raises(GuardError, match='expected_um_per_px'):
+        config_with_hair(tmp_path, {'um_per_px': 27.75})
 
 
 @pytest.mark.parametrize('hair', [None, {'um_per_px': 0}, {'reference_um_per_px': -1},

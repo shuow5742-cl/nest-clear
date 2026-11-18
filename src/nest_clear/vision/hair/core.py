@@ -758,6 +758,8 @@ def _clump_length_px(clump: HairClump, *, cfg) -> float:
     if poly and len(poly) >= 3:
         _c, (w, h), _a = cv2.minAreaRect(np.asarray(poly, np.float32))
         chord = float(max(w, h))
+        if cfg.um_per_px != cfg.reference_um_per_px and chord >= 0.7 * cfg.min_length_mm * 1000.0 / cfg.um_per_px:
+            return max(chord, _skeleton_geodesic_px(poly, cfg=cfg))
         if chord >= round(cfg.min_length_mm * 1000.0 / cfg.um_per_px) or clump.mask_area < round(cfg.min_area_mm2 * (1000.0 / cfg.um_per_px) ** 2):
             return chord
         return max(chord, _skeleton_geodesic_px(poly, cfg=cfg))

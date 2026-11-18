@@ -153,7 +153,7 @@ class WorkCycle:
         self._coarse_shots += 1
         self._coarse_pose = pose
         for obs in observations:
-            if obs.status in ("eligible", "rejected", "failed", "attempted") and self.is_attempted(obs.target.xyz):
+            if obs.status in ("eligible", "rejected", "failed", "attempted") and self.is_attempted(getattr(obs, "identity", obs.target.xyz)):
                 obs.status = "failed"
         self._red_count = sum(o.status in ("failed", "attempted") for o in observations)
         eligible = sorted((o for o in observations if o.status == "eligible" and o.reason is None),
@@ -202,7 +202,9 @@ class WorkCycle:
             raise ValueError("精定位成功时缺少 target_xyz")
         # 注入的计算可能抛异常；成功后才提交状态。
         tools = self._pick_coords(fine) if fine is not None else None
-        self._attempted.append(Attempt(coarse, fine, result.status))
+        identity = tuple(getattr(self.current_target(), "identity", coarse))
+        fine_identity = tuple(result.identity) if result.identity is not None else None
+        self._attempted.append(Attempt(identity, fine_identity, result.status))
         self._attempts += 1
         event = {"type": "fine", "view_index": self._view_index, "reason": result.status,
                  "coarse_xyz": coarse, "fine_xyz": fine, "pose": pose,

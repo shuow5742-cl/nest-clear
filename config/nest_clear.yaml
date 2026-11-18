@@ -49,6 +49,7 @@ vision:
   tool_check_min_attempts: 3  # 换工具判定所需最少尝试次数
   tool_check_ratio: 0.5  # 剩余目标与首次可去数量的比例阈值
   max_coarse_shots_per_view: 30  # 单视野粗拍防循环上限
+  scale_z_bin_mm: 0.1  # 拍照高度按此间隔分档，避免坐标抖动反复计算
   responsibility_zone: true  # 按离扎点最近的视野中心分配；false 恢复原行为
   ignore_regions_px: []  # 像素矩形 [x1,y1,x2,y2]，现场按针尖实际位置填写
   detector: hair  # 检测器：hair 为生产默认值，stub 用于仿真
@@ -64,7 +65,8 @@ vision:
   dedup_radius_mm: 1.0
   max_targets: 10
   hair_detector:  # 毛检测参数；像素项填写一代参考像素，会按尺度 k 自动换算
-    um_per_px: 27.75  # µm/像素 = 像元1.85µm × 工作距离120mm / 焦距8mm；现场按标定或实际工作距离改
+    expected_um_per_px: 23.6  # 名义物方尺度，实际由标定计算
+    scale_tolerance: 0.05  # 标定尺度与期望值的相对容差
     reference_um_per_px: 6.959  # 一代参考尺度，µm/像素
     pick_point:  # 一代粗度和中心评分参数
       mode: thick_central  # 取点模式

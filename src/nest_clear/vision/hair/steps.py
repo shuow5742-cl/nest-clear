@@ -43,11 +43,14 @@ def gen1_pixel_gates(c: HairCandidate, cfg: HairDetectConfig) -> tuple[bool, str
 
 
 def detect_candidates(image_bgr: np.ndarray, cfg: HairDetectConfig, *,
-                      timings_ms: dict[str, float] | None = None) -> list[HairCandidate]:
+                      timings_ms: dict[str, float] | None = None,
+                      stage_callback=None) -> list[HairCandidate]:
     """Detect with an already scaled config; optionally collect stage timings."""
     started = perf_counter() if timings_ms is not None else 0.0
     def mark(name):
         nonlocal started
+        if stage_callback is not None:
+            stage_callback(name, tuple(tuple(map(tuple, c.polygon_xy)) for c in clumps if c.polygon_xy))
         if timings_ms is not None:
             now = perf_counter()
             timings_ms[name] = (now - started) * 1000.0

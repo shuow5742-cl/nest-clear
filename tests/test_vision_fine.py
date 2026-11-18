@@ -70,3 +70,12 @@ def test_largest_physical_area_wins(setup):
     result = select(setup, [small, large])
     assert result.status == "ok"
     assert result.candidate is large
+
+
+def test_fine_identity_is_projected_candidate_identity(setup):
+    _, pose, calibration = setup
+    c = candidate(10, 42, 38, 48, (10, 45))
+    result = select(setup, [c])
+    assert result.status == "ok"
+    assert result.identity == pytest.approx(pixel_to_module(*c.identity_uv, pose, calibration))
+    assert result.identity != result.target_xyz

@@ -124,3 +124,56 @@ def test_responsibility_and_ignore(calibration):
     result = worker.execute({'image': np.zeros((30, 30, 3), np.uint8), 'pose': (0, 0, 0), 'scan': (0, 0, 0), 'scan_path': [(0, 0, 0), (10, 0, 0), (20, 0, 0)], 'attempted': []})
     assert result['ignored_count'] == 1 and result['other_view_count'] == 1
     assert len(result['eligible']) == 1 and result['count'] == 2
+
+
+def test_fine_pick_uses_scaled_detector_config(monkeypatch):
+    from types import SimpleNamespace
+    from nest_clear.vision.geometry import load_calibration
+    from nest_clear.workers.vision import HairDetector
+    import nest_clear.vision.fine as fine
+    calibration = load_calibration('config/calibration/camera.yaml')
+    cfg = replace(load_config('config/nest_clear.yaml').vision, fine_box_half_mm=100.)
+    detector = HairDetector(cfg.hair_detector, calibration, 0.)
+    monkeypatch.setattr(detector, 'detect', lambda image: [candidate(w=130, h=30, length=130)])
+    observed = []
+    original = fine._hair_pick_point
+    def capture(*args, **kwargs):
+        observed.append(kwargs['cfg'].hair_min_thick)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(fine, '_hair_pick_point', capture)
+    worker = VisionWorker(detector, calibration, 1, 10, cfg)
+    result = worker.execute({'image': np.zeros((160, 160, 3), np.uint8), 'pose': (0, 0, 0),
+                             'work_action': 'fine', 'cycle': SimpleNamespace(is_attempted=lambda _: False)})
+    assert result['fine_result'].status == 'ok'
+    assert observed == [pytest.approx(detector.config.hair_min_thick)]
+    assert observed[0] != cfg.hair_detector.hair_min_thick
+
+
+def test_detector_scale_guard_and_cache():
+    from nest_clear.guard import GuardError
+    from nest_clear.vision.geometry import load_calibration
+    from nest_clear.workers.vision import HairDetector
+    calibration = load_calibration('config/calibration/camera.yaml')
+    detector = HairDetector(HairDetectConfig(), calibration, 0.)
+    assert detector.for_z(0.) is detector.config
+    assert detector.for_z(1.) is detector.for_z(1.)
+    with pytest.raises(GuardError, match='标定推出的尺度'):
+        detector.for_z(20.)
+
+
+def test_z_scale_cache_binning_and_bound(caplog):
+    from nest_clear.workers.vision import HairDetector
+    from nest_clear.vision.hair import HairDetectConfig
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    import logging
+    with patch('nest_clear.workers.vision.scale_um_per_px', return_value=23.6) as calc, caplog.at_level(logging.INFO):
+        detector = HairDetector(HairDetectConfig(), SimpleNamespace(plane_z=0), 0, 0.1)
+        initial = detector.for_z(0.001)
+        assert detector.for_z(-0.001) is initial
+        assert calc.call_count == 1
+        for i in range(1, 20):
+            detector.for_z(i / 10)
+        assert len(detector.cache) == 16 and 0 not in detector.cache
+        detector.for_z(0.0)
+        assert sum('拍照 Z 分档=0.0' in x.message for x in caplog.records) == 1

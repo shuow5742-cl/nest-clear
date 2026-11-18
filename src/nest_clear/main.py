@@ -146,6 +146,10 @@ class Application:
             calibration_path = Path(config_path).resolve().parent / calibration_path
         calibration = load_calibration(calibration_path)
         self.calibration = calibration
+        if detector is None and config.vision.detector == "hair":
+            detector = HairDetector(config.vision.hair_detector, calibration, self.path[0][2], config.vision.scale_z_bin_mm)
+            for z in {point[2] for point in self.path}:
+                detector.for_z(z)
         self.events.calibration_placeholder = calibration.placeholder
         contract = load_contract(ROOT / "config/plc_contract.yaml")
         self.io = PLCClient(config.plc.ip, config.plc.port, config.plc.timeout_s, contract)
@@ -159,7 +163,7 @@ class Application:
             if config.tool_calibration.enabled:
                 self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras, timeout_s=config.capture_timeout_s, events=self.events)
                 self.calib_camera.open()
-            detector = detector or (HairDetector(config.vision.hair_detector) if config.vision.detector == "hair" else StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels]))
+            detector = detector or (HairDetector(config.vision.hair_detector, calibration, config.scan.z, config.vision.scale_z_bin_mm) if config.vision.detector == "hair" else StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels]))
             vision = VisionWorker(
                 detector, calibration, config.vision.dedup_radius_mm, config.vision.max_targets, config.vision
             )
