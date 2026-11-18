@@ -76,7 +76,7 @@ def _fit(session: dict, config: dict) -> ToolTipBaseline:
     )
 
 
-def _detect(image: np.ndarray, name: str, config: dict) -> list[float]:
+def _detect(image: np.ndarray, name: str, config: dict, reference: bool = False) -> list[float]:
     """检测单视图针尖，失败时中止而不是保存坏基准。"""
     result = SilhouetteTipDetector(**config["detection"][name]).detect(image)
     if result.point_uv is None:
@@ -84,6 +84,11 @@ def _detect(image: np.ndarray, name: str, config: dict) -> list[float]:
             f"{name} 相机无法识别针尖：{result.diagnostic}",
             "检查背光、阈值、方向、遮挡和相机视野。",
         )
+    if not result.focused:
+        message = f"{name} 相机针尖不清晰，边缘宽度 {result.edge_width_px} px"
+        if reference:
+            raise _fail(message, "请调焦或调整 Z/深度，使针尖位于景深内后重新采集基准。")
+        print(f"警告：{message}；步进样本仍将使用。")
     return list(result.point_uv)
 
 
@@ -100,7 +105,7 @@ def _capture(
         if not cv2.imwrite(str(session_dir / filename), image):
             raise _fail(f"无法保存 {filename}", "检查磁盘空间与目录权限。")
         images[name] = filename
-        points[name] = _detect(image, name, config)
+        points[name] = _detect(image, name, config, reference=index == 0)
         if index == 0 and name == "front":
             distance = float(
                 np.linalg.norm(np.asarray(points[name]) - np.array([image.shape[1] / 2, image.shape[0] / 2]))
@@ -145,9 +150,9 @@ def main(argv: list[str] | None = None) -> int:
             session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
             if session["tool"] != args.tool:
                 raise _fail("会话工具号不匹配", "确认 --tool 和会话目录。")
-            for frame in session["frames"]:
+            for index, frame in enumerate(session["frames"]):
                 frame["points"] = {
-                    name: _detect(cv2.imread(str(directory / filename), cv2.IMREAD_GRAYSCALE), name, config)
+                    name: _detect(cv2.imread(str(directory / filename), cv2.IMREAD_GRAYSCALE), name, config, reference=index == 0)
                     for name, filename in frame["images"].items()
                 }
             baseline = _fit(session, config)

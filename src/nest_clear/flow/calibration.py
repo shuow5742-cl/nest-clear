@@ -214,16 +214,20 @@ class DetectTips(Instant):
         bb = self._blackboard
         images = bb.read("tooltip_images")
         points = {}
+        focus = {}
         for view in ("front", "side"):
-            detection = SilhouetteTipDetector(**self.ctx.config.tool_calibration.detection[view]).detect(images[view])
+            detector = SilhouetteTipDetector(**self.ctx.config.tool_calibration.detection[view])
+            detection = detector.detect(images[view])
             if detection.point_uv is None:
                 diagnostic = {
                     "no dark component": "图像中未找到暗色针尖区域",
                     "largest component is too small": "图像中的暗色针尖区域过小",
-                }.get(detection.diagnostic, "图像中未能识别有效针尖区域")
+                }.get(detection.diagnostic, detection.diagnostic)
                 camera = "正面" if view == "front" else "侧面"
                 fail(f"{camera}相机无法识别针尖：{diagnostic}", "检查背光与曝光，以及针尖是否在画面内。")
             points[view] = tuple(float(x) for x in detection.point_uv)
+            focus[view] = {"focused": detection.focused, "edge_width_px": detection.edge_width_px, "width_px": detection.width_px, "coarse": detection.coarse, "max_edge_width_px": detector.max_edge_width_px}
+        bb.write("tooltip_focus", focus, self.name)
         session = bb.read("tooltip_session")
         paths = session["images"][-1]
         archive = getattr(self.ctx.events, "archive", None)
@@ -264,7 +268,7 @@ class SolveTips(Instant):
         disagreement = result.axis_disagreement.get("z", 0.0)
         self.ctx.events.emit("tooltip_detect", task_id=bb.read("task_id"), tool=bb.read("tooltip_session")["tool"],
                              images=bb.read("tooltip_session")["images"][-1],
-                             pixels=points, delta=delta.tolist(),
+                             pixels=points, focus=bb.read("tooltip_focus"), delta=delta.tolist(),
                              residuals_uv={k: v.tolist() for k, v in residuals.items()},
                              residuals_mm=quality.residuals_mm, condition_number=result.condition_number,
                              z_disagreement_mm=disagreement)
@@ -289,7 +293,21 @@ class PrepareCalibrationReply(Instant):
         session = dict(bb.read("tooltip_session"))
         tool = session["tool"]
         result = bb.read("tooltip_result")
-        if is_aligned(result, self.ctx.config.tool_calibration.tip_tolerance_mm):
+        focus = bb.read("tooltip_focus")
+        aligned = is_aligned(result, self.ctx.config.tool_calibration.tip_tolerance_mm)
+        focused = all(focus[v]["focused"] for v in ("front", "side"))
+        session["final_edge_width_px"] = {v: focus[v]["edge_width_px"] for v in focus}
+        if not focused:
+            session["defocus_iterations"] = session.get("defocus_iterations", 0) + 1
+        session["defocus_hold_count"] = session.get("defocus_hold_count", 0) + 1 if aligned and not focused else 0
+        if aligned and not focused:
+            details = "；".join(f"{'正面' if v == 'front' else '侧面'}相机边缘宽度 {focus[v]['edge_width_px']} px，阈值 {focus[v]['max_edge_width_px']} px" for v in focus if not focus[v]["focused"])
+            logger.warning("对刀位置仍离焦：%s；检查对焦/针尖是否在景深内", details)
+            self.ctx.events.emit("tooltip_defocus_hold", task_id=bb.read("task_id"), tool=tool, focus=focus, count=session["defocus_hold_count"])
+            bb.write("tooltip_session", session, self.name)
+            if session["defocus_hold_count"] >= 3:
+                fail("针尖在对准位置仍不清晰，镜头焦点与基准位置不一致", "检查对焦/针尖是否在景深内。")
+        if aligned and focused:
             session["ended"] = True
             func = 111 if tool == 1 else 121
             coordinates = {}

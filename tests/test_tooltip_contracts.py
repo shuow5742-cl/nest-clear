@@ -207,7 +207,7 @@ def test_yaml_invalid_fields(base, tmp_path, field, value, message):
 def test_detector_four_directions(direction, expected):
     image = np.full((100, 100), 255, np.uint8)
     image[20:81, 47:54] = 0
-    point = SilhouetteTipDetector(direction=direction).detect(image).point_uv
+    point = SilhouetteTipDetector(direction=direction, probe_offset_px=2).detect(image).point_uv
     assert np.linalg.norm(np.array(point) - expected) < 1
 
 
@@ -220,7 +220,7 @@ def test_detector_largest_component():
     image = np.full((100, 100), 255, np.uint8)
     image[20:81, 47:54] = 0
     image[85:95, 10:12] = 0
-    assert SilhouetteTipDetector().detect(image).point_uv == (50, 80)
+    assert np.linalg.norm(np.array(SilhouetteTipDetector().detect(image).point_uv) - (50, 80.5)) < .1
 
 
 def test_detector_intensity_and_isolated_noise():

@@ -100,8 +100,18 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
     front: {backend: uvc, device: 0}  # 正面设备
     side: {backend: uvc, device: 1}  # 侧面设备
   detection:  # 剪影极值方向、灰度阈值与最小面积
-    front: {direction: [0, 1], threshold: 127, min_area: 5}
-    side: {direction: [0, 1], threshold: 127, min_area: 5}
+    front:
+      direction: [0, 1]
+      threshold: 127
+      min_area: 5
+      probe_offset_px: 7  # 像素，距针尖回退测量宽度的位置
+      max_edge_width_px: 6.0  # 像素，清晰边缘过渡宽度上限
+    side:
+      direction: [0, 1]
+      threshold: 127
+      min_area: 5
+      probe_offset_px: 7  # 像素，距针尖回退测量宽度的位置
+      max_edge_width_px: 6.0  # 像素，清晰边缘过渡宽度上限
   position_tolerance_mm: 0.05  # 运动到位容差，mm
   tip_tolerance_mm: 0.03  # 针尖对准容差，mm
   consistency_tolerance_mm: 0.01  # 最终坐标一致性容差，mm

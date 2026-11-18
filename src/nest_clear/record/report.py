@@ -185,6 +185,15 @@ def report(root: str | Path, day: date) -> str:
             f"Δ {_vector(calibration.get('delta'))}，补偿 {_vector(calibration.get('old_compensation'))} → "
             f"{_vector(calibration.get('new_compensation'))}"
         )
+        widths = calibration.get("final_edge_width_px")
+        if widths:
+            def display_width(view: str) -> str:
+                value = widths.get(view)
+                return "未测" if value is None else f"{value:.1f} px"
+            width_text = f"正面 {display_width('front')} / 侧面 {display_width('side')}"
+        else:
+            width_text = "未记录"
+        lines.append(f"    离焦轮数 {calibration.get('defocus_iterations', 0)}，最终边缘宽度 {width_text}")
         if calibration.get("reason"):
             detail, hint = _failure_lines(calibration["reason"])
             lines.extend((f"    {detail}", f"    {hint}"))

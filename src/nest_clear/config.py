@@ -430,7 +430,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             _mapping(camera_config, f"tool_calibration.cameras.{name}", ["backend"])
         else:
             _fail(f"tool_calibration.cameras.{name}.backend", "应为 mock、uvc 或 daheng")
-        det = _mapping(detection[name], f"tool_calibration.detection.{name}", ["direction", "threshold", "min_area"])
+        det = _mapping(detection[name], f"tool_calibration.detection.{name}", ["direction", "threshold", "min_area"] + [key for key in ("probe_offset_px", "max_edge_width_px") if key in detection[name]])
+        if "probe_offset_px" in det and (type(det["probe_offset_px"]) is not int or det["probe_offset_px"] <= 0):
+            _fail(f"tool_calibration.detection.{name}.probe_offset_px", f"应为正整数，实际为 {det['probe_offset_px']!r}；请检查配置")
+        if "max_edge_width_px" in det:
+            _number(det["max_edge_width_px"], f"tool_calibration.detection.{name}.max_edge_width_px", True)
         direction = _vector(det["direction"], f"tool_calibration.detection.{name}.direction", 2)
         if not any(direction):
             _fail(f"tool_calibration.detection.{name}.direction", "方向不能为零")
