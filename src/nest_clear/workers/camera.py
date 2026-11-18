@@ -1,5 +1,6 @@
 """相机采图守卫及可追溯采图信息。"""
 from datetime import datetime, timezone
+from dataclasses import asdict
 import itertools
 import logging
 import queue
@@ -8,7 +9,7 @@ import time
 from typing import Any
 
 import numpy as np
-from autoweaver.sensor.camera.base import CameraConfig
+from autoweaver.sensor.camera.base import CameraConfig, FrameMeta
 from autoweaver.sensor.camera.mock import MockCamera
 from autoweaver.sensor.camera.daheng import DahengCamera
 from autoweaver.worker import AsyncRequestWorker
@@ -103,7 +104,16 @@ class CameraWorker(AsyncRequestWorker):
         result: queue.Queue = queue.Queue(maxsize=1)
         def capture() -> None:
             try:
-                result.put((True, self.camera.snapshot()))
+                if hasattr(self.camera, "snapshot_with_meta"):
+                    frame = self.camera.snapshot_with_meta()
+                else:
+                    # 兼容只实现 snapshot 的现场适配器及对刀模拟相机。
+                    wall_before, mono_before = time.time(), time.monotonic()
+                    image = self.camera.snapshot()
+                    mono_after, wall_after = time.monotonic(), time.time()
+                    frame = (image, FrameMeta(pc_time_before=wall_before, pc_time_after=wall_after,
+                                              pc_mono_before=mono_before, pc_mono_after=mono_after))
+                result.put((True, frame))
             except Exception as exc:
                 result.put((False, exc))
         try:
@@ -114,16 +124,17 @@ class CameraWorker(AsyncRequestWorker):
             # Auto_Weaver 的 DahengCamera.snapshot 抛 RuntimeError("Failed to capture image")。
             # capture_timeout_s 是 SDK 超时之外的外层兜底，防止底层调用卡死。
             try:
-                ok, image = result.get(timeout=self.timeout_s)
+                ok, captured = result.get(timeout=self.timeout_s)
             except queue.Empty:
                 self.needs_reopen = True
                 raise TimeoutError(f"采图超过 {self.timeout_s} 秒，相机需要重开")
             if not ok:
-                if isinstance(image, RuntimeError):
+                if isinstance(captured, RuntimeError):
                     messages = {"Failed to capture image": "取图超时", "Frame capture failed: incomplete frame": "残帧", "Failed to convert image to BGR": "转换失败", "Failed to get numpy array": "转换失败"}
-                    if str(image) in messages:
-                        raise RuntimeError(f"{messages[str(image)]}：{image}") from image
-                raise image
+                    if str(captured) in messages:
+                        raise RuntimeError(f"{messages[str(captured)]}：{captured}") from captured
+                raise captured
+            image, frame_meta = captured
             if not isinstance(image, np.ndarray) or image.size == 0:
                 raise ValueError("图像为 None、空图或非数组")
             if image.ndim not in (2, 3) or image.dtype != np.uint8:
@@ -139,10 +150,18 @@ class CameraWorker(AsyncRequestWorker):
                     return getattr(device, feature).get() if device else getattr(self.camera, {"ExposureTime": "exposure_us", "Gain": "gain_db"}[feature], None)
                 except Exception:
                     return None
+            metadata = asdict(frame_meta)
+            # 基类只提供时间；图像尺寸可从实际帧可靠获得。
+            if metadata["width"] is None:
+                metadata["width"] = w
+            if metadata["height"] is None:
+                metadata["height"] = h
+            for key, feature in (("exposure_us", "ExposureTime"), ("gain_db", "Gain")):
+                if metadata[key] is None:
+                    metadata[key] = read(feature)
             return image, {"capture_seq": next(_sequence), "t_before": before,
                            "t_after": {"monotonic": time.monotonic(), "wall": datetime.now(timezone.utc).isoformat()},
-                           "frame_id": None, "device_timestamp": None, "frame_metadata_reason": "框架 DahengCamera 未暴露，待 Auto_Weaver 扩展",
-                           "exposure_us": read("ExposureTime"), "gain_db": read("Gain"), "settings": self.settings}
+                           **metadata, "settings": self.settings}
         except Exception as exc:
             raise GuardError("CAMERA-CAPTURE", f"采图失败：{exc}", where, "检查相机连接、触发、图像尺寸和标定；超时后重开相机。") from exc
 

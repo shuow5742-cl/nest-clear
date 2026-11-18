@@ -102,8 +102,27 @@ def test_image_size_guards_and_mock():
     image, metadata = mock.execute({'stage': 'coarse', 'task_id': 2})
     assert image.shape[:2] == (30, 40)
     assert metadata['frame_id'] is None and metadata['device_timestamp'] is None
-    assert metadata['frame_metadata_reason'] == '框架 DahengCamera 未暴露，待 Auto_Weaver 扩展'
+    assert metadata['width'] == 40 and metadata['height'] == 30
+    assert metadata['pc_time_after'] >= metadata['pc_time_before']
     mock.on_stop()
+
+
+def test_frame_metadata_is_returned_from_camera():
+    from autoweaver.sensor.camera.base import FrameMeta
+    class MetadataCamera(Camera):
+        def snapshot_with_meta(self):
+            return self.result, FrameMeta(frame_id=42, device_timestamp=1234,
+                pc_time_before=1, pc_time_after=2, pc_mono_before=3,
+                pc_mono_after=4, exposure_us=50, gain_db=2, width=4,
+                height=3, flushed_frames=1)
+    worker = CameraWorker('mock', 'S', MetadataCamera(np.zeros((3, 4), np.uint8)))
+    _, meta = worker.execute({'stage': 'coarse'})
+    assert {key: meta[key] for key in ('frame_id', 'device_timestamp', 'pc_time_before',
+        'pc_time_after', 'pc_mono_before', 'pc_mono_after', 'exposure_us', 'gain_db',
+        'width', 'height', 'flushed_frames')} == {
+        'frame_id': 42, 'device_timestamp': 1234, 'pc_time_before': 1,
+        'pc_time_after': 2, 'pc_mono_before': 3, 'pc_mono_after': 4,
+        'exposure_us': 50, 'gain_db': 2, 'width': 4, 'height': 3, 'flushed_frames': 1}
 
 
 def test_heartbeat_failure_and_restoration(tmp_path, monkeypatch):
