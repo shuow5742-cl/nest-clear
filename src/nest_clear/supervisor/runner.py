@@ -49,6 +49,9 @@ class Supervisor:
         self.paused = False
         self._heartbeat = 0
         self._next_heartbeat = 0.0
+        self._heartbeat_failures = 0
+        self._heartbeat_failure_since = None
+        self._heartbeat_failure_wall = None
         self._failures = 0
         self._alive = main_alive_file(config.record_directory)
         self._state = supervisor_state_file(config.record_directory)
@@ -62,7 +65,7 @@ class Supervisor:
             result_id = self.plc.read("result_id")
             if task_id == 0 or task_id == result_id:
                 return
-            Handshake(self.plc, self.plc.contract).write_reply(task_id, 999)
+            Handshake(self.plc, self.plc.contract, self.config.plc.write_readback, self.events).write_reply(task_id, 999)
             self.events.emit("supervisor_reply_999", task_id=task_id, reason=reason)
             logger.error(
                 "错误码：SUPERVISOR-CHILD-FAILED；主程序%s；已给 Task_ID=%s 回 999；"
@@ -231,7 +234,16 @@ class Supervisor:
             try:
                 self._heartbeat = (self._heartbeat + 1) % 65536
                 self.plc.write("heartbeat", self._heartbeat)
+                if self._heartbeat_failures:
+                    self.events.emit("heartbeat_restored", address=40931, failures=self._heartbeat_failures, duration_s=now - self._heartbeat_failure_since)
+                    self._heartbeat_failures = 0
+                    self._heartbeat_failure_since = None
             except Exception as exc:
+                if not self._heartbeat_failures:
+                    self._heartbeat_failure_since = now
+                    self._heartbeat_failure_wall = self.events.clock().isoformat()
+                self._heartbeat_failures += 1
+                self.events.emit("heartbeat_failed", address=40931, failures=self._heartbeat_failures, since=self._heartbeat_failure_wall, reason=str(exc))
                 logger.warning(
                     "错误码：SUPERVISOR-HEARTBEAT；PLC 心跳写入失败：%s；位置：心跳；排查建议：查网线/IP/PLC 是否上电",
                     exc,

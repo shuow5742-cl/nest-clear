@@ -282,3 +282,43 @@ def test_calibration_record_images_disabled(rig):
     assert row["result"] == "成功"
     assert all(value is None for value in row["images"][0]["raw"].values())
     assert all(value is None for value in row["images"][0]["overlay"].values())
+
+
+def test_calibration_capture_failure_returns_131(rig, monkeypatch):
+    plc, app, path = rig
+    def broken():
+        raise RuntimeError('Failed to capture image')
+    monkeypatch.setattr(app.calib_camera.cameras['front'], 'capture', broken)
+    plc.set_actual_xyz(P0)
+    task = plc.request(100)
+    assert plc.wait_reply(task, 5)['func_code'] == 131
+    rows = [json.loads(line) for line in next((path / 'runs').glob('*/events.jsonl')).read_text().splitlines()]
+    assert any(r['event'] == 'tooltip_failed' and r['task_id'] == task and '取图超时' in r['reason'] for r in rows)
+
+
+@pytest.mark.parametrize('kind', ['residual', 'condition', 'z'])
+@pytest.mark.parametrize('hard', [True, False])
+def test_calibration_quality_limits(rig, monkeypatch, kind, hard):
+    from types import SimpleNamespace
+    import nest_clear.flow.calibration as module
+    plc, app, path = rig
+    object.__setattr__(app.config.tool_calibration, 'quality_hard_fail', hard)
+    cfg = app.config.tool_calibration
+    residual = cfg.max_residual_mm * 2 if kind == 'residual' else 0.
+    condition = cfg.max_condition * 2 if kind == 'condition' else 1.
+    disagreement = cfg.z_disagreement_mm * 2 if kind == 'z' else 0.
+    solve = module.solve_correction
+    def altered(*args, **kwargs):
+        return replace(solve(*args, **kwargs), condition_number=condition, axis_disagreement={'z': disagreement})
+    monkeypatch.setattr(module, 'solve_correction', altered)
+    monkeypatch.setattr(module, 'check_quality', lambda *args: SimpleNamespace(ok=kind == 'z', residuals_mm={'front': residual}, condition_number=condition))
+    plc.set_actual_xyz(P0)
+    task = plc.request(100)
+    reply = plc.wait_reply(task, 5)
+    assert reply['func_code'] == (131 if hard else 111)
+    rows = [json.loads(line) for line in next((path / 'runs').glob('*/events.jsonl')).read_text().splitlines()]
+    assert any(r['event'] == 'tooltip_quality_warning' and r['task_id'] == task for r in rows)
+    if hard:
+        reason = next(r['reason'] for r in rows if r['event'] == 'tooltip_failed' and r['task_id'] == task)
+        actual, limit = {'residual': (residual, cfg.max_residual_mm), 'condition': (condition, cfg.max_condition), 'z': (disagreement, cfg.z_disagreement_mm)}[kind]
+        assert str(actual) in reason and str(limit) in reason

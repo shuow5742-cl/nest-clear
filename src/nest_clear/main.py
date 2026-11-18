@@ -122,6 +122,8 @@ class Application:
             "camera_sn": config.camera_sn,
             "camera_backend": config.vision.camera_backend,
             "calibration_placeholder": calibration_info.get("placeholder", False),
+            "calibration_sha256": hashlib.sha256(calibration_path.read_bytes()).hexdigest(),
+            "calibration_mtime": calibration_path.stat().st_mtime,
         }
         logger.info("主程序启动信息：%s", metadata)
         self.events.emit("process_start", **metadata)
@@ -147,15 +149,15 @@ class Application:
         self.events.calibration_placeholder = calibration.placeholder
         contract = load_contract(ROOT / "config/plc_contract.yaml")
         self.io = PLCClient(config.plc.ip, config.plc.port, config.plc.timeout_s, contract)
-        self.plc = PlcWorker(Handshake(self.io, contract))
+        self.plc = PlcWorker(Handshake(self.io, contract, config.plc.write_readback, self.events))
         self.camera = None
         self.calib_camera = None
         self.clock = None
         try:
-            self.camera = CameraWorker(config.vision.camera_backend, config.camera_sn, camera)
+            self.camera = CameraWorker(config.vision.camera_backend, config.camera_sn, camera, timeout_s=config.capture_timeout_s, exposure_us=config.exposure_us, gain_db=config.gain_db, balance_ratio=config.balance_ratio, principal=(float(calibration.K[0][2]), float(calibration.K[1][2])), image_size=config.camera_image_size)
             self.camera.open()
             if config.tool_calibration.enabled:
-                self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras)
+                self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras, timeout_s=config.capture_timeout_s, events=self.events)
                 self.calib_camera.open()
             detector = detector or (HairDetector(config.vision.hair_detector) if config.vision.detector == "hair" else StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels]))
             vision = VisionWorker(
@@ -211,6 +213,11 @@ class Application:
         """释放时钟、相机和 PLC；当前流程没有设备动作收尾树。"""
         if self.clock is not None:
             self.clock.shutdown()
+        try:
+            self.io.write("algorithm_ready", 0)
+        except Exception as exc:
+            logger.error("就绪位 40932 清零失败：%s", exc)
+            self.events.emit("error", operation="clear_algorithm_ready", reason=str(exc))
         self.io.close()
         self.summary.finish("interrupted", self.events.clock().isoformat(), self.events.monotonic())
         self.archive.close()
@@ -241,16 +248,29 @@ def main() -> None:
     parser.add_argument("--config", default=str(ROOT / "config/nest_clear.yaml"))
     parser.add_argument("--supervised", action="store_true")
     args = parser.parse_args()
-    config = load_config(args.config)
-    configure(config.record_directory, "main")
+    fallback = ROOT / "runs/startup_error.log"
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(fallback, encoding="utf-8")
+    logging.getLogger().addHandler(handler)
+    logging.getLogger().addHandler(logging.StreamHandler())
+    logging.getLogger().setLevel(logging.INFO)
     signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
+        config = load_config(args.config)
+        root_logger = logging.getLogger()
+        for existing in list(root_logger.handlers):
+            root_logger.removeHandler(existing)
+        configure(config.record_directory, "main")
+        root_logger.addHandler(handler)
         run(args.config, supervised=args.supervised)
     except GuardError as exc:
         logger.error("启动或运行失败：%s", exc)
         raise SystemExit(1) from exc
     except KeyboardInterrupt:
         logger.info("主程序退出")
+    except Exception as exc:
+        logger.exception("启动或运行失败：%s", exc)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

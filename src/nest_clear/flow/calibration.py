@@ -278,6 +278,8 @@ class SolveTips(Instant):
             self.ctx.events.emit("tooltip_quality_warning", task_id=bb.read("task_id"),
                                  residuals_mm=quality.residuals_mm, condition_number=quality.condition_number,
                                  z_disagreement_mm=disagreement, quality_ok=quality.ok)
+        if (not quality.ok or disagreement > cfg.z_disagreement_mm) and cfg.quality_hard_fail:
+            fail(f"对刀质量超限：残差 {quality.residuals_mm} mm（阈值 {cfg.max_residual_mm}），条件数 {quality.condition_number}（阈值 {cfg.max_condition}），Z 分歧 {disagreement} mm（阈值 {cfg.z_disagreement_mm}）", "检查相机标定、针尖识别和基准后重新对刀。")
         bb.write("tooltip_result", result, self.name)
 
 
@@ -365,7 +367,7 @@ def calibration_branch(ctx: FlowContext, start: bool) -> TreeNode:
     steps.extend([
         CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", name="读取对刀实时坐标"),
         CheckPosition(ctx, start),
-        CallWorker(ctx.board, "calib_camera", lambda bb: {}, "tooltip_images", name="采集对刀双视图"),
+        CallWorker(ctx.board, "calib_camera", lambda bb: {"task_id": bb.read("task_id")}, "tooltip_images", name="采集对刀双视图"),
         ArchiveTips(ctx), DetectTips(ctx), SolveTips(ctx), PrepareCalibrationReply(ctx),
     ])
     return Fallback([Sequence(steps, name="对刀迭代"), CalibrationFailed(ctx)], name="对刀业务或 131")

@@ -46,5 +46,5 @@ def test_order():
         def write_real32_block(self, address, values): calls.append((address, values))
         def write_u16(self, address, value): calls.append((address, value))
     c = load_contract(ROOT / 'config/plc_contract.yaml')
-    Handshake(IO(), c).write_reply(42, 1, {'scan_xyz': [1, 2, 3]})
+    Handshake(IO(), c, write_readback=False).write_reply(42, 1, {'scan_xyz': [1, 2, 3]})
     assert [c['scan_x'].address, c['reply_func'].address, c['result_id'].address] == [v[0] for v in calls]

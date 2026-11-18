@@ -187,3 +187,30 @@ def test_terminal_rejects_new_tray(running, monkeypatch):
     monkeypatch.setattr(VisionWorker, "execute", lambda worker, payload: {"observations": []})
     assert plc.drive_tray(timeout_s=5)[-1]["func_code"] == 9
     assert plc.wait_reply(plc.request(1), 5)["func_code"] == 999
+
+
+@pytest.mark.parametrize('stage', ['coarse', 'fine'])
+def test_capture_failure_returns_999_and_context(running, monkeypatch, stage):
+    from types import SimpleNamespace
+    from nest_clear.workers.vision import VisionWorker
+    plc, app, _, directory = running
+    def broken():
+        raise RuntimeError('Failed to capture image')
+    monkeypatch.setattr('nest_clear.flow.picking.render', lambda image, *args: image)
+    monkeypatch.setattr(VisionWorker, 'execute', lambda worker, payload: {
+        'observations': [SimpleNamespace(target=SimpleNamespace(xyz=(0., 0., 0.)),
+                                         status='eligible', reason=None, area=3.)]})
+    if stage == 'coarse':
+        monkeypatch.setattr(app.camera.camera, 'snapshot', broken)
+    start = plc.wait_reply(plc.request(1), 5)
+    plc.set_actual_xyz(start['scan_xyz'])
+    if stage == 'fine':
+        coarse = plc.wait_reply(plc.request(20), 5)
+        assert coarse['func_code'] == 1
+        plc.set_actual_xyz(coarse['scan_xyz'])
+        monkeypatch.setattr(app.camera.camera, 'snapshot', broken)
+    task = plc.request(20)
+    assert plc.wait_reply(task, 5)['func_code'] == 999
+    rows = [json.loads(line) for line in next(directory.glob('*/events.jsonl')).read_text().splitlines()]
+    event = next(row for row in rows if row['event'] == 'error' and row.get('task_id') == task)
+    assert all(value in event['reason'] for value in (app.config.camera_sn, '粗拍' if stage == 'coarse' else '精定位', str(task), '取图超时'))

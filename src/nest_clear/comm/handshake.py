@@ -14,16 +14,29 @@ logger = logging.getLogger("nest_clear.comm")
 class Handshake:
     """提供无业务分支的读请求和提交应答原语，供后续流程调用。"""
 
-    def __init__(self, io: Any, contract: Contract) -> None:
+    def __init__(self, io: Any, contract: Contract, write_readback: bool = True, events: Any = None) -> None:
         """保存传输接口和契约，让握手不硬编码 PLC 地址。"""
         self.io = io
         self.contract = contract
+        self.write_readback = write_readback
+        self.events = events
+        self.inconsistent_reads = 0
 
     def read_request(self) -> tuple[int, int]:
         """读取任务编号及功能码；变化检测和日志由调用方负责。"""
-        task_id = self.io.read_u16(self.contract["task_id"].address)
-        func_code = self.io.read_u16(self.contract["request_func"].address)
-        return task_id, func_code
+        while True:
+            task_id = self.io.read_u16(self.contract["task_id"].address)
+            func_code = self.io.read_u16(self.contract["request_func"].address)
+            second = self.io.read_u16(self.contract["task_id"].address)
+            if task_id == second:
+                self.inconsistent_reads = 0
+                return task_id, func_code
+            self.inconsistent_reads += 1
+            logger.debug("Task_ID 双读不一致 %s 次：%s → %s", self.inconsistent_reads, task_id, second)
+            if self.inconsistent_reads % 5 == 0 and self.events:
+                self.events.emit("warning", operation="task_id_inconsistent", reason=f"Task_ID 双读连续 {self.inconsistent_reads} 次不一致，{task_id} → {second}；检查 PLC 更新时序")
+            if self.inconsistent_reads >= 5:
+                raise GuardError("COMM-TASK-ID", f"Task_ID 双读连续 {self.inconsistent_reads} 次不一致：{task_id} → {second}", f"PLC 地址 {self.contract['task_id'].address}", "检查 PLC 请求更新时序。")
 
     def write_reply(self, task_id: int, func_code: int, payload: Mapping[str, Any] | None = None) -> None:
         """先验证全部数据，再按数据区、功能码、提交编号的顺序写入。"""
@@ -64,6 +77,16 @@ class Handshake:
         for address, value in scalar_blocks:
             self.io.write_u16(address, value)
         self.io.write_u16(self.contract["reply_func"].address, func_code)
+        if self.write_readback:
+            expected = [(a + i, w) for a, values in blocks for i, w in enumerate(word for v in values for word in encode_real32(v))]
+            expected += scalar_blocks + [(self.contract["reply_func"].address, func_code)]
+            for address, wanted in expected:
+                actual = self.io.read_u16(address)
+                if actual != wanted:
+                    error = GuardError("COMM-READBACK", f"写后回读不一致：期望 {wanted}，实际 {actual}", f"Task_ID={task_id}，PLC 地址 {address}", "检查 PC-PLC 通信、寄存器映射及 PLC 是否覆盖写入值。")
+                    if self.events:
+                        self.events.emit("error", task_id=task_id, operation="write_readback", reason=str(error))
+                    raise error
         # Result_ID 是 PLC 的提交信号；提前写会使 PLC 读到旧功能码或旧坐标。
         self.io.write_u16(self.contract["result_id"].address, task_id)
         logger.info("应答完成：Task_ID=%s，功能码=%s（%s），坐标=%s", task_id, func_code, REPLY_FUNCTION_NAMES.get(func_code, "未知功能码"), dict(payload))

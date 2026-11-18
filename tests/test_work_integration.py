@@ -62,7 +62,7 @@ def test_data_precedes_commit():
             self.writes.append(address)
     contract = load_contract("config/plc_contract.yaml")
     io = IO()
-    handshake = Handshake(io, contract)
+    handshake = Handshake(io, contract, write_readback=False)
     handshake.write_reply(1, 3, {"pick1_xyz": (1, 2, 3), "pick2_xyz": (4, 5, 6)})
     assert io.writes == [contract[name].address for name in ("pick1_x", "pick2_x", "reply_func", "result_id")]
     io.writes.clear()

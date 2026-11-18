@@ -22,6 +22,8 @@ class PLC:
     port: int
     timeout_s: float
     comm_fail_timeout_s: float = 10.0
+    write_readback: bool = True
+    stall_warn_s: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,7 @@ class ToolCalibrationConfig:
     max_condition: float
     z_disagreement_mm: float
     enabled: bool = True
+    quality_hard_fail: bool = True
 
 
 @dataclass(frozen=True)
@@ -109,11 +112,16 @@ class Config:
     supervisor: SupervisorConfig
     vision: VisionConfig
     tool_calibration: ToolCalibrationConfig
+    capture_timeout_s: float = 3.0
+    exposure_us: float | None = None
+    gain_db: float | None = None
+    balance_ratio: tuple[float, ...] | None = None
     image_enabled: bool = True
     image_format: str = "png"
     image_quality: int = 3
     image_retention_days: int = 30
     image_queue_size: int = 32
+    camera_image_size: tuple[int, int] = (4024, 3036)
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -263,17 +271,20 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     )
     plc_data = root["plc"]
     if isinstance(plc_data, dict):
-        plc_data = {"comm_fail_timeout_s": 10.0, **plc_data}
-    p = _mapping(plc_data, "plc", ["ip", "local_ip", "port", "timeout_s", "comm_fail_timeout_s"])
+        plc_data = {"comm_fail_timeout_s": 10.0, "write_readback": True, "stall_warn_s": 120.0, **plc_data}
+    p = _mapping(plc_data, "plc", ["ip", "local_ip", "port", "timeout_s", "comm_fail_timeout_s", "write_readback", "stall_warn_s"])
     port = p["port"]
     if type(port) is not int or not 1 <= port <= 65535:
         _fail("plc.port", "端口应为 1 到 65535 的整数")
+    if type(p["write_readback"]) is not bool or _number(p["stall_warn_s"], "plc.stall_warn_s") < 0:
+        _fail("plc", "回读开关须为布尔值，停滞时间须非负")
     plc = PLC(
         _ip(p["ip"], "plc.ip"),
         _ip(p["local_ip"], "plc.local_ip"),
         port,
         _number(p["timeout_s"], "plc.timeout_s", True),
         _number(p["comm_fail_timeout_s"], "plc.comm_fail_timeout_s", True),
+        p["write_readback"], float(p["stall_warn_s"]),
     )
     t = _mapping(root["travel"], "travel", ["x", "y", "z"])
     travel = tuple(_vector(t[axis], f"travel.{axis}", 2) for axis in "xyz")
@@ -307,7 +318,14 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         None if s["fov_mm"] is None else _vector(s["fov_mm"], "scan.fov_mm", 2),
         _number(s["min_overlap_mm"], "scan.min_overlap_mm"), tray["x_direction"], tray["y_direction"]
     )
-    camera = _mapping(root["camera"], "camera", ["sn"])
+    camera = _mapping({"capture_timeout_s": 3.0, "exposure_us": None, "gain_db": None, "balance_ratio": None, "image_size": [4024, 3036], **root["camera"]}, "camera", ["sn", "capture_timeout_s", "exposure_us", "gain_db", "balance_ratio", "image_size"])
+    image_size = camera["image_size"]
+    if not isinstance(image_size, (list, tuple)) or len(image_size) != 2 or any(type(n) is not int or n <= 0 for n in image_size):
+        _fail("camera.image_size", "必须为 [宽, 高] 两个正整数")
+    capture_timeout = _number(camera["capture_timeout_s"], "camera.capture_timeout_s", True)
+    exposure = None if camera["exposure_us"] is None else _number(camera["exposure_us"], "camera.exposure_us", True)
+    gain = None if camera["gain_db"] is None else _number(camera["gain_db"], "camera.gain_db")
+    balance = None if camera["balance_ratio"] is None else _vector(camera["balance_ratio"], "camera.balance_ratio", 3)
     record_data = root["record"]
     if isinstance(record_data, dict):
         record_data = {
@@ -402,14 +420,14 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     if scan.fov_mm is None:
         scan = replace(scan, fov_mm=tuple(vision.hair_detector.um_per_px * n / 1000 for n in (4024, 3036)))
     tc_data = root["tool_calibration"]
-    if isinstance(tc_data, dict) and "enabled" not in tc_data:
-        tc_data = {**tc_data, "enabled": True}
+    if isinstance(tc_data, dict):
+        tc_data = {"enabled": True, "quality_hard_fail": True, **tc_data}
     tc = _mapping(tc_data, "tool_calibration", [
         "directory", "cameras", "detection", "position_tolerance_mm", "tip_tolerance_mm",
         "consistency_tolerance_mm", "max_iterations", "max_residual_mm", "max_condition",
-        "z_disagreement_mm", "enabled",
+        "z_disagreement_mm", "enabled", "quality_hard_fail",
     ])
-    if type(tc["enabled"]) is not bool:
+    if type(tc["enabled"]) is not bool or type(tc["quality_hard_fail"]) is not bool:
         _fail("tool_calibration.enabled", "应为布尔值")
     directory = _string(tc["directory"], "tool_calibration.directory")
     cameras = _mapping(tc["cameras"], "tool_calibration.cameras", ["front", "side"])
@@ -455,7 +473,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _number(tc["max_residual_mm"], "tool_calibration.max_residual_mm", True),
         max_condition,
         _number(tc["z_disagreement_mm"], "tool_calibration.z_disagreement_mm", True),
-        tc["enabled"],
+        tc["enabled"], tc["quality_hard_fail"],
     )
     tools_path = Path(directory) / "tools.yaml"
     try:
@@ -481,9 +499,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         supervisor,
         vision,
         tool_calibration,
+        capture_timeout, exposure, gain, balance,
         record["image_enabled"],
         record["image_format"],
         record["image_quality"],
         record["image_retention_days"],
         record["image_queue_size"],
+        tuple(image_size),
     )

@@ -20,7 +20,14 @@ from .modes import Mode
 
 def build_tree(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -> TreeNode:
     """装配每次请求的三个阶段，所有分支共用应答出口。"""
-    reply = CallWorker(
+    class ReplyWorker(CallWorker):
+        def on_running(self):
+            status = super().on_running()
+            from autoweaver.motion_policy.nodes.node import Status
+            if status == Status.FAILURE and self._blackboard.read("reply_func") == 131:
+                ctx.events.emit("error", task_id=self._blackboard.read("task_id"), operation="write_131", reason=f"对刀失败应答 131 写入失败：{self._blackboard.read('error')}")
+            return status
+    reply = ReplyWorker(
         ctx.board,
         "plc",
         lambda bb: {
@@ -33,7 +40,7 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -
     )
     iteration = Sequence(
         [
-            WaitRequest(ctx.board, ctx.tracker, ctx.config.plc.comm_fail_timeout_s, ctx.events),
+            WaitRequest(ctx.board, ctx.tracker, ctx.config.plc.comm_fail_timeout_s, ctx.events, ctx.config.plc.stall_warn_s),
             build_dispatch(ctx, branches),
             Sequence([Retry(max_attempts=3, child=reply, name="应答最多三次"), CommitReply(ctx.events)], name="统一应答出口"),
         ],

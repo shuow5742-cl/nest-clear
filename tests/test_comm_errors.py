@@ -118,7 +118,7 @@ def test_calibration_reply_write_order(contract, tool):
             self.writes.append((address, value))
 
     io = RecordingIO()
-    Handshake(io, contract).write_reply(42, 100, {f"calibration{tool}_xyz": [1, 2, 3]})
+    Handshake(io, contract, write_readback=False).write_reply(42, 100, {f"calibration{tool}_xyz": [1, 2, 3]})
     assert io.writes == [
         (contract[f"calibration{tool}_x"].address, [1, 2, 3]),
         (contract["reply_func"].address, 100),
