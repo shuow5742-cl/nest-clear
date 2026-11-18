@@ -140,13 +140,12 @@ def test_nonzero_baseline_ignored(tmp_path: Path, caplog: pytest.LogCaptureFixtu
         )
         app = Application(config, ROOT / "config/nest_clear.yaml")
         try:
-            assert plc.io.read("result_id") == 0
-            assert plc.io.read("reply_func") == 0
+            assert plc.io.read("result_id") == 2
+            assert plc.io.read("reply_func") == 1
             for _ in range(60):
                 app.step()
                 time.sleep(0.002)
-            assert plc.io.read("result_id") == 0
-            assert "忽略遗留请求" in caplog.text
+            assert plc.io.read("result_id") == 2
             task = plc.request(1)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and plc.io.read("result_id") != task:

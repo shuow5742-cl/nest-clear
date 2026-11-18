@@ -21,9 +21,7 @@ class PLC:
     local_ip: str
     port: int
     timeout_s: float
-    comm_fail_timeout_s: float = 10.0
     write_readback: bool = True
-    stall_warn_s: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -274,20 +272,22 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     )
     plc_data = root["plc"]
     if isinstance(plc_data, dict):
-        plc_data = {"comm_fail_timeout_s": 10.0, "write_readback": True, "stall_warn_s": 120.0, **plc_data}
-    p = _mapping(plc_data, "plc", ["ip", "local_ip", "port", "timeout_s", "comm_fail_timeout_s", "write_readback", "stall_warn_s"])
+        for key in ("stall_warn_s", "comm_fail_timeout_s"):
+            if key in plc_data:
+                _fail(f"plc.{key}", "该键已删除：算法端不做超时，超时由 PLC 负责")
+        plc_data = {"write_readback": True, **plc_data}
+    p = _mapping(plc_data, "plc", ["ip", "local_ip", "port", "timeout_s", "write_readback"])
     port = p["port"]
     if type(port) is not int or not 1 <= port <= 65535:
         _fail("plc.port", "端口应为 1 到 65535 的整数")
-    if type(p["write_readback"]) is not bool or _number(p["stall_warn_s"], "plc.stall_warn_s") < 0:
-        _fail("plc", "回读开关须为布尔值，停滞时间须非负")
+    if type(p["write_readback"]) is not bool:
+        _fail("plc", "回读开关须为布尔值")
     plc = PLC(
         _ip(p["ip"], "plc.ip"),
         _ip(p["local_ip"], "plc.local_ip"),
         port,
         _number(p["timeout_s"], "plc.timeout_s", True),
-        _number(p["comm_fail_timeout_s"], "plc.comm_fail_timeout_s", True),
-        p["write_readback"], float(p["stall_warn_s"]),
+        p["write_readback"],
     )
     t = _mapping(root["travel"], "travel", ["x", "y", "z"])
     travel = tuple(_vector(t[axis], f"travel.{axis}", 2) for axis in "xyz")

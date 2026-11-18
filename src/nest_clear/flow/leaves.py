@@ -35,66 +35,31 @@ class CallWorker(FrameworkCallWorker):
 
 
 class WaitRequest(CallWorker):
-    """循环异步读取请求；短时断线重试，持续超时才让整盘失败。"""
+    """持续读取请求，断线时记录并重试。"""
 
-    def __init__(self, board: Any, tracker: Any, timeout: float, events: EventRecorder, stall_warn_s: float = 120.0, clock: Callable[[], float] = time.monotonic) -> None:
-        """保留跨盘基线和通信失败预算。"""
-        super().__init__(
-            board,
-            "plc",
-            lambda bb: {"operation": "request"},
-            result_key="poll_result",
-            name="等待新请求",
-        )
+    def __init__(self, board: Any, tracker: Any, events: EventRecorder, clock: Callable[[], float] = time.monotonic) -> None:
+        super().__init__(board, "plc", lambda bb: {"operation": "request"}, result_key="poll_result", name="等待新请求")
         self.tracker = tracker
-        self.timeout = timeout
         self.events = events
-        self.stall_warn_s = stall_warn_s
         self.clock = clock
-        self.wait_since = 0.0
-        self.last_stall = 0.0
-
-    def on_start(self) -> Status:
-        """开始本次等待；失败起点保存在本盘黑板。"""
-        self._blackboard.write("poll_failure_since", None, self.name)
-        self.wait_since = self.last_stall = self.clock()
-        return super().on_start()
+        self.failure_since = None
+        self.failures = 0
 
     def on_running(self) -> Status:
-        """处理轮询结果、编号变化及持续失败超时。"""
         status = super().on_running()
         if status == Status.RUNNING:
-            since = self._blackboard.read("poll_failure_since")
-            if since is not None and self.clock() - since >= self.timeout:
-                reason = self._blackboard.read("error")
-                logger.error("PLC 连续轮询失败超过 %.3f 秒：%s", self.timeout, reason)
-                self.events.emit("error", reason=reason, operation="poll")
-                return Status.FAILURE
             return status
         if status == Status.FAILURE:
-            now = self.clock()
-            since = self._blackboard.read("poll_failure_since")
-            if since is None:
-                since = now
-                self._blackboard.write("poll_failure_since", since, self.name)
-            if now - since >= self.timeout:
-                reason = self._blackboard.read("error")
-                logger.error("PLC 连续轮询失败超过 %.3f 秒：%s", self.timeout, reason)
-                self.events.emit("error", reason=reason, operation="poll")
-                return Status.FAILURE
+            if self.failure_since is None:
+                self.failure_since = self.clock()
+                self.events.emit("plc_disconnected", reason=self._blackboard.read("error"), operation="poll")
+            self.failures += 1
             return CallWorker.on_start(self)
-        self._blackboard.write("poll_failure_since", None, self.name)
+        if self.failure_since is not None:
+            self.events.emit("plc_restored", operation="poll", failures=self.failures, duration_s=self.clock() - self.failure_since)
+            self.failure_since = None
+            self.failures = 0
         task, func = self._blackboard.read("poll_result")
-        now = self.clock()
-        if self.stall_warn_s and now - self.last_stall >= self.stall_warn_s:
-            mode = self._blackboard.read("mode")
-            cycle = self._blackboard.read("work_cycle")
-            state = getattr(getattr(cycle, "state", None), "value", "IDLE")
-            expected = {"IDLE": [1, 100, 101], "WAIT_COARSE": [20], "WAIT_FINE": [20], "WAIT_PICK": [60]}.get(state, [])
-            if getattr(mode, "value", "").startswith("对刀中"):
-                expected = [110, 130] if "工具1" in mode.value else [120, 130]
-            self.events.emit("plc_stall", task_id=task, mode=getattr(mode, "value", str(mode)), expected_functions=expected, last_task_id=task, last_func=func, waited_s=round(now - self.wait_since, 1), reason="等待新请求超时，请检查 PLC 状态及功能码。")
-            self.last_stall = now
         previous = self.tracker.observed
         self.tracker.observed = task
         if task == 0 or task == previous or task == self.tracker.processed:
@@ -265,7 +230,11 @@ class CommitReply(Instant):
     def perform(self) -> None:
         """只有 PLC 确认写入后才记录应答和盘结束。"""
         bb = self._blackboard
-        func = bb.read("reply_func")
+        func = bb.read("committed_func")
+        if func is None:
+            func = bb.read("reply_func")
+        if func != bb.read("reply_func"):
+            bb.write("reply_coordinates", {}, self.name)
         current = bb.read("mode")
         target = None
         if func == 1 and current == Mode.IDLE:

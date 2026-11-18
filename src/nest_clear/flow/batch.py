@@ -7,7 +7,6 @@ from autoweaver.motion_policy import format_tree
 from autoweaver.motion_policy.batch import Batch
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 from autoweaver.motion_policy.nodes.decorator.repeat_until import RepeatUntil
-from autoweaver.motion_policy.nodes.decorator.retry import Retry
 from autoweaver.motion_policy.nodes.node import TreeNode
 
 from nest_clear.config import Config
@@ -26,6 +25,9 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -
             from autoweaver.motion_policy.nodes.node import Status
             if status == Status.FAILURE and self._blackboard.read("reply_func") == 131:
                 ctx.events.emit("error", task_id=self._blackboard.read("task_id"), operation="write_131", reason=f"对刀失败应答 131 写入失败：{self._blackboard.read('error')}")
+            if status == Status.FAILURE:
+                ctx.events.emit("error", task_id=self._blackboard.read("task_id"), operation="reply", reason=f"应答写入失败，将持续重试：{self._blackboard.read('error')}")
+                return self.on_start()
             return status
     reply = ReplyWorker(
         ctx.board,
@@ -36,13 +38,14 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -
             "func": bb.read("reply_func"),
             "coordinates": bb.read("reply_coordinates"),
         },
+        result_key="committed_func",
         name="写入应答",
     )
     iteration = Sequence(
         [
-            WaitRequest(ctx.board, ctx.tracker, ctx.config.plc.comm_fail_timeout_s, ctx.events, ctx.config.plc.stall_warn_s),
+            WaitRequest(ctx.board, ctx.tracker, ctx.events),
             build_dispatch(ctx, branches),
-            Sequence([Retry(max_attempts=3, child=reply, name="应答最多三次"), CommitReply(ctx.events)], name="统一应答出口"),
+            Sequence([reply, CommitReply(ctx.events)], name="统一应答出口"),
         ],
         name="处理一次请求",
     )

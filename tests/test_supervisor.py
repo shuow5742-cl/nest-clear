@@ -138,6 +138,7 @@ def test_startup_grace_kills_and_replies(tmp_path, caplog) -> None:
             fake.set_status(128)
             fake.io.write("task_id", 17)
             sup.tick()
+            fake.set_status(0)
             time.sleep(0.03)
             sup.tick()
             assert sup.child is None
@@ -167,6 +168,7 @@ def test_unexpected_exit_replies_in_commit_order(tmp_path, caplog) -> None:
             sup.tick()
             assert sup.child is not None
             sup.child.wait(timeout=3)
+            fake.set_status(0)
             fake.writes.clear()
             sup.tick()
             assert fake.io.read("reply_func") == 999
@@ -184,8 +186,8 @@ def test_unexpected_exit_replies_in_commit_order(tmp_path, caplog) -> None:
             plc.close()
 
 
-def test_intentional_stop_does_not_reply(tmp_path) -> None:
-    """急停、初始化重启和父程序停止都不代替主程序回复。"""
+def test_plc_stops_do_not_reply(tmp_path) -> None:
+    """初始化重启和急停均不代答。"""
     cfg = load_config("config/nest_clear.yaml")
     cfg = replace(
         cfg, record_directory=str(tmp_path),

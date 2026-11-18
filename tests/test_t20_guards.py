@@ -39,11 +39,11 @@ class Registers:
         for i, word in enumerate(sum((encode_real32(v) for v in values), [])): self.words[address+i] = word
     def read_u16(self, address): return self.words.get(address, 0) + self.corrupt
 
-def test_readback_does_not_commit():
+def test_readback_mismatch_commits_error():
     contract = load_contract('config/plc_contract.yaml'); io = Registers(); io.corrupt = True
-    with pytest.raises(GuardError, match='COMM-READBACK'):
-        Handshake(io, contract).write_reply(4, 1, {'scan_xyz': [1, 2, 3]})
-    assert contract['result_id'].address not in io.writes
+    Handshake(io, contract).write_reply(4, 1, {'scan_xyz': [1, 2, 3]})
+    assert io.words[contract['reply_func'].address] == 999
+    assert io.words[contract['result_id'].address] == 4
 
 def test_task_double_read_retries():
     contract = load_contract('config/plc_contract.yaml')
@@ -104,30 +104,6 @@ def test_image_size_guards_and_mock():
     assert metadata['frame_id'] is None and metadata['device_timestamp'] is None
     assert metadata['frame_metadata_reason'] == '框架 DahengCamera 未暴露，待 Auto_Weaver 扩展'
     mock.on_stop()
-
-
-def test_plc_stall_injected_clock(monkeypatch):
-    from types import SimpleNamespace
-    from autoweaver.motion_policy.nodes.node import Status
-    from nest_clear.flow.leaves import WaitRequest, CallWorker
-    class Board:
-        def __init__(self): self.data = {'poll_result': (7, 20)}
-        def read(self, key, *args): return self.data.get(key)
-        def write(self, key, value, *args): self.data[key] = value
-    class Events:
-        def __init__(self): self.rows = []
-        def emit(self, event, **fields): self.rows.append((event, fields))
-    now = [1.]
-    board, events = Board(), Events()
-    wait = WaitRequest(board, SimpleNamespace(observed=7, processed=7), 5, events, clock=lambda: now[0])
-    wait.set_blackboard(board)
-    monkeypatch.setattr(CallWorker, 'on_start', lambda self: Status.RUNNING)
-    monkeypatch.setattr(CallWorker, 'on_running', lambda self: Status.SUCCESS)
-    wait.on_start()
-    now[0] = 121.
-    wait.on_running()
-    assert events.rows[0][0] == 'plc_stall'
-    assert events.rows[0][1]['waited_s'] == 120 and events.rows[0][1]['last_task_id'] == 7
 
 
 def test_heartbeat_failure_and_restoration(tmp_path, monkeypatch):

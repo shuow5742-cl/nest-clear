@@ -95,36 +95,34 @@ def test_reply_retries_three_attempts(prepared: tuple, monkeypatch: pytest.Monke
     assert plc.io.read("reply_func") == 1
 
 
-def test_poll_failure_timeout(prepared: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
-    """连续轮询故障超过预算后 Batch 确实失败。"""
+def test_reply_recovers_after_more_than_three_failures(prepared: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
     plc, app = prepared
-    app.config = replace(app.config, plc=replace(app.config.plc, comm_fail_timeout_s=.03))
-
-    def failed() -> tuple[int, int]:
-        """模拟持续断线。"""
-        raise TimeoutError("持续断线")
-
-    monkeypatch.setattr(app.plc.handshake, "read_request", failed)
-    with pytest.raises(GuardError, match="BATCH-FAILED"):
-        drive_until(app, lambda: False)
-
-
-def test_reply_failure_exhausts_attempts(prepared: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
-    """三次写失败后终止批次，避免继续处理后续请求。"""
-    plc, app = prepared
+    original = app.plc.handshake.write_reply
     attempts = []
-
-    def failed(task: int, func: int, coordinates: object) -> None:
-        """每次提交均模拟断线。"""
+    def write(task, func, coordinates):
         attempts.append(task)
-        raise TimeoutError("持续写失败")
-
-    monkeypatch.setattr(app.plc.handshake, "write_reply", failed)
+        if len(attempts) <= 5:
+            raise TimeoutError("持续断线")
+        return original(task, func, coordinates)
+    monkeypatch.setattr(app.plc.handshake, "write_reply", write)
     task = plc.request(1)
-    with pytest.raises(GuardError, match="BATCH-FAILED"):
-        drive_until(app, lambda: False)
-    assert attempts == [task, task, task]
-    assert plc.io.read("result_id") == 0
+    drive_until(app, lambda: plc.io.read("result_id") == task)
+    assert len(attempts) == 6
+
+
+def test_poll_recovers_after_prolonged_failure(prepared: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    plc, app = prepared
+    original = app.plc.handshake.read_request
+    attempts = []
+    def read():
+        attempts.append(1)
+        if len(attempts) <= 10:
+            raise TimeoutError("持续断线")
+        return original()
+    monkeypatch.setattr(app.plc.handshake, "read_request", read)
+    task = plc.request(1)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
+    assert len(attempts) > 10
 
 
 def test_tree_log_and_registered_branch(prepared: tuple, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
@@ -163,18 +161,14 @@ def test_reply_retry_after_lost_ack(prepared: tuple, monkeypatch: pytest.MonkeyP
     assert plc.io.read("result_id") == task
 
 
-def test_poll_timeout_config_default_and_validation(tmp_path: Path) -> None:
-    """旧配置省略新字段时默认十秒，非法预算在启动时拒绝。"""
+@pytest.mark.parametrize("key", ["stall_warn_s", "comm_fail_timeout_s"])
+def test_removed_timeout_config(tmp_path: Path, key: str) -> None:
     import yaml
-
     data = yaml.safe_load((ROOT / "config/nest_clear.yaml").read_text())
-    del data["plc"]["comm_fail_timeout_s"]
+    data["plc"][key] = 1
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    assert load_config(config_path).plc.comm_fail_timeout_s == 10.0
-    data["plc"]["comm_fail_timeout_s"] = 0
-    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    with pytest.raises(GuardError):
+    with pytest.raises(GuardError, match="该键已删除：算法端不做超时，超时由 PLC 负责"):
         load_config(config_path)
 
 

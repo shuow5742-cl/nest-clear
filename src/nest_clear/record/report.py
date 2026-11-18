@@ -209,8 +209,8 @@ def report(root: str | Path, day: date) -> str:
         event = row.get("event")
         key = (row.get("tray_id"), row.get("task_id"))
         clock = _time(row.get("ts", ""))
-        if event in ("plc_stall", "heartbeat_failed", "heartbeat_restored", "placeholder_calibration", "tooltip_quality_warning") or (event == "error" and (row.get("operation") in ("image", "write_readback", "clear_algorithm_ready", "write_131") or "CAMERA-CAPTURE" in str(row.get("reason", "")))):
-            labels = {"plc_stall": "PLC 请求停滞", "heartbeat_failed": "心跳中断", "heartbeat_restored": "心跳恢复", "placeholder_calibration": "占位标定放行中", "tooltip_quality_warning": "对刀质量超限", "error": "设备或记录错误"}
+        if event in ("heartbeat_failed", "heartbeat_restored", "placeholder_calibration", "tooltip_quality_warning") or (event == "error" and (row.get("operation") in ("image", "write_readback", "clear_algorithm_ready", "write_131") or "CAMERA-CAPTURE" in str(row.get("reason", "")))):
+            labels = {"heartbeat_failed": "心跳中断", "heartbeat_restored": "心跳恢复", "placeholder_calibration": "占位标定放行中", "tooltip_quality_warning": "对刀质量超限", "error": "设备或记录错误"}
             reason = str(row.get("reason") or row).replace("\n", "；")
             attention.append(f"{clock} Task_ID={row.get('task_id')} {labels[event]}：{reason}；建议：检查相关设备、配置与日志。")
         if event == "error":

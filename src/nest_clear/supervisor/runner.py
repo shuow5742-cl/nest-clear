@@ -5,8 +5,9 @@
 启动后等待首个活性点不超过启动宽限；打点后按文件更新时间检查超时。
 看门狗杀掉卡死进程，意外退出或看门狗处置后检查 PLC 是否有未应答的
 Task_ID，有则通过握手层回 999，通知 PLC 停机并要求人工处理。急停、
-初始化重启及父程序退出属于有意停止，不代答。所有异常停止都等待新的
-bit7 上升沿，因为设备初始化边沿是唯一启动入口，不能自行重启。
+初始化重启由 PLC 放弃在途请求，不代答并记录任务；父程序退出时仍为未完成
+请求代答。异常代答失败后重试，遇初始化、急停或任务变化即放弃。所有异常
+停止都等待新的 bit7 上升沿，因为设备初始化边沿是唯一启动入口。
 """
 
 import json
@@ -25,6 +26,8 @@ from .device_state import (
     ACTION_RESTART,
     ACTION_START,
     BIT_FAULT,
+    BIT_ESTOP,
+    BIT_INITIALIZING,
     DeviceStateTracker,
     bit,
     conflicting_bits,
@@ -53,35 +56,71 @@ class Supervisor:
         self._heartbeat_failure_since = None
         self._heartbeat_failure_wall = None
         self._failures = 0
+        self._failure_since = None
+        self._pending_reply = None
         self._alive = main_alive_file(config.record_directory)
         self._state = supervisor_state_file(config.record_directory)
         self._started_at: float | None = None
 
-    def _reply_after_failure(self, reason: str) -> None:
-        """主程序非正常死亡时，为 PLC 未完成的请求提交错误应答。"""
-        task_id: int | None = None
+    def _abandon_reply(self, reason: str, task_id: int | None = None, func: int | None = None) -> None:
+        """记录 PLC 主动放弃的请求；读不到上下文时保留可用信息。"""
+        if self._pending_reply is not None:
+            if task_id is None:
+                task_id = self._pending_reply["task_id"]
+            if func is None and task_id == self._pending_reply["task_id"]:
+                func = self._pending_reply.get("func")
         try:
-            task_id = self.plc.read("task_id")
+            if task_id is None:
+                task_id = self.plc.read("task_id")
+            if func is None:
+                func = self.plc.read("request_func")
+        except Exception as exc:
+            logger.warning("读取被放弃请求的上下文失败：%s", exc)
+        self.events.emit("request_abandoned", task_id=task_id, request_func=func, reason=reason)
+        logger.info("放弃代答：Task_ID=%s，功能码=%s，原因=%s", task_id, func, reason)
+        self._pending_reply = None
+
+    def _reply_after_failure(self, reason: str, *, retry: bool = True) -> None:
+        """仅在 PLC 仍等待同一请求时代答；异常退出可在后续循环重试。"""
+        pending = self._pending_reply if retry else None
+        if pending is None:
+            pending = {"reason": reason, "task_id": None, "func": None, "unidentified": False}
+            if retry:
+                self._pending_reply = pending
+        task_id = pending["task_id"]
+        try:
+            word = int(self.plc.read("status"))
+            if bit(word, BIT_ESTOP) or bit(word, BIT_INITIALIZING):
+                self._abandon_reply("PLC 急停或初始化", task_id)
+                return
+            if pending["unidentified"]:
+                self.events.emit("request_abandoned", task_id=None, request_func=None, reason="首次代答时无法读取 Task_ID，无法确认仍是同一请求")
+                logger.error("首次代答时无法读取 Task_ID，放弃无法关联原请求的代答")
+                self._pending_reply = None
+                return
+            current = self.plc.read("task_id")
+            if task_id is not None and current != task_id:
+                self._abandon_reply(f"Task_ID 已变化为 {current}", task_id)
+                return
+            task_id = current
+            pending["task_id"] = task_id
+            if task_id and pending["func"] is None:
+                pending["func"] = self.plc.read("request_func")
             result_id = self.plc.read("result_id")
             if task_id == 0 or task_id == result_id:
+                if retry:
+                    self._pending_reply = None
                 return
             Handshake(self.plc, self.plc.contract, self.config.plc.write_readback, self.events).write_reply(task_id, 999)
+            if retry:
+                self._pending_reply = None
             self.events.emit("supervisor_reply_999", task_id=task_id, reason=reason)
-            logger.error(
-                "错误码：SUPERVISOR-CHILD-FAILED；主程序%s；已给 Task_ID=%s 回 999；"
-                "位置：父程序握手；排查建议：PLC 会报错停机，人工处理后重新初始化。",
-                reason,
-                task_id,
-            )
+            logger.error("主程序%s；已给 Task_ID=%s 回 999", reason, task_id)
         except Exception as exc:
-            logger.error(
-                "错误码：SUPERVISOR-REPLY；主程序%s；检查待应答任务或给 "
-                "Task_ID=%s 回 999 失败：%s；位置：父程序握手；"
-                "排查建议：查网线/IP/PLC 是否上电，人工处理后重新初始化。",
-                reason,
-                task_id,
-                exc,
-            )
+            if retry and task_id is None:
+                pending["unidentified"] = True
+            self.events.emit("error", task_id=task_id, operation="supervisor_reply", reason=str(exc))
+            logger.error("错误码：SUPERVISOR-REPLY；主程序%s；Task_ID=%s 代答失败：%s", reason, task_id, exc)
 
     def _running(self) -> bool:
         """检查子进程并记录意外退出，等待下一个初始化边沿。"""
@@ -178,6 +217,7 @@ class Supervisor:
         except Exception as exc:
             self._failures += 1
             if self._failures == 1:
+                self._failure_since = time.monotonic()
                 self.events.emit("plc_disconnected", reason=str(exc))
             if self._failures % 20 == 1:
                 logger.warning(
@@ -190,7 +230,7 @@ class Supervisor:
         else:
             if self._failures:
                 logger.info("PLC 状态读取恢复，之前连续失败 %s 次", self._failures)
-                self.events.emit("plc_restored", failures=self._failures)
+                self.events.emit("plc_restored", failures=self._failures, duration_s=time.monotonic() - self._failure_since)
                 self._failures = 0
             if word != self.word:
                 level = logging.ERROR if bit(word, BIT_FAULT) else logging.INFO
@@ -213,6 +253,13 @@ class Supervisor:
                     previous_bits=describe(self.word or 0),
                 )
                 self.word = word
+            abandoned_pending = False
+            if bit(word, BIT_ESTOP) or bit(word, BIT_INITIALIZING):
+                if self._pending_reply is not None:
+                    abandoned_pending = True
+                    self._abandon_reply("PLC 急停或初始化")
+            elif self._pending_reply is not None:
+                self._reply_after_failure(self._pending_reply["reason"])
             decision = self.tracker.decide(word, child_running=running)
             self.paused = decision.paused
             published = self._publish()
@@ -220,6 +267,8 @@ class Supervisor:
             if decision.action == ACTION_RESTART:
                 self.events.emit("child_restart", reason=decision.reason)
             if decision.action in (ACTION_ESTOP, ACTION_RESTART):
+                if not abandoned_pending:
+                    self._abandon_reply(decision.reason)
                 stopped = self._stop(decision.reason)
             if decision.action in (ACTION_START, ACTION_RESTART):
                 if published and (stopped or not self._running()):
@@ -289,5 +338,6 @@ class Supervisor:
             logger.info("收到退出信号")
         finally:
             self._stop("父程序退出")
+            self._reply_after_failure("父程序退出", retry=False)
             self.plc.close()
             self.events.emit("process_stop")

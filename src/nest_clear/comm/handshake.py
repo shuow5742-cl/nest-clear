@@ -21,6 +21,7 @@ class Handshake:
         self.write_readback = write_readback
         self.events = events
         self.inconsistent_reads = 0
+        self._readback_error_task = None
 
     def read_request(self) -> tuple[int, int]:
         """读取任务编号及功能码；变化检测和日志由调用方负责。"""
@@ -40,6 +41,9 @@ class Handshake:
 
     def write_reply(self, task_id: int, func_code: int, payload: Mapping[str, Any] | None = None) -> None:
         """先验证全部数据，再按数据区、功能码、提交编号的顺序写入。"""
+        if self._readback_error_task == task_id:
+            func_code = 999
+            payload = {name: (0 if name == "removable_count" else [0, 0, 0]) for name in (payload or {})}
         context = f"Task_ID={task_id!r}，功能码={func_code!r}"
         try:
             encode_u16(task_id)
@@ -86,7 +90,23 @@ class Handshake:
                     error = GuardError("COMM-READBACK", f"写后回读不一致：期望 {wanted}，实际 {actual}", f"Task_ID={task_id}，PLC 地址 {address}", "检查 PC-PLC 通信、寄存器映射及 PLC 是否覆盖写入值。")
                     if self.events:
                         self.events.emit("error", task_id=task_id, operation="write_readback", reason=str(error))
-                    raise error
+                    logger.error("%s", error)
+                    self._readback_error_task = task_id
+                    for block_address, values in blocks:
+                        self.io.write_real32_block(block_address, [0.0] * len(values))
+                    for block_address, _ in scalar_blocks:
+                        self.io.write_u16(block_address, 0)
+                    func_code = 999
+                    self.io.write_u16(self.contract["reply_func"].address, func_code)
+                    actual_error = self.io.read_u16(self.contract["reply_func"].address)
+                    if actual_error != func_code:
+                        reason = f"COMM-READBACK Task_ID={task_id} PLC 地址 {self.contract['reply_func'].address} 期望 999 实际 {actual_error}"
+                        logger.error("%s", reason)
+                        if self.events:
+                            self.events.emit("error", task_id=task_id, operation="write_readback", reason=reason)
+                    break
         # Result_ID 是 PLC 的提交信号；提前写会使 PLC 读到旧功能码或旧坐标。
         self.io.write_u16(self.contract["result_id"].address, task_id)
+        self._readback_error_task = None
+        self.last_reply_func = func_code
         logger.info("应答完成：Task_ID=%s，功能码=%s（%s），坐标=%s", task_id, func_code, REPLY_FUNCTION_NAMES.get(func_code, "未知功能码"), dict(payload))

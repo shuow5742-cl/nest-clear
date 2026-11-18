@@ -19,14 +19,26 @@ class PlcWorker(AsyncRequestWorker):
         self.handshake = handshake
 
     def initialize(self) -> int:
-        """清空应答并读取启动基线，遗留非零请求只记录不处理。"""
+        """按启动基线清理应答区或处理遗留请求。"""
         io = self.handshake.io
         contract = self.handshake.contract
-        io.write_u16(contract["result_id"].address, 0)
-        io.write_u16(contract["reply_func"].address, 0)
         baseline = io.read_u16(contract["task_id"].address)
-        if baseline:
-            logger.warning("启动 Task_ID 基线为 %s，忽略遗留请求", baseline)
+        if baseline == 0:
+            io.write_u16(contract["result_id"].address, 0)
+            io.write_u16(contract["reply_func"].address, 0)
+            return baseline
+        result = io.read_u16(contract["result_id"].address)
+        if baseline == result:
+            return baseline
+        status = io.read_u16(contract["status"].address)
+        if status & ((1 << 6) | (1 << 7)):
+            func = io.read_u16(contract["request_func"].address)
+            logger.info("PLC 急停或初始化，放弃遗留请求 Task_ID=%s 功能码=%s", baseline, func)
+            if self.handshake.events:
+                self.handshake.events.emit("request_abandoned", task_id=baseline, request_func=func, reason="PLC 急停或初始化")
+        else:
+            logger.error("启动时发现未应答 Task_ID=%s，提交 999", baseline)
+            self.handshake.write_reply(baseline, 999)
         return baseline
 
     def execute(self, payload: dict[str, Any]) -> Any:
@@ -40,6 +52,14 @@ class PlcWorker(AsyncRequestWorker):
             name = f"calibration{payload['tool']}_feedback_x"
             return self.handshake.io.read_real32_block(self.handshake.contract[name].address, 3)
         if operation == "reply":
-            self.handshake.write_reply(payload["task_id"], payload["func"], payload.get("coordinates"))
-            return None
+            try:
+                self.handshake.write_reply(payload["task_id"], payload["func"], payload.get("coordinates"))
+            except GuardError as exc:
+                if exc.code != "HANDSHAKE-INVALID":
+                    raise
+                logger.error("应答数据无效，改回 999：%s", exc)
+                if self.handshake.events:
+                    self.handshake.events.emit("error", task_id=payload["task_id"], operation="reply_validation", reason=str(exc))
+                self.handshake.write_reply(payload["task_id"], 999)
+            return self.handshake.last_reply_func
         raise GuardError("PLC-OPERATION", f"未知操作 {operation!r}", "PLC Worker", "检查行为树命令。")

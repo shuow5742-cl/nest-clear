@@ -172,6 +172,7 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
             assert starts[-1] != starts[0]
             assert plc.io.read("task_id") == 0
             assert plc.io.read("result_id") == 0
+            assert plc.io.read("reply_func") == 0
             child = starts[-1]
             first_task = plc.request(1)
             assert plc.wait_reply(first_task, 8)["func_code"] == 1
@@ -326,7 +327,6 @@ def test_report_attention_includes_all_t20_failures(tmp_path):
     for event, fields in [
         ('error', {'reason': 'CAMERA-CAPTURE 采图失败'}),
         ('error', {'operation': 'write_readback', 'reason': '回读失败'}),
-        ('plc_stall', {'reason': '停滞'}),
         ('heartbeat_failed', {'reason': '心跳故障'}),
         ('error', {'operation': 'clear_algorithm_ready', 'reason': '就绪位清零失败'}),
         ('placeholder_calibration', {}),
@@ -335,5 +335,5 @@ def test_report_attention_includes_all_t20_failures(tmp_path):
     ]:
         events.emit(event, **fields)
     attention = report(tmp_path, day).split('需要人看的：', 1)[1]
-    for text in ('采图失败', '回读失败', 'PLC 请求停滞', '心跳中断', '就绪位清零失败', '占位标定放行中', '对刀质量超限', '图片写盘失败'):
+    for text in ('采图失败', '回读失败', '心跳中断', '就绪位清零失败', '占位标定放行中', '对刀质量超限', '图片写盘失败'):
         assert text in attention
