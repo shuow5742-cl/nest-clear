@@ -28,6 +28,15 @@ def _rows(path: Path) -> list[dict[str, Any]]:
     return result
 
 
+def _day_rows(root: str | Path, name: str, day: date, timestamp: str) -> list[dict[str, Any]]:
+    """读取旧版每日文件及所有运行目录，运行记录按行时间而非目录日期归日。"""
+    rows = _rows(daily_file(root, name, day))
+    for path in Path(root).glob(f"????-??-??/*/{name}"):
+        rows.extend(row for row in _rows(path)
+                    if str(row.get(timestamp, row.get("ts", "")))[:10] == day.isoformat())
+    return rows
+
+
 def _time(value: str) -> str:
     """把带时区的事件时间转换为记录所在本地的时分秒。"""
     try:
@@ -139,21 +148,11 @@ def _work_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def report(root: str | Path, day: date) -> str:
     """汇总一日盘记录、状态变化和需要人工处理的事项。"""
-    events = _rows(daily_file(root, "events.jsonl", day))
-    trays = _rows(daily_file(root, "summary.jsonl", day))
-    calibrations = _rows(daily_file(root, "tooltip_summary.jsonl", day))
-    # 一盘跨午夜时摘要归开始日，继续收集后续同盘事件直至结束。
+    events = _day_rows(root, "events.jsonl", day, "wall")
+    trays = _day_rows(root, "summary.jsonl", day, "start_time")
+    calibrations = _day_rows(root, "tooltip_summary.jsonl", day, "end_time")
+    # 统计严格按事件发生日期归日；跨午夜的运行不需要拆分文件。
     tray_events = list(events)
-    next_day = day + timedelta(days=1)
-    unfinished = {row.get("tray_id") for row in trays}
-    while unfinished and next_day <= date.today():
-        later = _rows(daily_file(root, "events.jsonl", next_day))
-        relevant = [row for row in later if row.get("tray_id") in unfinished]
-        tray_events.extend(relevant)
-        unfinished.difference_update(row.get("tray_id") for row in relevant if row.get("event") == "tray_end")
-        if not later:
-            break
-        next_day += timedelta(days=1)
     lines = [f"设备日报 {day.isoformat()}"]
     processes = [row for row in events if row.get("event") in ("process_start", "process_stop")]
     periods = []

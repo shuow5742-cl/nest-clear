@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 import logging
+import hashlib
 import os
 from queue import Empty, Full, Queue
 from pathlib import Path
@@ -52,6 +53,7 @@ class ImageArchive:
         self.preview_queue: Queue[np.ndarray | None] = Queue(maxsize=1)
         self.preview_thread: threading.Thread | None = None
         self.preview_lock = threading.Lock()
+        self.capture_paths: dict[str, str] = {}
         removed = []
         cutoff = date.today() - timedelta(days=retention_days)
         for directory in events.directory.glob("????-??-??"):
@@ -61,6 +63,11 @@ class ImageArchive:
                 if day < cutoff and images.is_dir() and not images.is_symlink():
                     shutil.rmtree(images)
                     removed.append(directory.name)
+                if day < cutoff:
+                    for images in directory.glob("*/images"):
+                        if images.is_dir() and not images.is_symlink() and not images.parent.is_symlink():
+                            shutil.rmtree(images)
+                            removed.append(str(images.relative_to(events.directory)))
             except (ValueError, OSError) as exc:
                 logger.warning("清理图像失败：%s", exc)
         events.emit("images_cleanup", removed=removed, retention_days=retention_days)
@@ -69,6 +76,12 @@ class ImageArchive:
         """拍照成功后立即提交原图并返回相对路径。"""
         stem = f"{self.events.tray_id}_{scan:03d}_{stage}_{self.events.clock().strftime('%H%M%S_%f')}" if stage else None
         return self._submit(image, None, scan, task_id, None, stem)
+
+    def capture_raw(self, image: Any, *, sequence: int, capture_id: str, kind: str,
+                    tray: str, view: int, shot: str, task_id: int) -> str | None:
+        """为一次采图提交固定名称的 PNG 原图。"""
+        stem = f"{sequence:06d}_{kind}_t{tray}_v{view:02d}_{shot}"
+        return self._submit(image, None, view, task_id, None, stem, capture_id)
 
     def overlay(
         self,
@@ -156,13 +169,20 @@ class ImageArchive:
         task_id: int,
         raw_path: str | None,
         stem: str | None = None,
+        capture_id: str | None = None,
     ) -> str | None:
         """无等待地申请图片槽位，队列满时记录丢弃。"""
         if not self.enabled:
             return None
         now = self.events.clock()
         kind = "raw" if targets is None else "overlay"
-        if raw_path:
+        capture_id = capture_id or self.capture_paths.get(raw_path or "")
+        if self.events.run_directory is not None and (stem or raw_path):
+            if raw_path:
+                relative = Path(raw_path).with_name(Path(raw_path).name.replace("_raw.png", "_ovl.jpg"))
+            else:
+                relative = self.events.run_directory.relative_to(self.events.directory) / "images" / f"{stem}_raw.png"
+        elif raw_path:
             relative = Path(raw_path.replace(f"_raw.{self.image_format}", f"_{kind}.{self.image_format}"))
         else:
             stem = stem or f"{self.events.tray_id}_{scan:03d}_{now.strftime('%H%M%S_%f')}"
@@ -178,23 +198,40 @@ class ImageArchive:
                 path=str(relative),
                 scan_index=scan,
                 task_id=task_id,
+                capture_id=capture_id, reason="queue_full",
             )
             return None
         try:
             future = self.executor.submit(
-                self._write,
+                self._write_with_context,
                 self.events.directory / relative,
                 image.copy(),
                 None if targets is None else list(targets),
+                capture_id, task_id,
             )
             future.add_done_callback(lambda future: self.slots.release())
         except Exception as exc:
             self.slots.release()
             record_image_error(self.events, str(relative), exc, task_id)
-            self.events.emit("image_dropped", kind=kind, path=str(relative), scan_index=scan, task_id=task_id)
+            self.events.emit("image_dropped", kind=kind, path=str(relative), scan_index=scan, task_id=task_id, capture_id=capture_id, reason=str(exc))
             return None
-        self.events.emit("image_submitted", kind=kind, path=str(relative), scan_index=scan, task_id=task_id)
+        if capture_id:
+            self.capture_paths[str(relative)] = capture_id
+        self.events.emit("image_submitted", kind=kind, path=str(relative), scan_index=scan, task_id=task_id, capture_id=capture_id)
         return str(relative)
+
+    def _write_with_context(self, path: Path, image: Any, targets: list[Any] | None,
+                            capture_id: str | None, task_id: int | None) -> None:
+        try:
+            self._write(path, image, targets)
+            data = path.read_bytes()
+            self.events.emit("image_written", capture_id=capture_id, task_id=task_id,
+                             path=str(path.relative_to(self.events.directory)), bytes=len(data),
+                             sha1=hashlib.sha1(data).hexdigest()[:12])
+        except Exception as exc:
+            record_image_error(self.events, str(path), exc, task_id)
+            self.events.emit("image_dropped", capture_id=capture_id, task_id=task_id,
+                             path=str(path.relative_to(self.events.directory)), reason=str(exc))
 
     def _write(self, path: Path, image: Any, targets: list[Any] | None) -> None:
         """压缩写原图或带序号、分数的叠加图，失败只告警。"""
@@ -226,14 +263,14 @@ class ImageArchive:
                         (0, 0, 255),
                         1,
                     )
-            if self.image_format == "png":
-                params = [cv2.IMWRITE_PNG_COMPRESSION, self.quality]
+            if path.suffix.lower() == ".png":
+                params = [cv2.IMWRITE_PNG_COMPRESSION, self.quality if self.image_format == "png" else 3]
             else:
-                params = [cv2.IMWRITE_JPEG_QUALITY, self.quality]
+                params = [cv2.IMWRITE_JPEG_QUALITY, self.quality if self.image_format == "jpg" else 95]
             if not cv2.imwrite(str(path), image, params):
                 raise OSError("图像编码或写入失败")
         except Exception as exc:
-            record_image_error(self.events, str(path), exc)
+            raise OSError(f"图像写入失败：{exc}") from exc
 
     def close(self) -> None:
         """等待已提交的图像写完。"""

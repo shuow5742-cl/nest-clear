@@ -32,9 +32,13 @@ class TraySummary:
     def start(self, row: dict[str, Any]) -> None:
         """按当天已有摘要和事件分配盘号。"""
         day = row["ts"][:10]
-        path = daily_file(self.events.directory, "events.jsonl", datetime.fromisoformat(row["ts"]).date())
+        day_date = datetime.fromisoformat(row["ts"]).date()
+        paths = [daily_file(self.events.directory, "events.jsonl", day_date)]
+        paths += list((self.events.directory / day).glob("*/events.jsonl"))
         numbers = []
-        if path.exists():
+        for path in paths:
+            if not path.exists():
+                continue
             for line in path.read_text(encoding="utf-8").splitlines():
                 try:
                     tray = json.loads(line).get("tray_id")
@@ -139,9 +143,9 @@ class TraySummary:
             "duration_s": duration,
             "net_s": max(0, duration - pause),
         }
-        path = daily_file(
+        path = (self.events.run_directory / "summary.jsonl" if self.events.run_directory else daily_file(
             self.events.directory, "summary.jsonl", datetime.fromisoformat(d["start_time"]).date()
-        )
+        ))
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -155,7 +159,8 @@ def write_tooltip_summary(events: EventRecorder, session: dict[str, Any], result
     """按会话结束日期追加对刀摘要，与日报的日期保持一致。"""
     now = events.clock()
     row = {**session, "end_time": now.isoformat(), "result": result, "reason": reason}
-    path = daily_file(events.directory, "tooltip_summary.jsonl", now.date())
+    path = (events.run_directory / "tooltip_summary.jsonl" if events.run_directory else
+            daily_file(events.directory, "tooltip_summary.jsonl", now.date()))
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")

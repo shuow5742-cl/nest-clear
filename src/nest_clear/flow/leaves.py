@@ -53,10 +53,12 @@ class WaitRequest(CallWorker):
             if self.failure_since is None:
                 self.failure_since = self.clock()
                 self.events.emit("plc_disconnected", reason=self._blackboard.read("error"), operation="poll")
+                self.events.plc("plc_disconnected", reason=self._blackboard.read("error"), failures=1)
             self.failures += 1
             return CallWorker.on_start(self)
         if self.failure_since is not None:
             self.events.emit("plc_restored", operation="poll", failures=self.failures, duration_s=self.clock() - self.failure_since)
+            self.events.plc("plc_restored", failures=self.failures, duration_s=self.clock() - self.failure_since)
             self.failure_since = None
             self.failures = 0
         task, func = self._blackboard.read("poll_result")
@@ -74,6 +76,8 @@ class WaitRequest(CallWorker):
         self._blackboard.write("started", self.clock(), self.name)
         self._blackboard.write("error", f"功能码 {func} 在当前状态不允许", self.name)
         self._blackboard.write("error_type", None, self.name)
+        self.events.begin_request(task, func)
+        self.events.plc("request", task_id=task, request_func=func)
         self.events.emit("request", task_id=task, func=func, name=REQUEST_NAMES.get(func, "未知功能码"))
         return Status.SUCCESS
 
@@ -180,7 +184,28 @@ class RecordCapture(Instant):
         path = None
         if archive is not None:
             try:
-                path = archive.raw(bb.read("image"), bb.read("next_index"), bb.read("task_id"), bb.read("work_action"))
+                if self.events.run_directory is not None:
+                    sequence, capture_id = self.events.next_capture()
+                    cycle = bb.read("work_cycle")
+                    stage = bb.read("work_action")
+                    view = cycle.view_index + 1
+                    shot = f"c{cycle.coarse_shots + 1:02d}" if stage == "coarse" else f"f{cycle.attempt_count + 1:02d}"
+                    tray = self.events.tray_id or "unknown"
+                    stem = f"{sequence:06d}_{stage}_t{tray}_v{view:02d}_{shot}"
+                    base = self.events.run_directory.relative_to(self.events.directory) / "images"
+                    raw = str(base / f"{stem}_raw.png") if archive.enabled else None
+                    overlay = str(base / f"{stem}_ovl.jpg") if archive.enabled else None
+                    bb.write("capture_id", capture_id, self.name)
+                    self.events.emit("capture", capture_id=capture_id, kind=stage, tray=tray,
+                                     view=view, shot=shot, task_id=bb.read("task_id"),
+                                     request_func=bb.read("request_func"), actual_xyz=bb.read("actual"),
+                                     target_xyz=bb.read("scan"), raw_path=raw, ovl_path=overlay,
+                                     queued_wall=self.events.clock().isoformat(), **bb.read("capture_meta"))
+                    path = archive.capture_raw(bb.read("image"), sequence=sequence, capture_id=capture_id,
+                                               kind=stage, tray=tray, view=view, shot=shot,
+                                               task_id=bb.read("task_id"))
+                else:
+                    path = archive.raw(bb.read("image"), bb.read("next_index"), bb.read("task_id"), bb.read("work_action"))
             except Exception as exc:
                 record_image_error(self.events, f"{bb.read('work_action')}原图", exc, bb.read("task_id"))
         bb.write("raw_path", path, self.name)

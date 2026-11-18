@@ -121,6 +121,7 @@ class Config:
     image_retention_days: int = 30
     image_queue_size: int = 32
     camera_image_size: tuple[int, int] = (4024, 3036)
+    machine_id: str = "M01"
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -337,6 +338,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "image_quality": 3,
             "image_retention_days": 30,
             "image_queue_size": 32,
+            "machine_id": "M01",
             **record_data,
         }
     record = _mapping(
@@ -349,6 +351,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "image_quality",
             "image_retention_days",
             "image_queue_size",
+            "machine_id",
         ],
     )
     if type(record["image_enabled"]) is not bool or record["image_format"] not in ("png", "jpg"):
@@ -509,4 +512,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         record["image_retention_days"],
         record["image_queue_size"],
         tuple(image_size),
+        _string(record["machine_id"], "record.machine_id"),
     )

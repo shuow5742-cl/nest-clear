@@ -1,6 +1,7 @@
 """实现请求读取和按提交顺序应答，衔接地址契约与寄存器传输。"""
 from collections.abc import Mapping
 import logging
+import time
 from typing import Any
 
 from .codec import encode_real32, encode_u16
@@ -33,6 +34,11 @@ class Handshake:
                 self.inconsistent_reads = 0
                 return task_id, func_code
             self.inconsistent_reads += 1
+            if self.events and hasattr(self.events, "plc"):
+                self.events.plc("task_id_inconsistent", task_id=task_id, first=task_id, second=second,
+                                failures=self.inconsistent_reads)
+                self.events.emit("task_id_inconsistent", task_id=task_id, first=task_id, second=second,
+                                 failures=self.inconsistent_reads)
             logger.debug("Task_ID 双读不一致 %s 次：%s → %s", self.inconsistent_reads, task_id, second)
             if self.inconsistent_reads % 5 == 0 and self.events:
                 self.events.emit("warning", operation="task_id_inconsistent", reason=f"Task_ID 双读连续 {self.inconsistent_reads} 次不一致，{task_id} → {second}；检查 PLC 更新时序")
@@ -41,6 +47,8 @@ class Handshake:
 
     def write_reply(self, task_id: int, func_code: int, payload: Mapping[str, Any] | None = None) -> None:
         """先验证全部数据，再按数据区、功能码、提交编号的顺序写入。"""
+        started = time.monotonic()
+        readback_result = "ok" if self.write_readback else "disabled"
         if self._readback_error_task == task_id:
             func_code = 999
             payload = {name: (0 if name == "removable_count" else [0, 0, 0]) for name in (payload or {})}
@@ -87,9 +95,13 @@ class Handshake:
             for address, wanted in expected:
                 actual = self.io.read_u16(address)
                 if actual != wanted:
+                    readback_result = "mismatch"
                     error = GuardError("COMM-READBACK", f"写后回读不一致：期望 {wanted}，实际 {actual}", f"Task_ID={task_id}，PLC 地址 {address}", "检查 PC-PLC 通信、寄存器映射及 PLC 是否覆盖写入值。")
                     if self.events:
                         self.events.emit("error", task_id=task_id, operation="write_readback", reason=str(error))
+                        if hasattr(self.events, "plc"):
+                            self.events.plc("readback_mismatch", task_id=task_id, address=address,
+                                            expected=wanted, actual=actual)
                     logger.error("%s", error)
                     self._readback_error_task = task_id
                     for block_address, values in blocks:
@@ -109,4 +121,8 @@ class Handshake:
         self.io.write_u16(self.contract["result_id"].address, task_id)
         self._readback_error_task = None
         self.last_reply_func = func_code
+        if self.events and hasattr(self.events, "plc"):
+            self.events.plc("reply", task_id=task_id, func=func_code, coordinates=dict(payload),
+                            removable_count=payload.get("removable_count"), readback=readback_result,
+                            elapsed_ms=round((time.monotonic() - started) * 1000, 3))
         logger.info("应答完成：Task_ID=%s，功能码=%s（%s），坐标=%s", task_id, func_code, REPLY_FUNCTION_NAMES.get(func_code, "未知功能码"), dict(payload))

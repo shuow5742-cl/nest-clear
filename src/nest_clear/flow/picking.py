@@ -90,7 +90,8 @@ class UnpackCapture(Instant):
         image, meta = value
         bb.write("image", image, self.name)
         bb.write("capture_meta", meta, self.name)
-        self.ctx.events.emit("capture", task_id=bb.read("task_id"), stage=bb.read("work_action"), **meta)
+        if self.ctx.events.run_directory is None:
+            self.ctx.events.emit("capture", task_id=bb.read("task_id"), stage=bb.read("work_action"), **meta)
 
 
 class PlaceholderWarning(Instant):
