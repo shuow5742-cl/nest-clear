@@ -241,7 +241,7 @@ class DetectTips(Instant):
         for view in ("front", "side"):
             paths["overlay"][view] = archive.calibration(
                 images[view], session["tool"], bb.read("task_id"), paths["iteration"], view,
-                points[view], targets[view], paths["raw"].get(view)) if archive and (self.ctx.events.run_directory is None or paths["raw"].get(view)) else None
+                points[view], targets[view], paths["raw"].get(view), focus=focus) if archive and (self.ctx.events.run_directory is None or paths["raw"].get(view)) else None
         bb.write("tooltip_points", points, self.name)
 
 

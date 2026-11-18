@@ -37,6 +37,7 @@ def test_midnight_and_summary(tmp_path: Path) -> None:
     events.emit("device_pause_end")
     events.emit("detection", count=2)
     events.emit("work_cycle", type="fine", reason="ok", fine_xyz=[0, 0, 0])
+    events.emit("reply_sent")
     mono[0] = 20
     events.emit("tray_end")
     first = json.loads((tmp_path / "2026-01-01/events.jsonl").read_text().splitlines()[0])
@@ -215,6 +216,7 @@ def test_recover_interrupted_checkpoint(tmp_path: Path) -> None:
     events.emit("request", task_id=1)
     mono[0] = 4
     events.emit("work_cycle", type="fine", reason="ok", fine_xyz=[0, 0, 0])
+    events.emit("reply_sent")
     TraySummary(EventRecorder(tmp_path, monotonic=lambda: 50.0))
     path = tmp_path / date.today().isoformat() / "summary.jsonl"
     row = json.loads(path.read_text())

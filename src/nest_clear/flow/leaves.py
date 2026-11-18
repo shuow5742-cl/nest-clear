@@ -15,7 +15,7 @@ from nest_clear.guard import GuardError
 from nest_clear.vision.hair_integration import render
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.events import EventRecorder
-from nest_clear.record.images import record_image_error
+from nest_clear.record.images import record_image_error, tray_number
 from .work_cycle import ProtocolViolation
 from .modes import Mode, transition
 
@@ -73,6 +73,9 @@ class WaitRequest(CallWorker):
         self._blackboard.write("task_id", task, self.name)
         self._blackboard.write("request_func", func, self.name)
         self._blackboard.write("raw_path", None, self.name)
+        self._blackboard.write("fine_render_data", None, self.name)
+        self._blackboard.write("capture_id", None, self.name)
+        self._blackboard.write("capture_sequence", None, self.name)
         self._blackboard.write("started", self.clock(), self.name)
         self._blackboard.write("error", f"功能码 {func} 在当前状态不允许", self.name)
         self._blackboard.write("error_type", None, self.name)
@@ -185,20 +188,25 @@ class RecordCapture(Instant):
         if archive is not None:
             try:
                 if self.events.run_directory is not None:
-                    sequence, capture_id = self.events.next_capture()
+                    sequence, capture_id = bb.read("capture_sequence"), bb.read("capture_id")
+                    if sequence is None or capture_id is None:
+                        sequence, capture_id = self.events.next_capture()
+                        if bb.read("work_action") == "fine":
+                            bb.read("work_cycle").begin_fine(capture_id, bb.read("task_id"), bb.read("request_func"), self.events.xid)
                     cycle = bb.read("work_cycle")
                     stage = bb.read("work_action")
                     view = cycle.view_index + 1
                     shot = f"c{cycle.coarse_shots + 1:02d}" if stage == "coarse" else f"f{cycle.attempt_count + 1:02d}"
+                    bb.write("capture_shot", shot, self.name)
                     tray = self.events.tray_id or "unknown"
-                    stem = f"{sequence:06d}_{stage}_t{tray}_v{view:02d}_{shot}"
+                    stem = f"{sequence:06d}_{stage}_t{tray_number(tray)}_v{view:02d}_{shot}"
                     base = self.events.run_directory.relative_to(self.events.directory) / "images"
                     raw = str(base / f"{stem}_raw.png") if archive.enabled else None
                     overlay = str(base / f"{stem}_ovl.jpg") if archive.enabled else None
                     bb.write("capture_id", capture_id, self.name)
                     meta = dict(bb.read("capture_meta"))
                     meta["capture_seq"] = sequence
-                    self.events.emit("capture", capture_id=capture_id, kind=stage, tray=tray,
+                    self.events.emit("capture", capture_id=capture_id, xid=self.events.xid, kind=stage, tray=tray,
                                      view=view, shot=shot, task_id=bb.read("task_id"),
                                      request_func=bb.read("request_func"), actual_xyz=bb.read("actual"),
                                      target_xyz=bb.read("scan"), raw_path=raw, ovl_path=overlay,
@@ -229,6 +237,8 @@ class PrepareError(Instant):
         reason = f"未知功能码 {func}" if self.unknown else bb.read("error")
         cycle = bb.read("work_cycle")
         error_type = bb.read("error_type")
+        if cycle is not None:
+            cycle.fine_not_sent(str(reason))
         if error_type != ProtocolViolation.__name__:
             state = cycle.state.value if cycle is not None else "IDLE"
             reason = f"当前状态 {state}，收到功能码 {func}，处理时出错：{error_type or '业务错误'}: {reason}"
@@ -275,6 +285,11 @@ class CommitReply(Instant):
             )
         if func in (1, 3):
             bb.write("last_action", func, self.name)
+        cycle = bb.read("work_cycle")
+        if func == 3 and cycle is not None:
+            cycle.mark_reply(bb.read("task_id"), getattr(self.events, "xid", 0), bb.read("reply_coordinates"))
+        elif cycle is not None and bb.read("reply_func") == 3:
+            cycle.fine_not_sent("挑取应答未提交")
         self.events.emit(
             "reply",
             task_id=bb.read("task_id"),
@@ -286,5 +301,23 @@ class CommitReply(Instant):
             raw_path=bb.read("raw_path"),
             elapsed_ms=round((time.monotonic() - bb.read("started")) * 1000, 3),
         )
+        render_data = bb.read("fine_render_data")
+        archive = getattr(self.events, "archive", None)
+        if render_data and archive:
+            try:
+                from dataclasses import replace
+                from nest_clear.vision.hair_integration import render_fine
+                info = dict(render_data["info"])
+                coordinates = bb.read("reply_coordinates") or {}
+                info.update(tool1=coordinates.get("pick1_xyz"), tool2=coordinates.get("pick2_xyz"))
+                result = render_data["result"] if func == 3 else replace(render_data["result"], pick_uv=None, target_xyz=None)
+                overlay = render_fine(render_data["image"], render_data["observations"], result,
+                                      render_data["pose"], render_data["calibration"], render_data["half_mm"],
+                                      info=info, coarse_uv=render_data["coarse_uv"])
+                archive.rendered(overlay, render_data["scan"], bb.read("task_id"), render_data["raw_path"],
+                                 render_data["preview"], capture_id=render_data["capture_id"])
+            except Exception as exc:
+                record_image_error(self.events, "精定位已提交应答叠加图", exc, bb.read("task_id"))
+            bb.write("fine_render_data", None, self.name)
         if func in (9, 10):
             self.events.emit("tray_end", task_id=bb.read("task_id"), scans=bb.read("next_index"))

@@ -27,7 +27,7 @@ def test_run_records_cross_midnight_and_archive(tmp_path):
     archive.close()
     assert events.run_id == "20260101_235959"
     assert events.run_directory.parent.name == "2026-01-01"
-    assert path.endswith("000001_coarse_t1_v01_c01_raw.png")
+    assert path.endswith("000001_coarse_t0001_v01_c01_raw.png")
     rows = [json.loads(line) for line in (events.run_directory / "events.jsonl").read_text().splitlines()]
     assert any(row["event"] == "image_written" and row["capture_id"] == capture_id for row in rows)
     assert all({"run_id", "machine_id", "wall", "mono", "seq_event"} <= row.keys() for row in rows)
@@ -91,7 +91,7 @@ def test_main_capture_records_pose_and_archive(tmp_path):
     from nest_clear.flow.leaves import RecordCapture
     from nest_clear.workers.camera import CameraWorker
     events = EventRecorder(tmp_path, run=True)
-    events.tray_id = "tray1"
+    events.tray_id = "2026-01-01_0001"
     events.begin_request(3, 20)
     archive = ImageArchive(events, True, "png", 3, 30)
     events.archive = archive
@@ -110,6 +110,9 @@ def test_main_capture_records_pose_and_archive(tmp_path):
     capture = next(row for row in rows if row["event"] == "capture")
     assert capture["actual_xyz"] == [1., 2., 3.] and capture["target_xyz"] == [1., 2., 3.]
     assert capture["capture_seq"] == 1 and capture["shot"] == "c01"
+    assert capture["xid"] == 1 and capture["request_func"] == 20
+    assert "t_before" not in capture and "t_after" not in capture
+    assert "_t0001_" in capture["raw_path"] and capture["tray"] == "2026-01-01_0001"
     assert (tmp_path / capture["raw_path"]).exists()
     assert any(row["event"] == "image_written" and row["capture_id"] == capture["capture_id"] for row in rows)
 

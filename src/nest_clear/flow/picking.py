@@ -1,5 +1,8 @@
 """将工作模式请求接入纯状态机及异步视觉处理。"""
 import logging
+from collections import Counter
+import math
+from datetime import datetime
 from typing import Any
 
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
@@ -15,6 +18,58 @@ from .leaves import CallWorker, CheckArrival, Instant, Predicate, RecordCapture
 from .work_cycle import WorkCycle
 
 logger = logging.getLogger("nest_clear.flow.picking")
+
+REASONS = {"short": "过短", "small": "面积过小", "thin": "过细", "pale": "颜色过浅"}
+
+
+def record_detection(ctx: FlowContext, bb: Any, cycle: WorkCycle, detection: dict,
+                     stage: str, view: int, coarse_target: Any = None) -> None:
+    """记录可复核的候选信息；日志失败不会改变状态转移。"""
+    try:
+        observations = detection.get("observations", [])
+        result = detection.get("fine_result")
+        if stage == "fine" and result is not None and coarse_target is not None:
+            cycle.match_observations(observations, bb.read("capture_id"), create=False)
+        ranked = {id(o): i for i, o in enumerate(cycle.targets, 1)}
+        candidates = []
+        for obs in observations:
+            candidate = obs.candidate
+            candidates.append({"target_id": getattr(obs, "target_id", None), "bbox_px": candidate.bbox,
+                "identity_px": candidate.identity_uv, "identity_xyz": obs.identity,
+                "pick_px": candidate.pick_uv, "pick_xyz": obs.target.xyz,
+                "length_mm": obs.length, "area_mm2": obs.area,
+                "width_mm": obs.area / obs.length if obs.length else 0,
+                "gray_ratio": candidate.gray_ratio, "dark_frac": candidate.dark_frac,
+                "gate_passed": obs.reason is None, "reject_reason": REASONS.get(obs.reason, obs.reason),
+                "responsibility": "OTHER" if obs.status == "other_view" else "本视野",
+                "status": obs.status, "rank": ranked.get(id(obs))})
+        counts = Counter(c["status"] for c in candidates)
+        rejections = Counter(c["reject_reason"] for c in candidates if c["reject_reason"])
+        fields = {"task_id": bb.read("task_id"), "request_func": bb.read("request_func"),
+                  "capture_id": bb.read("capture_id"), "kind": stage, "view": view + 1,
+                  "elapsed_ms": detection.get("elapsed_ms"), "count": len(candidates),
+                  "status_counts": dict(counts), "eligible_count": counts["eligible"],
+                  "other_view_count": counts["other_view"], "rejections": dict(rejections),
+                  "um_per_px": detection.get("um_per_px"), "z_mm": bb.read("actual")[2],
+                  "candidates": candidates}
+        if stage == "fine" and result is not None:
+            selected = next((obs for obs in observations if obs.candidate is result.candidate), None)
+            if selected is not None and getattr(selected, "target_id", None) != getattr(coarse_target, "target_id", None):
+                ctx.events.emit("match_ambiguous", task_id=bb.read("task_id"), capture_id=bb.read("capture_id"),
+                                target_id=getattr(coarse_target, "target_id", None),
+                                selected_target_id=getattr(selected, "target_id", None), reason="精定位选中目标与粗拍身份不一致")
+            fields.update(fine_box_half_mm=ctx.config.vision.fine_box_half_mm,
+                          selected_target_id=getattr(selected, "target_id", None),
+                          requested_target_id=getattr(coarse_target, "target_id", None),
+                          box_candidate_count=result.box_candidate_count,
+                          coarse_xyz=coarse_target.target.xyz if coarse_target else None,
+                          fine_xyz=result.target_xyz,
+                          coarse_fine_delta_mm=[b - a for a, b in zip(coarse_target.target.xyz, result.target_xyz)] if coarse_target and result.target_xyz is not None else None,
+                          offset_mm=math.dist(coarse_target.target.xyz[:2], result.target_xyz[:2]) if coarse_target and result.target_xyz is not None else None,
+                          failure_reason=None if result.status == "ok" else result.status)
+        ctx.events.emit("detection", **fields)
+    except Exception:
+        logger.exception("检测事件记录失败")
 
 
 class WorkRequest(Instant):
@@ -46,13 +101,21 @@ class WorkRequest(Instant):
                             raise GuardError("POSITION-TRAVEL", f"工具 {tool} 的 {axis} 轴目标值 {value} 超出行程范围 {bounds}", f"挑取坐标 Task_ID={bb.read('task_id')}", "检查工具补偿、目标和设备行程。")
                     result.append(xyz)
                 return result[0], result[1]
-            cycle = WorkCycle(self.ctx.path, fine_coord, pick_coords, self.ctx.config.vision)
+            def record(event: str, **fields: Any) -> None:
+                fields.setdefault("task_id", bb.read("task_id"))
+                fields.setdefault("request_func", bb.read("request_func"))
+                fields.setdefault("xid", getattr(self.ctx.events, "xid", 0))
+                self.ctx.events.emit(event, **fields)
+            cycle = WorkCycle(self.ctx.path, fine_coord, pick_coords, self.ctx.config.vision,
+                              record=record, tray=getattr(self.ctx.events, "tray_id", None) or "0000")
+            self.ctx.events.active_cycle = cycle
             bb.write("work_cycle", cycle, self.name)
         action = cycle.expect(bb.read("request_func"))
         bb.write("work_action", action, self.name)
         if action == "start":
             apply_reply(bb, cycle.start(), self.ctx)
         elif action == "picked":
+            cycle.mark_done(bb.read("task_id"), getattr(self.ctx.events, "xid", 0))
             apply_reply(bb, cycle.on_picked(), self.ctx)
 
 
@@ -94,6 +157,24 @@ class UnpackCapture(Instant):
             self.ctx.events.emit("capture", task_id=bb.read("task_id"), stage=bb.read("work_action"), **meta)
 
 
+class BeginCapture(Instant):
+    """在采图前建立身份，采图失败时仍能结束精定位尝试。"""
+    def __init__(self, ctx: FlowContext) -> None:
+        super().__init__(name="分配拍照身份")
+        self.ctx = ctx
+
+    def perform(self) -> None:
+        if getattr(self.ctx.events, "run_directory", None) is None:
+            return
+        bb = self._blackboard
+        sequence, capture_id = self.ctx.events.next_capture()
+        bb.write("capture_sequence", sequence, self.name)
+        bb.write("capture_id", capture_id, self.name)
+        if bb.read("work_action") == "fine":
+            bb.read("work_cycle").begin_fine(capture_id, bb.read("task_id"),
+                                             bb.read("request_func"), self.ctx.events.xid)
+
+
 class PlaceholderWarning(Instant):
     def __init__(self, ctx: FlowContext) -> None:
         super().__init__(name="检查占位标定放行")
@@ -117,23 +198,56 @@ class FinishCapture(Instant):
         cycle = bb.read("work_cycle")
         detection = bb.read("detection")
         stage = bb.read("work_action")
+        view = cycle.view_index
+        coarse_target = cycle.current_target() if stage == "fine" else None
         if stage == "coarse":
-            reply = cycle.on_coarse(bb.read("actual"), detection["observations"])
+            reply = cycle.on_coarse(bb.read("actual"), detection["observations"], bb.read("capture_id"))
         else:
             reply = cycle.on_fine(bb.read("actual"), detection["fine_result"])
+        record_detection(self.ctx, bb, cycle, detection, stage, view, coarse_target)
         # 状态转移和应答不受可选画面处理的异常影响。
         archive = getattr(self.ctx.events, "archive", None)
         if archive:
             try:
+                capture_meta = bb.read("capture_meta") or {}
+                timestamp = capture_meta.get("pc_time_after")
+                wall = datetime.fromtimestamp(timestamp).astimezone().isoformat() if timestamp is not None else ""
+                info = {"capture_id": bb.read("capture_id"), "wall": wall,
+                        "tray": getattr(self.ctx.events, "tray_id", None), "view": view + 1,
+                        "shot": bb.read("capture_shot"), "task_id": bb.read("task_id"),
+                        "eligible": sum(o.status == "eligible" for o in detection.get("observations", [])),
+                        "failed": sum(o.status == "failed" for o in detection.get("observations", [])),
+                        "um_per_px": detection.get("um_per_px")}
                 if stage == "coarse":
                     overlay = render(bb.read("image"), detection["observations"], None,
-                                     self.ctx.config.vision.ignore_regions_px, cycle.targets)
+                                     self.ctx.config.vision.ignore_regions_px, cycle.targets, info=info)
                 else:
-                    overlay = render_fine(bb.read("image"), detection.get("observations", []), detection["fine_result"],
-                                          bb.read("actual"), self.ctx.calibration, self.ctx.config.vision.fine_box_half_mm)
-                archive.rendered(overlay, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"),
-                                 self.ctx.config.vision.preview_window,
-                                 **({"capture_id": bb.read("capture_id")} if getattr(self.ctx.events, "run_directory", None) is not None else {}))
+                    import cv2
+                    import numpy as np
+                    from dataclasses import replace
+                    coarse_uv = None
+                    if coarse_target is not None:
+                        camera_xyz = (np.asarray(coarse_target.target.xyz) - (np.asarray(bb.read("actual")) + self.ctx.calibration.translation)) @ self.ctx.calibration.rotation
+                        uv, _ = cv2.projectPoints(camera_xyz.reshape(1, 3), np.zeros(3), np.zeros(3), self.ctx.calibration.K, self.ctx.calibration.distortion)
+                        coarse_uv = tuple(uv.reshape(2))
+                    info.update(attempt_id=cycle.active_attempt["attempt_id"] if cycle.active_attempt else None,
+                                tool1=None, tool2=None)
+                    result = detection["fine_result"]
+                    if getattr(self.ctx.events, "run_directory", None) is not None:
+                        bb.write("fine_render_data", {"image": bb.read("image"), "observations": detection.get("observations", []),
+                                 "result": result, "pose": bb.read("actual"), "calibration": self.ctx.calibration,
+                                 "half_mm": self.ctx.config.vision.fine_box_half_mm, "info": info,
+                                 "coarse_uv": coarse_uv, "capture_id": bb.read("capture_id"),
+                                 "raw_path": bb.read("raw_path"), "scan": bb.read("next_index"),
+                                 "preview": self.ctx.config.vision.preview_window}, self.name)
+                        result = replace(result, pick_uv=None, target_xyz=None)
+                    overlay = render_fine(bb.read("image"), detection.get("observations", []), result,
+                                          bb.read("actual"), self.ctx.calibration, self.ctx.config.vision.fine_box_half_mm,
+                                          info=info, coarse_uv=coarse_uv)
+                if stage != "fine" or getattr(self.ctx.events, "run_directory", None) is None:
+                    archive.rendered(overlay, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"),
+                                     self.ctx.config.vision.preview_window,
+                                     **({"capture_id": bb.read("capture_id")} if getattr(self.ctx.events, "run_directory", None) is not None else {}))
             except Exception as exc:
                 record_image_error(self.ctx.events, f"{stage}叠加图 {bb.read('raw_path')}", exc, bb.read("task_id"))
         apply_reply(bb, reply, self.ctx)
@@ -148,6 +262,7 @@ def work_branch(ctx: FlowContext) -> TreeNode:
         CheckArrival(ctx.config, ctx.events),
         Predicate("到位合格", lambda bb: bb.read("arrival_ok")),
         PlaceholderWarning(ctx),
+        BeginCapture(ctx),
         CallWorker(ctx.board, "camera", lambda bb: {"stage": bb.read("work_action"), "task_id": bb.read("task_id")}, "image", name="拍照"),
         UnpackCapture(ctx),
         RecordCapture(ctx.events),

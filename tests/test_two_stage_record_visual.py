@@ -23,12 +23,17 @@ def test_report_two_stage_events(tmp_path):
         rows.append({"event": kind, "tray_id": "t", **fields})
     for x in (1, 5):
         add("work_cycle", type="fine", reason="ok", view_index=0, coarse_xyz=[x, 0, 0], fine_xyz=[x, 0, 0])
+        add("reply_sent")
+    add("pick_result", outcome="failed", target_id="t-1-001")
+    add("pick_result", outcome="success", target_id="t-1-002")
     for reason in ("fine_empty", "fine_point_outside", "fine_rejected"):
         add("work_cycle", type="fine", reason=reason, view_index=0)
     add("work_cycle", type="coarse", view_index=0, red_xyz=[[1, 0, 0]], match_radius_mm=0.5,
         reason="cap", tool_change=True, attempts=3, tool_check_min_attempts=3,
         tool_check_total=2, tool_check_threshold=1)
     add("work_cycle", type="fine", reason="ok", view_index=1, coarse_xyz=[9, 0, 0], fine_xyz=[9, 0, 0])
+    add("reply_sent")
+    add("pick_result", outcome="pending", target_id="t-2-001")
     add("work_cycle", type="coarse", view_index=2, red_xyz=[], match_radius_mm=0.5, reason="coarse_limit")
     for code in (9, 10, 999):
         add("reply", func=code)

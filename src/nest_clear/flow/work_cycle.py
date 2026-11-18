@@ -42,6 +42,7 @@ class Attempt:
     coarse_xyz: XYZ
     fine_xyz: XYZ | None
     reason: str
+    target_id: str | None = None
 
 
 class WorkCycle:
@@ -53,7 +54,8 @@ class WorkCycle:
     """
 
     def __init__(self, views: list[XYZ], fine_coord: Callable[[XYZ, XYZ], XYZ],
-                 pick_coords: Callable[[XYZ], tuple[XYZ, XYZ]], params: Any) -> None:
+                 pick_coords: Callable[[XYZ], tuple[XYZ, XYZ]], params: Any,
+                 record: Callable[..., None] | None = None, tray: str = "0000") -> None:
         if not views:
             raise ValueError("视野列表不能为空")
         self._views = tuple(tuple(v) for v in views)
@@ -61,6 +63,11 @@ class WorkCycle:
         self._state = State.IDLE
         self._view_index = -1
         self._attempted: list[Attempt] = []
+        self.record = record or (lambda *args, **kwargs: None)
+        self.tray = tray
+        self.identities: dict[int, dict[str, XYZ]] = {}
+        self.attempts_ledger: list[dict[str, Any]] = []
+        self.active_attempt: dict[str, Any] | None = None
         self._reset_view()
 
     def _reset_view(self) -> None:
@@ -148,14 +155,113 @@ class WorkCycle:
         xyz = self.current_target().target.xyz
         return Reply(1, scan_xyz=self._fine_coord(xyz, self._coarse_pose), event=event)
 
-    def on_coarse(self, pose: XYZ, observations: list[Any]) -> Reply:
+    def match_observations(self, observations: list[Any], capture_id: str | None = None, *, create: bool = True) -> None:
+        """同视野按身份点最近距离一对一匹配。"""
+        known = self.identities.setdefault(self._view_index, {})
+        available = set(known)
+        for obs in observations:
+            if obs.status == "other_view":
+                continue
+            identity = tuple(getattr(obs, "identity", obs.target.xyz))
+            matches = sorted((math.dist(identity[:2], known[key][:2]), key) for key in available
+                             if math.dist(identity[:2], known[key][:2]) <= self._params.skip_radius_mm)
+            if matches:
+                distance, target_id = matches[0]
+                obs.match_distance_mm = distance
+                if len(matches) > 1:
+                    self.record("match_ambiguous", capture_id=capture_id, target_id=target_id,
+                                matches=[key for _, key in matches], threshold_mm=self._params.skip_radius_mm)
+                self.record("target_match", capture_id=capture_id, target_id=target_id,
+                            distance_mm=distance, threshold_mm=self._params.skip_radius_mm)
+                available.remove(target_id)
+            else:
+                if not create:
+                    continue
+                target_id = f"{self.tray}-{self._view_index + 1}-{len(known) + 1:03d}"
+            known[target_id] = identity
+            obs.target_id = target_id
+
+    def begin_fine(self, capture_id: str | None, task_id: int | None = None,
+                   request_func: int | None = None, xid: int | None = None) -> dict[str, Any]:
+        target = self.current_target()
+        target_id = getattr(target, "target_id", None)
+        if target_id is None:
+            self.match_observations([target])
+            target_id = target.target_id
+        count = sum(a["target_id"] == target_id for a in self.attempts_ledger) + 1
+        attempt = {"attempt_id": f"{target_id}#a{count}", "target_id": target_id,
+                   "view_index": self._view_index, "capture_id": capture_id,
+                   "coarse_capture_id": getattr(target, "capture_id", None),
+                   "identity": tuple(getattr(target, "identity", target.target.xyz)),
+                   "task_id": task_id, "request_func": request_func, "xid": xid,
+                   "sent": False, "done": False, "outcome": None}
+        self.attempts_ledger.append(attempt)
+        self.active_attempt = attempt
+        self.record("fine_capture", **attempt)
+        return attempt
+
+    def mark_reply(self, task_id: int, xid: int, coordinates: dict[str, Any]) -> None:
+        attempt = self.active_attempt
+        if attempt and attempt["outcome"] is None:
+            attempt.update(sent=True, reply_task_id=task_id, reply_xid=xid, coordinates=coordinates)
+            self.record("reply_sent", attempt_id=attempt["attempt_id"], target_id=attempt["target_id"],
+                        capture_id=attempt["capture_id"], task_id=task_id, xid=xid, coordinates=coordinates)
+            # 先记可替换的待判状态；异常断电时仍可从日志知道这次下发尚无复拍结论。
+            self.record("pick_result", target_id=attempt["target_id"], attempt_id=attempt["attempt_id"],
+                        capture_id=attempt["capture_id"], coarse_capture_id=attempt["coarse_capture_id"],
+                        task_id=task_id, request_func=attempt["request_func"], xid=xid,
+                        outcome="pending", reason="等待复拍")
+            attempt["pending_recorded"] = True
+
+    def mark_done(self, task_id: int, xid: int) -> None:
+        attempt = self.active_attempt
+        if attempt and attempt["sent"] and attempt["outcome"] is None:
+            attempt["done"] = True
+            self.record("plc_done", attempt_id=attempt["attempt_id"], target_id=attempt["target_id"],
+                        capture_id=attempt["capture_id"], task_id=task_id, request_func=60, xid=xid)
+
+    def _result(self, attempt: dict[str, Any], outcome: str, **fields: Any) -> None:
+        if attempt["outcome"] is not None:
+            return
+        attempt["outcome"] = outcome
+        self.record("pick_result", target_id=attempt["target_id"], attempt_id=attempt["attempt_id"],
+                    capture_id=attempt["capture_id"], coarse_capture_id=attempt["coarse_capture_id"],
+                    task_id=attempt["task_id"], request_func=attempt["request_func"], xid=attempt["xid"], outcome=outcome, **fields)
+
+    def pending(self) -> None:
+        for attempt in self.attempts_ledger:
+            if attempt["sent"] and attempt["outcome"] is None:
+                if attempt.get("pending_recorded"):
+                    attempt["outcome"] = "pending"
+                else:
+                    self._result(attempt, "pending", reason="离开视野或进程结束前未复拍")
+
+    def fine_not_sent(self, reason: str) -> None:
+        attempt = self.active_attempt
+        if attempt and not attempt["sent"] and attempt["outcome"] is None:
+            self._result(attempt, "not_sent", reason=reason)
+
+    def on_coarse(self, pose: XYZ, observations: list[Any], capture_id: str | None = None) -> Reply:
         self._require(State.WAIT_COARSE, 20)
         self._coarse_shots += 1
         self._coarse_pose = pose
+        self.match_observations(observations, capture_id)
+        matched = {getattr(o, "target_id", None): o for o in observations if o.status != "other_view"}
+        for attempt in self.attempts_ledger:
+            if attempt["view_index"] == self._view_index and attempt["done"] and attempt["outcome"] is None:
+                found = matched.get(attempt["target_id"])
+                distance = getattr(found, "match_distance_mm", None) if found else None
+                self._result(attempt, "failed" if found else "success", review_capture_id=capture_id,
+                             match_distance_mm=distance)
+        guard_red_count = 0
         for obs in observations:
+            obs.capture_id = capture_id
             if obs.status in ("eligible", "rejected", "failed", "attempted") and self.is_attempted(getattr(obs, "identity", obs.target.xyz)):
-                obs.status = "failed"
-        self._red_count = sum(o.status in ("failed", "attempted") for o in observations)
+                guard_red_count += 1
+                attempts = [a for a in self.attempts_ledger if a["target_id"] == getattr(obs, "target_id", None)]
+                outcome = attempts[-1]["outcome"] if attempts else None
+                obs.status = "failed" if outcome == "failed" else "fine_failed" if outcome == "not_sent" else "attempted"
+        self._red_count = guard_red_count + sum(o.status in ("failed", "attempted") for o in observations if not self.is_attempted(getattr(o, "identity", o.target.xyz)))
         eligible = sorted((o for o in observations if o.status == "eligible" and o.reason is None),
                           key=lambda o: o.area, reverse=True)
         count = len(eligible)
@@ -202,9 +308,18 @@ class WorkCycle:
             raise ValueError("精定位成功时缺少 target_xyz")
         # 注入的计算可能抛异常；成功后才提交状态。
         tools = self._pick_coords(fine) if fine is not None else None
+        attempt = self.active_attempt
+        if attempt is None or attempt["outcome"] is not None or attempt.get("fine_result") is not None:
+            attempt = self.begin_fine(None)
+        attempt["fine_result"] = result.status
+        self.record("fine_result", attempt_id=attempt["attempt_id"], target_id=attempt["target_id"],
+                    capture_id=attempt["capture_id"], task_id=attempt["task_id"], request_func=attempt["request_func"],
+                    xid=attempt["xid"], result=result.status)
+        if fine is None:
+            self._result(attempt, "not_sent", reason=result.status)
         identity = tuple(getattr(self.current_target(), "identity", coarse))
         fine_identity = tuple(result.identity) if result.identity is not None else None
-        self._attempted.append(Attempt(identity, fine_identity, result.status))
+        self._attempted.append(Attempt(identity, fine_identity, result.status, attempt["target_id"]))
         self._attempts += 1
         event = {"type": "fine", "view_index": self._view_index, "reason": result.status,
                  "coarse_xyz": coarse, "fine_xyz": fine, "pose": pose,

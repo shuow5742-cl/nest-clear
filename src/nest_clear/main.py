@@ -301,6 +301,9 @@ class Application:
         """释放时钟、相机和 PLC；当前流程没有设备动作收尾树。"""
         if self.clock is not None:
             self.clock.shutdown()
+        cycle = getattr(self.events, "active_cycle", None)
+        if cycle is not None:
+            cycle.pending()
         try:
             self.io.write("algorithm_ready", 0)
         except Exception as exc:

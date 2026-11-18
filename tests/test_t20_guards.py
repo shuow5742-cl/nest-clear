@@ -30,7 +30,7 @@ def test_size_and_metadata():
     with pytest.raises(GuardError, match='尺寸'): worker.execute({'stage':'fine'})
     worker.size = (4, 3)
     _, meta = worker.execute({'stage':'fine'})
-    assert meta['capture_seq'] and meta['t_after']['monotonic'] >= meta['t_before']['monotonic']
+    assert meta['capture_seq'] and meta['pc_mono_after'] >= meta['pc_mono_before']
 
 class Registers:
     def __init__(self): self.words = {}; self.writes = []; self.corrupt = False

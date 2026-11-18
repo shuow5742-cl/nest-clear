@@ -90,7 +90,7 @@ def test_full_tray_and_wrap(running, monkeypatch):
             return {"observations": observations}
         status = next(statuses)
         return {"fine_result": FineResult(status, target_xyz=(40., 0., 0.) if status == "ok" else None)}
-    monkeypatch.setattr("nest_clear.flow.picking.render", lambda image, *args: image)
+    monkeypatch.setattr("nest_clear.flow.picking.render", lambda image, *args, **kwargs: image)
     monkeypatch.setattr(VisionWorker, "execute", execute)
     records = plc.drive_tray(timeout_s=5)
     assert records[-1]["func_code"] == 9
@@ -215,6 +215,11 @@ def test_run_record_end_to_end(running):
     assert captures
     required = {"capture_id", "kind", "tray", "view", "shot", "task_id", "request_func", "xid", "actual_xyz", "target_xyz", "frame_id", "device_timestamp", "pc_time_before", "pc_time_after", "pc_mono_before", "pc_mono_after", "exposure_us", "gain_db", "width", "height", "flushed_frames", "raw_path", "ovl_path", "queued_wall"}
     written = [row for row in rows if row["event"] == "image_written"]
+    detections = [row for row in rows if row["event"] == "detection"]
+    assert detections and any(row["candidates"] for row in detections)
+    assert all(row.get("capture_id") for row in detections)
+    assert all({"target_id", "bbox_px", "identity_px", "identity_xyz", "pick_px", "pick_xyz", "status", "rank"} <= candidate.keys()
+               for row in detections for candidate in row["candidates"])
     for capture in captures:
         assert required <= capture.keys()
         assert (root / capture["raw_path"]).is_file()
@@ -236,7 +241,7 @@ def test_capture_failure_returns_999_and_context(running, monkeypatch, stage):
     plc, app, _, directory = running
     def broken():
         raise RuntimeError('Failed to capture image')
-    monkeypatch.setattr('nest_clear.flow.picking.render', lambda image, *args: image)
+    monkeypatch.setattr('nest_clear.flow.picking.render', lambda image, *args, **kwargs: image)
     monkeypatch.setattr(VisionWorker, 'execute', lambda worker, payload: {
         'observations': [SimpleNamespace(target=SimpleNamespace(xyz=(0., 0., 0.)),
                                          status='eligible', reason=None, area=3.)]})

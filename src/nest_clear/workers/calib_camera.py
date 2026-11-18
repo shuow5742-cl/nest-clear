@@ -8,6 +8,7 @@ from autoweaver.sensor.camera.base import CameraBase
 
 from nest_clear.devices.calib_cameras import CalibCamera
 from nest_clear.workers.camera import CameraWorker
+from nest_clear.record.images import tray_number
 
 
 class CaptureImages(dict):
@@ -73,11 +74,11 @@ class CalibCameraWorker(AsyncRequestWorker):
                     tray = self.events.tray_id or "none"
                     iteration = payload.get("iteration", 1)
                     kind, shot, view = f"calib_{name}", f"i{iteration:02d}", payload.get("view", 0)
-                    stem = f"{sequence:06d}_{kind}_t{tray}_v{view:02d}_{shot}"
+                    stem = f"{sequence:06d}_{kind}_t{tray_number(tray)}_v{view:02d}_{shot}"
                     base = self.events.run_directory.relative_to(self.events.directory) / "images"
                     enabled = archive is not None and archive.enabled
                     meta["capture_seq"] = sequence
-                    self.events.emit("capture", capture_id=capture_id, kind=kind, tray=tray,
+                    self.events.emit("capture", capture_id=capture_id, xid=self.events.xid, kind=kind, tray=tray,
                                      view=view, shot=shot, task_id=payload.get("task_id"),
                                      request_func=payload.get("request_func"), actual_xyz=payload.get("actual"),
                                      target_xyz=payload.get("target"), raw_path=str(base / f"{stem}_raw.png") if enabled else None,

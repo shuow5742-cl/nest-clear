@@ -20,6 +20,12 @@ from .events import EventRecorder
 logger = logging.getLogger("nest_clear.record.images")
 
 
+def tray_number(tray: str | None) -> str:
+    """文件名只保留盘序号；非盘内对刀用 0000。"""
+    suffix = (tray or "").rsplit("_", 1)[-1]
+    return f"{int(suffix):04d}" if suffix.isdigit() else "0000"
+
+
 def record_image_error(events: EventRecorder, image_name: str, exc: Exception,
                        task_id: int | None = None) -> None:
     """记录画面异常；事件记录失败也不能阻断业务应答。"""
@@ -81,7 +87,7 @@ class ImageArchive:
     def capture_raw(self, image: Any, *, sequence: int, capture_id: str, kind: str,
                     tray: str, view: int, shot: str, task_id: int) -> str | None:
         """为一次采图提交固定名称的 PNG 原图。"""
-        stem = f"{sequence:06d}_{kind}_t{tray}_v{view:02d}_{shot}"
+        stem = f"{sequence:06d}_{kind}_t{tray_number(tray)}_v{view:02d}_{shot}"
         return self._submit(image, None, view, task_id, None, stem, capture_id)
 
     def overlay(
@@ -162,11 +168,27 @@ class ImageArchive:
 
     def calibration(self, image: Any, tool: int, task_id: int, iteration: int,
                     view: str, point: tuple[float, float] | None = None,
-                    target: tuple[float, float] | None = None, raw_path: str | None = None) -> str | None:
+                    target: tuple[float, float] | None = None, raw_path: str | None = None,
+                    focus: dict[str, Any] | None = None) -> str | None:
         """提交对刀原图或针尖与目标像素叠加图，沿用同一限流队列。"""
         stem = f"calib_{tool}_{task_id}_{iteration}_{view}_{self.events.clock().strftime('%H%M%S_%f')}"
-        overlay = None if point is None else [(point, target)]
-        return self._submit(image, overlay, iteration, task_id, raw_path, stem)
+        if point is None:
+            return self._submit(image, None, iteration, task_id, raw_path, stem)
+        rendered = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
+        scale = max(.5, rendered.shape[1] / 1280)
+        width = max(1, round(2 * scale))
+        p, t = tuple(map(round, point)), tuple(map(round, target))
+        cv2.circle(rendered, p, max(4, round(8 * scale)), (0, 0, 255), width)
+        cv2.circle(rendered, t, max(4, round(8 * scale)), (0, 255, 0), width)
+        cv2.line(rendered, p, t, (255, 0, 0), width)
+        text = f"{self.capture_paths.get(raw_path or '', '')} iter={iteration} Task_ID={task_id}"
+        cv2.putText(rendered, text, (round(10*scale), round(24*scale)), cv2.FONT_HERSHEY_SIMPLEX, .55*scale, (0,255,255), width, cv2.LINE_AA)
+        if focus:
+            text = " ".join(f"{name}: {data.get('edge_width_px')}px {'OK' if data.get('focused') else 'BLUR'}" for name, data in focus.items())
+            cv2.putText(rendered, text, (round(10*scale), round(48*scale)), cv2.FONT_HERSHEY_SIMPLEX, .55*scale, (0,255,255), width, cv2.LINE_AA)
+        path = self._submit(rendered, [], iteration, task_id, raw_path, stem)
+        self.executor.submit(self._write_live, rendered.copy())
+        return path
 
     def _submit(
         self,

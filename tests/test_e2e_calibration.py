@@ -174,7 +174,7 @@ def test_finish_saves_compensation(rig, tool, monkeypatch):
         if cycle.view_index == 0 and not cycle.attempted:
             observations = [SimpleNamespace(target=SimpleNamespace(xyz=(1., 0., 0.)), status="eligible", reason=None, area=1.)]
         return {"observations": observations}
-    monkeypatch.setattr("nest_clear.flow.picking.render", lambda image, *args: image)
+    monkeypatch.setattr("nest_clear.flow.picking.render", lambda image, *args, **kwargs: image)
     monkeypatch.setattr(VisionWorker, "execute", work_vision)
     records = plc.drive_tray(timeout_s=5)
     assert records[-1]["func_code"] == 9

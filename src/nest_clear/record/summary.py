@@ -54,7 +54,8 @@ class TraySummary:
             "start_mono": row["mono"],
             "scans": 0,
             "targets": 0,
-            "eligible": 0, "success": 0, "failed": 0, "rejections": {}, "detection_ms": 0.0,
+            "eligible": 0, "success": 0, "failed": 0, "pending": 0, "not_sent": 0,
+            "rejections": {}, "detection_ms": 0.0,
             "picks": 0,
             "coarse_shots": 0, "fine_shots": 0, "fine_failures": {},
             "errors_999": 0,
@@ -86,24 +87,32 @@ class TraySummary:
             d["scans"] += 1
             d["targets"] += row["count"]
             d["eligible"] = d.get("eligible", 0) + row.get("eligible_count", 0)
-            d["detection_ms"] = d.get("detection_ms", 0) + row.get("elapsed_ms", 0)
+            d["detection_ms"] = d.get("detection_ms", 0) + (row.get("elapsed_ms") or 0)
             for reason, count in row.get("rejections", {}).items():
                 reasons = d.setdefault("rejections", {})
                 reasons[reason] = reasons.get(reason, 0) + count
         elif event == "pick_result":
-            key = "success" if row.get("success") else "failed"
-            d[key] = d.get(key, 0) + 1
+            key = row.get("outcome")
+            if key in ("success", "failed", "pending", "not_sent"):
+                outcomes = d.setdefault("outcome_by_attempt", {})
+                attempt_id = row.get("attempt_id")
+                previous = outcomes.get(attempt_id) if attempt_id else None
+                if previous in ("success", "failed", "pending", "not_sent"):
+                    d[previous] = max(0, d.get(previous, 0) - 1)
+                d[key] = d.get(key, 0) + 1
+                if attempt_id:
+                    outcomes[attempt_id] = key
         elif event == "image_dropped":
             d["images_dropped"] = d.get("images_dropped", 0) + 1
+        elif event == "reply_sent":
+            d["picks"] = (d.get("picks") if isinstance(d.get("picks"), int) else 0) + 1
         elif event == "error":
             d["last_error"] = row.get("reason", "未知")
         elif event == "work_cycle" and row.get("type") == "coarse":
             d["coarse_shots"] = d.get("coarse_shots", 0) + 1
         elif event == "work_cycle" and row.get("type") == "fine":
             d["fine_shots"] = d.get("fine_shots", 0) + 1
-            if row.get("reason") == "ok":
-                d["picks"] = (d.get("picks") if isinstance(d.get("picks"), int) else 0) + 1
-            else:
+            if row.get("reason") != "ok":
                 reasons = d.setdefault("fine_failures", {})
                 reason = row.get("reason", "未知")
                 reasons[reason] = reasons.get(reason, 0) + 1

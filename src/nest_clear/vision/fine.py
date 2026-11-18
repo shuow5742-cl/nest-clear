@@ -1,5 +1,5 @@
 """精定位坐标及工作面框内的候选挑选。"""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Callable, Literal
 
@@ -19,6 +19,7 @@ class FineResult:
     target_xyz: tuple[float, float, float] | None = None
     offset_mm: float | None = None
     identity: tuple[float, float, float] | None = None
+    box_candidate_count: int = 0
 
 
 def fine_camera_xy(target_xyz: tuple[float, float, float], pose: tuple[float, float, float],
@@ -40,6 +41,7 @@ def select_fine_target(image: np.ndarray, candidates: list[HairCandidate],
     center = pixel_to_module(calibration.K[0, 2], calibration.K[1, 2], pose, calibration)
     intersected = False
     eligible = False
+    box_candidate_count = 0
     best = None
     h, w = image.shape[:2]
     for c in candidates:
@@ -68,6 +70,7 @@ def select_fine_target(image: np.ndarray, candidates: list[HairCandidate],
                   (np.abs(xy[:, 1] - center[1]) <= box_half_mm))
         if not inside.any():
             continue
+        box_candidate_count += 1
         intersected = True
         if not passes_gate(c) or is_attempted(c):
             continue
@@ -89,6 +92,6 @@ def select_fine_target(image: np.ndarray, candidates: list[HairCandidate],
         if best is None or area > best[0]:
             best = (area, result)
     if best is not None:
-        return best[1]
+        return replace(best[1], box_candidate_count=box_candidate_count)
     return FineResult("fine_point_outside" if eligible else
-                      "fine_rejected" if intersected else "fine_empty")
+                      "fine_rejected" if intersected else "fine_empty", box_candidate_count=box_candidate_count)

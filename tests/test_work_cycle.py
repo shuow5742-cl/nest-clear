@@ -46,7 +46,7 @@ def test_multiview_and_failures():
         assert c.is_attempted((1. if i == 0 else 10. * i, 0, 0))
         previous = obs(1)
         r = c.on_coarse((0, 0, 5), [previous, obs(10 * (i + 1))] if i < 2 else [previous])
-        assert previous.status == "failed" and r.removable_count == (1 if i < 2 else 0)
+        assert previous.status == "fine_failed" and r.removable_count == (1 if i < 2 else 0)
     assert r.scan_xyz == (100., 0., 5.) and c.view_index == 1
     assert c.on_coarse((100, 0, 5), []).func_code == 9
     assert [a.reason for a in c.attempted] == ["ok", "fine_empty", "fine_point_outside", "fine_rejected"]
@@ -93,7 +93,7 @@ def test_tool_check(min_attempts, red, expected):
 
 @pytest.mark.parametrize("status, reason, expected_status, red, code", [
     ("other_view", None, "other_view", 0, 9),
-    ("rejected", "small", "failed", 1, 10),
+    ("rejected", "small", "attempted", 1, 10),
 ])
 def test_attempted_observation_respects_responsibility(status, reason, expected_status, red, code):
     c = cycle(tool_check_min_attempts=1, cap_ratio=1)
@@ -156,7 +156,7 @@ def test_attempt_matching_uses_identity_not_pick():
     repeat = obs(20)
     repeat.identity = (1.02, 0., 0.)
     c.on_coarse((0, 0, 5), [repeat])
-    assert repeat.status == 'failed'
+    assert repeat.status == 'fine_failed'
     assert not c.is_attempted((10., 0., 0.))
 
 

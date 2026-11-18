@@ -1,5 +1,4 @@
 """相机采图守卫及可追溯采图信息。"""
-from datetime import datetime, timezone
 from dataclasses import asdict
 import itertools
 import logging
@@ -129,7 +128,6 @@ class CameraWorker(AsyncRequestWorker):
     def execute(self, payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         stage = {"coarse": "粗拍", "fine": "精定位"}.get(payload.get("stage"), payload.get("stage", "未知阶段"))
         where = f"相机角色={self.role}，SN={self.sn}，阶段={stage}，Task_ID={payload.get('task_id')}"
-        before = {"monotonic": time.monotonic(), "wall": datetime.now(timezone.utc).isoformat()}
         result: queue.Queue = queue.Queue(maxsize=1)
         def capture() -> None:
             try:
@@ -188,9 +186,7 @@ class CameraWorker(AsyncRequestWorker):
             for key, feature in (("exposure_us", "ExposureTime"), ("gain_db", "Gain")):
                 if metadata[key] is None:
                     metadata[key] = read(feature)
-            return image, {"capture_seq": next(_sequence), "t_before": before,
-                           "t_after": {"monotonic": time.monotonic(), "wall": datetime.now(timezone.utc).isoformat()},
-                           **metadata, "settings": self.settings}
+            return image, {"capture_seq": next(_sequence), **metadata, "settings": self.settings}
         except Exception as exc:
             raise GuardError("CAMERA-CAPTURE", f"采图失败：{exc}", where, "检查相机连接、触发、图像尺寸和标定；超时后重开相机。") from exc
 

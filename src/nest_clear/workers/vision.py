@@ -139,6 +139,9 @@ class VisionWorker(AsyncRequestWorker):
                     passes_gate=lambda c: by_candidate[id(c)].reason is None,
                     cfg=self.detector.config if isinstance(self.detector, HairDetector) else self.config.hair_detector,
                 )
+            result["elapsed_ms"] = (time.perf_counter() - start) * 1000
+            result["um_per_px"] = (self.detector.config.um_per_px if isinstance(self.detector, HairDetector)
+                                  else scale_um_per_px(self.calibration, self.calibration.plane_z, pose[2]))
             return result
         result = None
         warnings = []

@@ -112,11 +112,32 @@ def _log_groups(root: str | Path, day: date) -> tuple[Counter, list[str]]:
 
 
 def _work_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """按下一次同视野粗拍结算已下发目标；未复拍保留待判定。"""
+    """消费工作事件与明确的 pick_result，不从坐标反推结局。"""
     stats = {"coarse": 0, "fine": 0, "picks": 0, "success": 0, "failed": 0,
-             "fine_failures": Counter(), "limits": [], "checks": [], "replies": Counter()}
-    pending = []
+             "pending": 0, "not_sent": 0, "fine_failures": Counter(), "limits": [], "checks": [],
+             "replies": Counter(), "rejections": Counter(), "missing": 0, "failed_targets": [], "ambiguous": 0}
+    captures = {r.get("capture_id"): r for r in rows if r.get("event") == "capture"}
+    latest_outcomes = {r.get("attempt_id"): r for r in rows
+                       if r.get("event") == "pick_result" and r.get("attempt_id")}
     for row in rows:
+        event = row.get("event")
+        if event == "pick_result" and row.get("outcome") in ("success", "failed", "pending", "not_sent"):
+            if row.get("attempt_id") and latest_outcomes.get(row["attempt_id"]) is not row:
+                continue
+            stats[row["outcome"]] += 1
+            if row["outcome"] == "failed":
+                first = row.get("coarse_capture_id") or row.get("capture_id")
+                names = [Path(captures.get(key, {}).get("raw_path") or "").name
+                         for key in (first, row.get("review_capture_id"))]
+                stats["failed_targets"].append((row.get("target_id"), names))
+        elif event == "detection":
+            stats["rejections"].update(row.get("rejections", {}))
+        elif event == "image_dropped":
+            stats["missing"] += 1
+        elif event == "match_ambiguous":
+            stats["ambiguous"] += 1
+        elif event == "reply_sent":
+            stats["picks"] += 1
         if row.get("event") == "reply" and row.get("func") in (9, 10, 999):
             stats["replies"][row["func"]] += 1
         if row.get("event") != "work_cycle":
@@ -126,26 +147,12 @@ def _work_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
             stats["fine"] += 1
             if row.get("reason") != "ok":
                 stats["fine_failures"][row.get("reason")] += 1
-            elif row.get("fine_xyz") is not None:
-                stats["picks"] += 1
-                pending.append(row)
         elif kind == "coarse":
             stats["coarse"] += 1
-            remaining = []
-            for attempt in pending:
-                if attempt.get("view_index") != row.get("view_index"):
-                    remaining.append(attempt)
-                    continue
-                points = [attempt.get("coarse_xyz"), attempt.get("fine_xyz")]
-                failed = any(math.dist(point[:2], red[:2]) <= row.get("match_radius_mm", 0)
-                             for point in points if point is not None for red in row.get("red_xyz", []))
-                stats["failed" if failed else "success"] += 1
-            pending = remaining
             if row.get("reason") in ("cap", "coarse_limit"):
                 stats["limits"].append((row.get("view_index"), row.get("reason")))
             if row.get("reason") in ("empty", "cap", "coarse_limit"):
                 stats["checks"].append({key: row.get(key) for key in ("view_index", "tool_change", "attempts", "tool_check_min_attempts", "tool_check_total", "tool_check_threshold")})
-    stats["pending"] = len(pending)
     return stats
 
 
@@ -170,12 +177,23 @@ def report(root: str | Path, day: date) -> str:
     for tray_id in tray_ids:
         tray = next((row for row in trays if row.get("tray_id") == tray_id), {})
         stats = _work_stats([row for row in tray_events if row.get("tray_id") == tray_id])
+        settled = stats["success"] + stats["failed"]
+        rate = f"{stats['success'] / settled:.1%}" if settled else "无"
         status = "正常结束" if tray.get("status") == "normal" else "中断或进行中"
         lines.append(f"盘 {tray_id}：{status}，净耗时 {tray.get('net_s', 0):.1f} 秒，粗拍 {stats['coarse']} 次，精定位 {stats['fine']} 次，"
                      f"精定位失败 {dict(stats['fine_failures'])}，挑取 {stats['picks']} 次，"
                      f"成功 {stats['success']}、失败 {stats['failed']}、待判定 {stats['pending']}，"
+                     f"未下发 {stats['not_sent']}，成功率 {rate}，拒绝原因 {dict(stats['rejections'])}，缺图 {stats['missing']}，"
                      f"上限视野 {stats['limits']}，回 10 判定 {stats['checks']}，"
                      f"回 9/10/999 次数 {stats['replies'].get(9, 0)}/{stats['replies'].get(10, 0)}/{stats['replies'].get(999, 0)}")
+        for target_id, names in stats["failed_targets"]:
+            lines.append(f"  失败目标 {target_id}：{names[0]} → {names[1]}")
+        if stats["missing"]:
+            attention.append(f"盘 {tray_id} 缺图 {stats['missing']} 张")
+        if stats["picks"] and stats["pending"] / stats["picks"] > .2:
+            attention.append(f"盘 {tray_id} 待判定超过 20%：{stats['pending']}/{stats['picks']}")
+        if stats["ambiguous"]:
+            attention.append(f"盘 {tray_id} 身份匹配歧义 {stats['ambiguous']} 次")
         if tray and tray.get("status") != "normal":
             attention.append(f"{_time(tray.get('end_time', ''))} 中断的盘 {tray_id}")
     lines.append("工具标定：")
