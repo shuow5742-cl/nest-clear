@@ -116,6 +116,8 @@ def _work_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     stats = {"coarse": 0, "fine": 0, "picks": 0, "success": 0, "failed": 0,
              "pending": 0, "not_sent": 0, "fine_failures": Counter(), "limits": [], "checks": [],
              "replies": Counter(), "rejections": Counter(), "missing": 0, "failed_targets": [], "ambiguous": 0}
+    out_ids = set()
+    out_unidentified = 0
     captures = {r.get("capture_id"): r for r in rows if r.get("event") == "capture"}
     latest_outcomes = {r.get("attempt_id"): r for r in rows
                        if r.get("event") == "pick_result" and r.get("attempt_id")}
@@ -132,6 +134,13 @@ def _work_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 stats["failed_targets"].append((row.get("target_id"), names))
         elif event == "detection":
             stats["rejections"].update(row.get("rejections", {}))
+            if row.get("kind") == "coarse":
+                for candidate in row.get("candidates", []):
+                    if candidate.get("status") == "out_of_range":
+                        if candidate.get("target_id"):
+                            out_ids.add(candidate["target_id"])
+                        else:
+                            out_unidentified += 1
         elif event == "image_dropped":
             stats["missing"] += 1
         elif event == "match_ambiguous":
@@ -153,6 +162,7 @@ def _work_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 stats["limits"].append((row.get("view_index"), row.get("reason")))
             if row.get("reason") in ("empty", "cap", "coarse_limit"):
                 stats["checks"].append({key: row.get(key) for key in ("view_index", "tool_change", "attempts", "tool_check_min_attempts", "tool_check_total", "tool_check_threshold")})
+    stats["out_of_range"] = len(out_ids) + out_unidentified
     return stats
 
 
@@ -183,7 +193,7 @@ def report(root: str | Path, day: date) -> str:
         lines.append(f"盘 {tray_id}：{status}，净耗时 {tray.get('net_s', 0):.1f} 秒，粗拍 {stats['coarse']} 次，精定位 {stats['fine']} 次，"
                      f"精定位失败 {dict(stats['fine_failures'])}，挑取 {stats['picks']} 次，"
                      f"成功 {stats['success']}、失败 {stats['failed']}、待判定 {stats['pending']}，"
-                     f"未下发 {stats['not_sent']}，成功率 {rate}，拒绝原因 {dict(stats['rejections'])}，缺图 {stats['missing']}，"
+                     f"未下发 {stats['not_sent']}，范围外 {stats['out_of_range']} 根，成功率 {rate}，拒绝原因 {dict(stats['rejections'])}，缺图 {stats['missing']}，"
                      f"上限视野 {stats['limits']}，回 10 判定 {stats['checks']}，"
                      f"回 9/10/999 次数 {stats['replies'].get(9, 0)}/{stats['replies'].get(10, 0)}/{stats['replies'].get(999, 0)}")
         for target_id, names in stats["failed_targets"]:

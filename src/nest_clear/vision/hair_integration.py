@@ -51,8 +51,8 @@ def measure(c: HairCandidate, pose: tuple[float, float, float], calibration: Cal
 
 # OpenCV BGR：绿=要挑，黄=物理门拒绝，红=挑取失败；青=曾判成功但又出现（仍跳过并告警）。
 COLORS = {"eligible": (0, 255, 0), "rejected": (0, 255, 255),
-          "failed": (0, 0, 255), "fine_failed": (0, 165, 255), "attempted": (255, 255, 0), "other_view": (128, 128, 128)}
-LABELS = {"eligible": "PICK", "rejected": "skip", "failed": "FAILED", "fine_failed": "FINE FAIL", "attempted": "PENDING", "other_view": "OTHER"}
+          "failed": (0, 0, 255), "fine_failed": (0, 165, 255), "attempted": (255, 255, 0), "other_view": (128, 128, 128), "out_of_range": (255, 0, 0)}
+LABELS = {"eligible": "PICK", "rejected": "skip", "failed": "FAILED", "fine_failed": "FINE FAIL", "attempted": "PENDING", "other_view": "OTHER", "out_of_range": "OUT"}
 
 
 def _chinese(image: np.ndarray, text: str, origin: tuple[int, int], color: tuple[int, int, int], size: int) -> None:
@@ -98,10 +98,10 @@ def _legend(image: np.ndarray, entries: tuple[tuple[str, tuple[int, int, int]], 
 
 COARSE_LEGEND = (("PICK", COLORS["eligible"]), ("GATE", COLORS["rejected"]),
                  ("FAILED", COLORS["failed"]), ("FINE FAIL", COLORS["fine_failed"]),
-                 ("PENDING", COLORS["attempted"]), ("OTHER", COLORS["other_view"]))
+                 ("PENDING", COLORS["attempted"]), ("OTHER", COLORS["other_view"]), ("OUT", COLORS["out_of_range"]))
 
 
-def render(image: np.ndarray, observations: list[Observation], selected: Observation | None = None, ignore_regions: tuple[tuple[float, ...], ...] = (), targets: tuple[Observation, ...] = (), *, info: dict | None = None, legend: bool = True, header: bool = True) -> np.ndarray:
+def render(image: np.ndarray, observations: list[Observation], selected: Observation | None = None, ignore_regions: tuple[tuple[float, ...], ...] = (), targets: tuple[Observation, ...] = (), *, info: dict | None = None, legend: bool = True, header: bool = True, pick_region=None, pose=None, calibration=None) -> np.ndarray:
     """按画面尺寸缩放标注，显示每个候选和本次选中目标的扎点。"""
     image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
     factor = max(0.5, image.shape[1] / 1280.0)
@@ -117,6 +117,30 @@ def render(image: np.ndarray, observations: list[Observation], selected: Observa
         for y in range(y1, y2, 2 * dash):
             cv2.line(image, (x1, y), (x1, min(y + dash, y2)), (128, 128, 128), 1)
             cv2.line(image, (x2, y), (x2, min(y + dash, y2)), (128, 128, 128), 1)
+    if pick_region is not None and pose is not None and calibration is not None:
+        (xmin, xmax), (ymin, ymax) = pick_region
+        normal, plane_point = calibration.plane_normal, calibration.plane_point
+        if abs(normal[2]) < 1e-12:
+            raise ValueError("工作平面无法按 XY 投影可挑范围")
+        corners = np.array([(x, y, plane_point[2] - (normal[0] * (x - plane_point[0]) + normal[1] * (y - plane_point[1])) / normal[2])
+                            for x, y in ((xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax))])
+        camera = (corners - (np.asarray(pose) + calibration.translation)) @ calibration.rotation
+        if np.all(camera[:, 2] > 1e-12):
+            uv, _ = cv2.projectPoints(camera, np.zeros(3), np.zeros(3), calibration.K, calibration.distortion)
+            points = uv.reshape(-1, 2)
+            if np.isfinite(points).all() and np.max(np.abs(points)) < 1e7:
+                points = np.rint(points).astype(int)
+                dash = max(4, round(10 * factor))
+                for a, b in zip(points, np.roll(points, -1, axis=0)):
+                    visible, start, end = cv2.clipLine((0, 0, image.shape[1], image.shape[0]), tuple(a), tuple(b))
+                    if visible:
+                        start, end = np.array(start), np.array(end)
+                        length = float(np.linalg.norm(end - start))
+                        if length:
+                            for d in np.arange(0, length, 2 * dash):
+                                p1 = start + (end - start) * (d / length)
+                                p2 = start + (end - start) * (min(d + dash, length) / length)
+                                cv2.line(image, tuple(np.rint(p1).astype(int)), tuple(np.rint(p2).astype(int)), (255, 0, 0), line_width)
     for observation in observations:
         candidate = getattr(observation, "candidate", None)
         if candidate is None:
@@ -155,6 +179,8 @@ def render(image: np.ndarray, observations: list[Observation], selected: Observa
                 cv2.putText(image, str(index), (x1, min(image.shape[0]-1, y1 + round(20*factor))), cv2.FONT_HERSHEY_SIMPLEX, 0.6*factor, (255, 255, 255), line_width)
         point = tuple(map(round, candidate.pick_uv))
         cv2.drawMarker(image, point, color, cv2.MARKER_CROSS, max(7, round(18 * factor)), line_width)
+        if observation.status == "out_of_range":
+            _chinese(image, "范围外", (x1, y2 + 2), color, max(12, round(20*factor)))
         if observation.status == "fine_failed":
             _chinese(image, "精定位失败", (x1, y2 + 2), color, max(12, round(20*factor)))
         if observation is selected:
@@ -215,7 +241,7 @@ def render_fine(image: np.ndarray, observations: list[Observation], result: obje
             cv2.putText(output, text, (round(10*factor), round(25*i*factor)), cv2.FONT_HERSHEY_SIMPLEX, .55*factor, (255,255,255), max(1,round(factor)), cv2.LINE_AA)
         if tool1 is None or tool2 is None:
             reason = info.get("not_sent_reason") or getattr(result, "status", "unknown")
-            reasons = {"fine_empty": "空框", "fine_rejected": "门拒", "fine_point_outside": "点在框外",
+            reasons = {"fine_empty": "空框", "fine_rejected": "门拒", "fine_point_outside": "点在框外", "fine_out_of_range": "超出可挑范围",
                        "ok": "等待下发", "reply_failed": "应答未提交"}
             _chinese(output, f"未下发：{reasons.get(reason, reason)}", (round(10*factor), round(80*factor)), (255,255,255), max(12,round(18*factor)))
     _legend(output, (("FINE BOX", (255,0,255)), ("PRINCIPAL", (255,255,255)),

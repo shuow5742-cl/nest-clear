@@ -274,3 +274,40 @@ def test_capture_failure_returns_999_and_context(running, monkeypatch, stage):
     rows = [json.loads(line) for line in next(directory.glob('*/*/events.jsonl')).read_text().splitlines()]
     event = next(row for row in rows if row['event'] == 'error' and row.get('task_id') == task)
     assert all(value in event['reason'] for value in (app.config.camera_sn, '粗拍' if stage == 'coarse' else '精定位', str(task), '取图超时'))
+
+
+def test_pick_region_over_tcp(running, monkeypatch):
+    """范围外候选不写入可去数，精定位越界时不下发挑取坐标。"""
+    from nest_clear.flow.work_cycle import WorkCycle
+    from nest_clear.vision.fine import FineResult
+    from nest_clear.vision.detector import ModuleTarget
+    from nest_clear.vision.hair import HairCandidate
+    from nest_clear.vision.hair_integration import Observation
+    from nest_clear.workers.vision import VisionWorker
+
+    plc, app, _, _ = running
+    monkeypatch.setattr(WorkCycle, 'in_pick_region', lambda self, xyz: 0 <= xyz[0] <= 20)
+
+    def execute(worker, payload):
+        cycle = payload['cycle']
+        if payload['work_action'] == 'fine':
+            return {'observations': [], 'fine_result': FineResult('ok', target_xyz=(30., 0., 0.))}
+        observations = []
+        if cycle.view_index == 0 and cycle.attempt_count == 0:
+            for x in (10., 30.):
+                u, v = int(300 + x * 10), 1000
+                candidate = HairCandidate((u, v), None, ((u-10,v-5),(u+10,v-5),(u+10,v+5),(u-10,v+5)),
+                                          (u-10,v-5,u+10,v+5), (u,v), 20, 200, .4, .6, None, 'test')
+                observations.append(Observation(ModuleTarget(PixelTarget(u, v, .9), (x, 0., 0.)),
+                                                (x, 0., 0.), candidate, 3., 20., None))
+        return {'observations': observations}
+
+    monkeypatch.setattr(VisionWorker, 'execute', execute)
+    records = plc.drive_tray(timeout_s=5)
+    assert records[-1]['func_code'] == 9
+    assert all(row['func_code'] != 3 for row in records)
+    events = [json.loads(line) for line in (app.events.run_directory / 'events.jsonl').read_text().splitlines()]
+    coarse = next(row for row in events if row.get('event') == 'detection' and row.get('kind') == 'coarse' and row.get('count') == 2)
+    assert coarse['eligible_count'] == 1
+    assert any(c['status'] == 'out_of_range' for c in coarse['candidates'])
+    assert any(row.get('event') == 'fine_result' and row.get('result') == 'fine_out_of_range' for row in events)

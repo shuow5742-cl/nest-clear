@@ -50,6 +50,7 @@ vision:
   max_coarse_shots_per_view: 30  # 单视野粗拍防循环上限
   scale_z_bin_mm: 0.1  # 拍照高度按此间隔分档，避免坐标抖动反复计算
   responsibility_zone: true  # 按离扎点最近的视野中心分配；false 恢复原行为
+  pick_region_mm: null  # 模组 XY 可挑矩形，例如 {x: [0, 100], y: [0, 80]}；null 不限制
   ignore_regions_px: []  # 像素矩形 [x1,y1,x2,y2]，现场按针尖实际位置填写
   detector: hair  # 检测器：hair 为生产默认值，stub 用于仿真
   allow_placeholder_calibration: false  # 默认禁止占位相机标定下发坐标；仿真可设 true

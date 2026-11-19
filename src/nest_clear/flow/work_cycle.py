@@ -241,10 +241,17 @@ class WorkCycle:
         if attempt and not attempt["sent"] and attempt["outcome"] is None:
             self._result(attempt, "not_sent", reason=reason)
 
+    def in_pick_region(self, xyz: XYZ) -> bool:
+        region = getattr(self._params, "pick_region_mm", None)
+        return region is None or all(low <= value <= high for value, (low, high) in zip(xyz[:2], region))
+
     def on_coarse(self, pose: XYZ, observations: list[Any], capture_id: str | None = None) -> Reply:
         self._require(State.WAIT_COARSE, 20)
         self._coarse_shots += 1
         self._coarse_pose = pose
+        for obs in observations:
+            if obs.status != "other_view" and not self.in_pick_region(getattr(obs, "identity", obs.target.xyz)):
+                obs.status = "out_of_range"
         self.match_observations(observations, capture_id)
         matched = {getattr(o, "target_id", None): o for o in observations if o.status != "other_view"}
         for attempt in self.attempts_ledger:
@@ -300,12 +307,16 @@ class WorkCycle:
 
     def on_fine(self, pose: XYZ, result: Any) -> Reply:
         self._require(State.WAIT_FINE, 20)
-        if result.status not in ("ok", "fine_empty", "fine_point_outside", "fine_rejected"):
+        if result.status not in ("ok", "fine_empty", "fine_point_outside", "fine_rejected", "fine_out_of_range"):
             raise ValueError(f"未知精定位结果：{result.status}")
         coarse = tuple(self.current_target().target.xyz)
         fine = tuple(result.target_xyz) if result.status == "ok" and result.target_xyz is not None else None
         if result.status == "ok" and fine is None:
             raise ValueError("精定位成功时缺少 target_xyz")
+        if fine is not None and not self.in_pick_region(fine):
+            from dataclasses import replace
+            result = replace(result, status="fine_out_of_range")
+            fine = None
         # 注入的计算可能抛异常；成功后才提交状态。
         tools = self._pick_coords(fine) if fine is not None else None
         attempt = self.active_attempt

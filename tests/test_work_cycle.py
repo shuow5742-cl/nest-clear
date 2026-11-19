@@ -168,3 +168,17 @@ def test_attempt_matches_either_coarse_or_fine_identity():
     assert c.is_attempted((1.05, 0, 0))
     assert c.is_attempted((9.05, 0, 0))
     assert not c.is_attempted((5., 0, 0))
+
+
+def test_pick_region_excludes_counts_and_preserves_other_priority():
+    c = cycle(pick_region_mm=((0, 2), (-1, 1)), tool_check_min_attempts=1, cap_ratio=1)
+    c.start()
+    inside, outside, other = obs(2), obs(3, 100), obs(4, 100, 'other_view')
+    reply = c.on_coarse((0, 0, 5), [inside, outside, other])
+    assert (reply.removable_count, c.n0, c.targets) == (1, 1, (inside,))
+    assert (outside.status, other.status) == ('out_of_range', 'other_view')
+    reply = fine(c, 3)
+    assert reply.func_code == 1 and reply.tool1_xyz is None
+    assert reply.event['reason'] == 'fine_out_of_range'
+    reply = c.on_coarse((0, 0, 5), [obs(3), obs(4)])
+    assert reply.func_code == 9 and reply.event['tool_check_total'] == 0

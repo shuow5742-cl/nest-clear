@@ -178,3 +178,49 @@ def test_z_scale_cache_binning_and_bound(caplog):
         assert len(detector.cache) == 16 and 0 not in detector.cache
         detector.for_z(0.0)
         assert sum('拍照 Z 分档=0.0' in x.message for x in caplog.records) == 1
+
+
+def test_out_of_range_blue_and_projected_dashes(calibration):
+    o = measure(candidate(w=10, h=5), (0, 0, 0), calibration, HairDetectConfig())
+    o.status = 'out_of_range'
+    img = render(np.zeros((60, 60, 3), np.uint8), [o], legend=False, header=False)
+    assert tuple(img[0, 0]) == (255, 0, 0)
+    img = render(np.zeros((60, 60, 3), np.uint8), [], legend=False, header=False,
+                 pick_region=((10, 50), (10, 50)), pose=(0, 0, 0), calibration=calibration)
+    assert tuple(img[10, 11]) == (255, 0, 0)
+    assert tuple(img[10, 17]) == (0, 0, 0)
+
+
+@pytest.mark.parametrize('region', [
+    {'x': [1, 1], 'y': [0, 2]},
+    {'x': [0, float('inf')], 'y': [0, 2]},
+    {'x': [0, 1], 'y': [0, 2], 'polygon': [[0, 0], [1, 0], [0, 1]]},
+])
+def test_pick_region_config_rejects_invalid(tmp_path, region):
+    import yaml
+    from nest_clear.guard import GuardError
+    from pathlib import Path
+    data = yaml.safe_load(Path('config/nest_clear.yaml').read_text())
+    data['vision']['pick_region_mm'] = region
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(GuardError, match='配置项 vision.pick_region_mm'):
+        load_config(path)
+
+
+def test_range_detection_record_and_report():
+    from types import SimpleNamespace
+    from nest_clear.flow.picking import record_detection
+    from nest_clear.record.report import _work_stats
+    o = measure(candidate(w=10, h=5), (0, 0, 0), Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1), HairDetectConfig())
+    o.status, o.target_id = 'out_of_range', 'tray-1-001'
+    events = Events()
+    ctx = SimpleNamespace(events=events)
+    bb = Board(task_id=1, request_func=20, capture_id='c', actual=(0, 0, 0))
+    record_detection(ctx, bb, SimpleNamespace(targets=()), {'observations': [o]}, 'coarse', 0)
+    event, row = events.rows[0]
+    assert event == 'detection' and row['candidates'][0]['reject_reason'] == '超出可挑范围'
+    assert row['candidates'][0]['status'] == 'out_of_range' and row['eligible_count'] == 0
+    row['event'] = event
+    stats = _work_stats([row, row])
+    assert stats['out_of_range'] == 1 and stats['rejections']['超出可挑范围'] == 2

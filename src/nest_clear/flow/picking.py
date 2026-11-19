@@ -40,7 +40,7 @@ def record_detection(ctx: FlowContext, bb: Any, cycle: WorkCycle, detection: dic
                 "length_mm": obs.length, "area_mm2": obs.area,
                 "width_mm": obs.area / obs.length if obs.length else 0,
                 "gray_ratio": candidate.gray_ratio, "dark_frac": candidate.dark_frac,
-                "gate_passed": obs.reason is None, "reject_reason": REASONS.get(obs.reason, obs.reason),
+                "gate_passed": obs.reason is None, "reject_reason": "超出可挑范围" if obs.status == "out_of_range" else REASONS.get(obs.reason, obs.reason),
                 "responsibility": "OTHER" if obs.status == "other_view" else "本视野",
                 "status": obs.status, "rank": ranked.get(id(obs))})
         counts = Counter(c["status"] for c in candidates)
@@ -203,7 +203,12 @@ class FinishCapture(Instant):
         if stage == "coarse":
             reply = cycle.on_coarse(bb.read("actual"), detection["observations"], bb.read("capture_id"))
         else:
-            reply = cycle.on_fine(bb.read("actual"), detection["fine_result"])
+            from dataclasses import replace
+            result = detection["fine_result"]
+            if result.status == "ok" and result.target_xyz is not None and not cycle.in_pick_region(result.target_xyz):
+                result = replace(result, status="fine_out_of_range")
+                detection["fine_result"] = result
+            reply = cycle.on_fine(bb.read("actual"), result)
         record_detection(self.ctx, bb, cycle, detection, stage, view, coarse_target)
         # 状态转移和应答不受可选画面处理的异常影响。
         archive = getattr(self.ctx.events, "archive", None)
@@ -230,7 +235,8 @@ class FinishCapture(Instant):
                             um_per_px=round(scale, 3) if scale is not None else None)
                 if stage == "coarse":
                     overlay = render(bb.read("image"), detection["observations"], None,
-                                     self.ctx.config.vision.ignore_regions_px, cycle.targets, info=info)
+                                     self.ctx.config.vision.ignore_regions_px, cycle.targets, info=info,
+                                     pick_region=self.ctx.config.vision.pick_region_mm, pose=bb.read("actual"), calibration=self.ctx.calibration)
                 else:
                     import cv2
                     import numpy as np

@@ -13,7 +13,7 @@ from .hair.core import _hair_pick_point
 
 @dataclass(frozen=True)
 class FineResult:
-    status: Literal["ok", "fine_empty", "fine_point_outside", "fine_rejected"]
+    status: Literal["ok", "fine_empty", "fine_point_outside", "fine_rejected", "fine_out_of_range"]
     candidate: HairCandidate | None = None
     pick_uv: tuple[float, float] | None = None
     target_xyz: tuple[float, float, float] | None = None
