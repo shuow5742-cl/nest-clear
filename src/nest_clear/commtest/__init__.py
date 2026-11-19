@@ -61,7 +61,8 @@ class World:
                 identity = attempt['identity']
                 point = min(self.hairs[attempt['view_index']], key=lambda p: math.dist(p[:2], identity[:2]))
                 index = self.hairs[attempt['view_index']].index(point)
-                persistent = self.scenario in ('tool_change', 'mixed') and attempt['view_index'] == (0 if self.scenario == 'tool_change' else 5) and index < 3
+                # tool_change：首视野 3 根挑不掉→触发换工具判定回 10；mixed：视野 2、4 各 1 根挑不掉（红框），不足以触发判定，仍以 9 结束
+                persistent = (self.scenario == 'tool_change' and attempt['view_index'] == 0 and index < 3) or (self.scenario == 'mixed' and attempt['view_index'] in (1, 3) and index == 1)
                 if not persistent: self.done.add((attempt['view_index'], index))
         observations = []
         for i, point in enumerate(self.hairs[view]):

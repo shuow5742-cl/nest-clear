@@ -60,7 +60,7 @@ def drive(scenario, broken=False):
     return Counter(r.func_code for r in replies), coords, events.rows
 
 
-@pytest.mark.parametrize('scenario,terminal', [('normal',9),('tool_change',10),('fine_fail',9),('mixed',10)])
+@pytest.mark.parametrize('scenario,terminal', [('normal',9),('tool_change',10),('fine_fail',9),('mixed',9)])
 def test_tray(scenario, terminal):
     counts, coords, rows = drive(scenario)
     assert counts[terminal] == 1 and counts[999] == 0
@@ -127,7 +127,7 @@ def test_real_tree_no_tcp_unsupported_and_camera_failure(tmp_path):
     assert any('mock camera failure' in str(row) for row in rows if row['event'] == 'error')
 
 
-@pytest.mark.parametrize('scenario,terminal', [('normal',9),('tool_change',10),('fine_fail',9),('mixed',10)])
+@pytest.mark.parametrize('scenario,terminal', [('normal',9),('tool_change',10),('fine_fail',9),('mixed',9)])
 def test_real_tree_whole_tray_no_tcp(tmp_path, scenario, terminal):
     import time
     from autoweaver.motion_policy.world_board import WorldBoard
