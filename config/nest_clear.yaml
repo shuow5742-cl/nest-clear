@@ -1,3 +1,9 @@
+ui:  # 本地只读显示界面
+  enabled: true
+  fullscreen: false
+  refresh_ms: 300
+  python: /usr/bin/python3  # 带 Xft 的系统 Tk
+
 plc:  # PLC 网络参数，现场调试时与设备网络设置核对
   ip: 192.168.10.10  # PLC 的 IP 地址，按 PLC 实际配置填写
   local_ip: 192.168.10.101  # 工控机 IP，仅记录用，不绑定网络接口

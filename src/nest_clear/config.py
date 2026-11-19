@@ -52,6 +52,14 @@ class SupervisorConfig:
 
 
 @dataclass(frozen=True)
+class UIConfig:
+    enabled: bool = True
+    fullscreen: bool = False
+    refresh_ms: int = 300
+    python: str = "/usr/bin/python3"
+
+
+@dataclass(frozen=True)
 class VisionConfig:
     """保存相机模式、标定文件和占位检测器参数。"""
 
@@ -126,6 +134,7 @@ class Config:
     camera_image_size: tuple[int, int] = (4024, 3036)
     machine_id: str = "M01"
     camera_calibration: dict[str, Any] = field(default_factory=dict)
+    ui: UIConfig = field(default_factory=UIConfig)
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -294,7 +303,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。"
         ) from exc
     if isinstance(data, dict):
-        data = {"camera_calibration": {}, **data}
+        data = {"camera_calibration": {}, "ui": {}, **data}
     root = _mapping(
         data,
         "根",
@@ -310,6 +319,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "record",
             "supervisor",
             "vision",
+            "ui",
         ],
     )
     plc_data = root["plc"]
@@ -543,6 +553,12 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "请用 python -m nest_clear.tools.tooltip_baseline 建立工具基准及补偿。",
         ) from exc
     offsets = tuple(tuple(stored[key]["offset_xyz"]) for key in ("tool1", "tool2"))
+    if not isinstance(root["ui"], dict):
+        _fail("ui", "应为映射")
+    ui_data = _mapping({"enabled": True, "fullscreen": False, "refresh_ms": 300, "python": "/usr/bin/python3", **root["ui"]}, "ui", ["enabled", "fullscreen", "refresh_ms", "python"])
+    _string(ui_data["python"], "ui.python")
+    if type(ui_data["enabled"]) is not bool or type(ui_data["fullscreen"]) is not bool or type(ui_data["refresh_ms"]) is not int or ui_data["refresh_ms"] < 50:
+        _fail("ui", "开关须为布尔值，刷新间隔须为不小于 50 的整数")
     return Config(
         plc,
         scan,
@@ -564,4 +580,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         tuple(image_size),
         _string(record["machine_id"], "record.machine_id"),
         _camera_calibration(root["camera_calibration"]),
+        UIConfig(**ui_data),
     )

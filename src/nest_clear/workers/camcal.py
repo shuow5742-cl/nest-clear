@@ -40,10 +40,13 @@ class CamcalWorker(AsyncRequestWorker):
             session['cfg'] = cfg
             session['engine'] = factory(cfg, ctx.calibration, (image.shape[1], image.shape[0]), session['start'])
         step = session['engine'].add(image, tuple(actual))
-        if step.overlay is not None and archive:
-            archive.rendered(step.overlay, 0, task_id, raw, capture_id=capture_id)
+        if step.overlay is not None:
+            from nest_clear.record.live import write_live
+            write_live(ctx.events.directory, "camcal_latest", step.overlay)
+            if archive:
+                archive._submit(step.overlay, [], 0, task_id, raw, capture_id=capture_id)
         # 叠加图已交给归档器，勿在请求结果缓存中保留整幅大图。
         step.overlay = None
         ctx.events.emit('camcal_step', task_id=task_id, sequence=session['shots'], target_xyz=step.target_xyz,
-                        actual_xyz=actual, detail=step.detail, raw_path=raw)
+                        actual_xyz=actual, detail=step.detail, raw_path=raw, kind=step.kind, code=step.code, reason=step.reason, plan=getattr(session["engine"], "plan", []))
         return {'step': step, 'raw_path': raw}

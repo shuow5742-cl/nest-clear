@@ -46,6 +46,11 @@ class EventRecorder:
         self._lock = threading.RLock()
         self.before_emit: Callable[[dict[str, Any]], None] | None = None
         self.listener: Callable[[dict[str, Any]], None] | None = None
+        self.reply_diagnostics: dict[int, dict[str, str]] = {}
+        self.status = None
+        if process == "main" and run:
+            from nest_clear.ui.status import MainStatus
+            self.status = MainStatus(self.directory)
 
     def emit(self, event: str, **fields: Any) -> None:
         """记录本地时间、单调时间和上下文，通知盘统计器。"""
@@ -95,6 +100,8 @@ class EventRecorder:
                 os.close(fd)
             if self.listener:
                 self.listener(row)
+            if self.status:
+                self.status.observe(row)
 
     def next_capture(self) -> tuple[int, str]:
         with self._lock:

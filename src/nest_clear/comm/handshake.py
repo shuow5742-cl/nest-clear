@@ -7,7 +7,7 @@ from typing import Any
 from .codec import encode_real32, encode_u16
 from .contract import Contract
 from .function_codes import REPLY_FUNCTION_NAMES
-from ..guard import GuardError
+from ..guard import GuardError, diagnostic
 
 logger = logging.getLogger("nest_clear.comm")
 
@@ -23,6 +23,7 @@ class Handshake:
         self.events = events
         self.inconsistent_reads = 0
         self._readback_error_task = None
+        self._readback_error_diagnostic = None
 
     def read_request(self) -> tuple[int, int]:
         """读取任务编号及功能码；变化检测和日志由调用方负责。"""
@@ -45,12 +46,13 @@ class Handshake:
             if self.inconsistent_reads >= 5:
                 raise GuardError("COMM-TASK-ID", f"Task_ID 双读连续 {self.inconsistent_reads} 次不一致：{task_id} → {second}", f"PLC 地址 {self.contract['task_id'].address}", "检查 PLC 请求更新时序。")
 
-    def write_reply(self, task_id: int, func_code: int, payload: Mapping[str, Any] | None = None) -> None:
+    def write_reply(self, task_id: int, func_code: int, payload: Mapping[str, Any] | None = None, *, failure: Mapping[str, str] | None = None) -> None:
         """先验证全部数据，再按数据区、功能码、提交编号的顺序写入。"""
         started = time.monotonic()
         readback_result = "ok" if self.write_readback else "disabled"
         if self._readback_error_task == task_id:
             func_code = 999
+            failure = self._readback_error_diagnostic
             payload = {name: (0 if name == "removable_count" else [0, 0, 0]) for name in (payload or {})}
         context = f"Task_ID={task_id!r}，功能码={func_code!r}"
         try:
@@ -104,6 +106,8 @@ class Handshake:
                                             expected=wanted, actual=actual)
                     logger.error("%s", error)
                     self._readback_error_task = task_id
+                    failure = diagnostic(error)
+                    self._readback_error_diagnostic = failure
                     for block_address, values in blocks:
                         self.io.write_real32_block(block_address, [0.0] * len(values))
                     for block_address, _ in scalar_blocks:
@@ -120,9 +124,21 @@ class Handshake:
         # Result_ID 是 PLC 的提交信号；提前写会使 PLC 读到旧功能码或旧坐标。
         self.io.write_u16(self.contract["result_id"].address, task_id)
         self._readback_error_task = None
+        self._readback_error_diagnostic = None
         self.last_reply_func = func_code
+        if self.events and getattr(self.events, "status", None):
+            try:
+                self.events.status.observe({"event": "reply", "task_id": task_id, "reply_func": func_code, "wall": self.events.clock().isoformat()})
+            except Exception:
+                logger.exception("更新应答状态失败")
+        if self.events and func_code in (999, 131, 82):
+            details = dict(failure or diagnostic(f"功能码 {func_code} 异常应答", code="REPLY-ERROR", where="应答提交", hint="检查请求及设备状态。"))
+            if hasattr(self.events, "reply_diagnostics"):
+                self.events.reply_diagnostics[task_id] = details
+            self.events.emit("reply_error", task_id=task_id, reply_func=func_code, **details)
         if self.events and hasattr(self.events, "plc"):
             self.events.plc("reply", task_id=task_id, func=func_code, coordinates=dict(payload),
                             removable_count=payload.get("removable_count"), readback=readback_result,
-                            elapsed_ms=round((time.monotonic() - started) * 1000, 3))
+                            elapsed_ms=round((time.monotonic() - started) * 1000, 3),
+                            **(details if func_code in (999, 131, 82) else {}))
         logger.info("应答完成：Task_ID=%s，功能码=%s（%s），坐标=%s", task_id, func_code, REPLY_FUNCTION_NAMES.get(func_code, "未知功能码"), dict(payload))

@@ -22,3 +22,13 @@ def supervisor_log_file(root: str | Path, day: date | None = None) -> Path:
 def daily_file(root: str | Path, name: str, day: date | None = None) -> Path:
     """返回指定日期的记录文件，供日志、事件与摘要共用。"""
     return Path(root) / (day or date.today()).isoformat() / name
+
+
+def main_status_file(root: str | Path) -> Path:
+    return Path(root) / 'state' / 'main_status.json'
+
+
+def live_image_file(root: str | Path, name: str = 'latest') -> Path:
+    if name not in {'latest', 'camcal_latest', 'calib_front_latest', 'calib_side_latest'}:
+        raise ValueError('未知实时图片')
+    return Path(root) / 'live' / (name + '.jpg')

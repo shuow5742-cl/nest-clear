@@ -3,7 +3,7 @@ import logging
 from typing import Any
 
 from nest_clear.comm import Handshake
-from nest_clear.guard import GuardError
+from nest_clear.guard import GuardError, diagnostic
 from autoweaver.worker import AsyncRequestWorker
 
 logger = logging.getLogger("nest_clear.workers.plc")
@@ -38,7 +38,7 @@ class PlcWorker(AsyncRequestWorker):
                 self.handshake.events.emit("request_abandoned", task_id=baseline, request_func=func, reason="PLC 急停或初始化")
         else:
             logger.error("启动时发现未应答 Task_ID=%s，提交 999", baseline)
-            self.handshake.write_reply(baseline, 999)
+            self.handshake.write_reply(baseline, 999, failure=diagnostic("启动时发现尚未应答的请求", code="PLC-ORPHAN-REQUEST", where="主程序启动", hint="检查 PLC 请求状态后重新初始化。"))
         return baseline
 
     def execute(self, payload: dict[str, Any]) -> Any:
@@ -53,13 +53,16 @@ class PlcWorker(AsyncRequestWorker):
             return self.handshake.io.read_real32_block(self.handshake.contract[name].address, 3)
         if operation == "reply":
             try:
-                self.handshake.write_reply(payload["task_id"], payload["func"], payload.get("coordinates"))
+                if payload.get("diagnostic") is None:
+                    self.handshake.write_reply(payload["task_id"], payload["func"], payload.get("coordinates"))
+                else:
+                    self.handshake.write_reply(payload["task_id"], payload["func"], payload.get("coordinates"), failure=payload["diagnostic"])
             except GuardError as exc:
                 if exc.code != "HANDSHAKE-INVALID":
                     raise
                 logger.error("应答数据无效，改回 999：%s", exc)
                 if self.handshake.events:
                     self.handshake.events.emit("error", task_id=payload["task_id"], operation="reply_validation", reason=str(exc))
-                self.handshake.write_reply(payload["task_id"], 999)
+                self.handshake.write_reply(payload["task_id"], 999, failure=diagnostic(exc))
             return self.handshake.last_reply_func
         raise GuardError("PLC-OPERATION", f"未知操作 {operation!r}", "PLC Worker", "检查行为树命令。")

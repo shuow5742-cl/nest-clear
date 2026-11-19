@@ -11,7 +11,7 @@ from autoweaver.motion_policy.nodes.leaf.condition import Condition
 from autoweaver.motion_policy.nodes.node import Status, TreeNode
 
 from nest_clear.config import Config
-from nest_clear.guard import GuardError
+from nest_clear.guard import GuardError, diagnostic
 from nest_clear.vision.hair_integration import render
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.events import EventRecorder
@@ -31,6 +31,7 @@ class CallWorker(FrameworkCallWorker):
         status = super().on_running()
         if status == Status.FAILURE:
             logger.warning("%s失败，Task_ID=%s：%s", self.name, self._blackboard.read("task_id"), self._blackboard.read("error"))
+            self._blackboard.write("error_diagnostic", diagnostic(self._blackboard.read("error"), code="CAMERA-CAPTURE" if "采集" in self.name else "WORKER-ERROR", where=self.name, hint="检查相机连接、供电与采图参数。" if "采集" in self.name else "检查对应设备连接和程序日志。"), self.name)
         return status
 
 
@@ -79,6 +80,8 @@ class WaitRequest(CallWorker):
         self._blackboard.write("started", self.clock(), self.name)
         self._blackboard.write("error", f"功能码 {func} 在当前状态不允许", self.name)
         self._blackboard.write("error_type", None, self.name)
+        self._blackboard.write("error_diagnostic", None, self.name)
+        self._blackboard.write("reply_diagnostic", None, self.name)
         self.events.begin_request(task, func)
         self.events.plc("request", task_id=task, request_func=func)
         self.events.emit("request", task_id=task, func=func, name=REQUEST_NAMES.get(func, "未知功能码"))
@@ -109,6 +112,7 @@ class Instant(TreeNode):
         except Exception as exc:
             self._blackboard.write("error", str(exc), self.name)
             self._blackboard.write("error_type", type(exc).__name__, self.name)
+            self._blackboard.write("error_diagnostic", diagnostic(exc, where=self.name), self.name)
             return Status.FAILURE
 
     def on_running(self) -> Status:
@@ -170,6 +174,7 @@ class CheckArrival(Instant):
         if not ok:
             reason = f"到位超差：期望 {expected}，实际 {actual}，公差 {self.config.arrival_tolerance_mm} mm"
             bb.write("error", reason, self.name)
+            bb.write("error_diagnostic", diagnostic(reason, code="MOTION-ARRIVAL", where="扫描位到位校验", hint="检查设备坐标、运动和到位公差。"), self.name)
 
 
 class RecordCapture(Instant):
@@ -251,6 +256,8 @@ class PrepareError(Instant):
             scan_index=bb.read("next_index"),
             raw_path=bb.read("raw_path"),
         )
+        details = bb.read("error_diagnostic", None) or diagnostic(reason, code="WORK-PROTOCOL" if self.unknown or error_type == ProtocolViolation.__name__ else "FLOW-ERROR", where="请求处理", hint="检查 PLC 功能码、当前状态和设备运行情况。")
+        bb.write("reply_diagnostic", details, self.name)
         bb.write("reply_func", 999, self.name)
         bb.write("reply_coordinates", {}, self.name)
         bb.write("reply_tool", None, self.name)
@@ -294,6 +301,10 @@ class CommitReply(Instant):
             cycle.mark_reply(bb.read("task_id"), getattr(self.events, "xid", 0), bb.read("reply_coordinates"))
         elif cycle is not None and bb.read("reply_func") == 3:
             cycle.fine_not_sent("挑取应答未提交")
+        details = {}
+        if func in (999, 131, 82):
+            actual = getattr(self.events, "reply_diagnostics", {}).pop(bb.read("task_id"), None)
+            details = actual or bb.read("reply_diagnostic", None) or diagnostic(bb.read("error"), code="REPLY-ERROR", where="应答提交")
         self.events.emit(
             "reply",
             task_id=bb.read("task_id"),
@@ -304,6 +315,7 @@ class CommitReply(Instant):
             scan_index=bb.read("next_index"),
             raw_path=bb.read("raw_path"),
             elapsed_ms=round((time.monotonic() - bb.read("started")) * 1000, 3),
+            **details,
         )
         render_data = bb.read("fine_render_data")
         archive = getattr(self.events, "archive", None)

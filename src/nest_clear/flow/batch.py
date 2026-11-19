@@ -37,6 +37,7 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -
             "task_id": bb.read("task_id"),
             "func": bb.read("reply_func"),
             "coordinates": bb.read("reply_coordinates"),
+            "diagnostic": bb.read("reply_diagnostic", None),
         },
         result_key="committed_func",
         name="写入应答",

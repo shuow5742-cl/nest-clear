@@ -87,7 +87,7 @@ def rig(tmp_path):
             assert handle.result is None
             time.sleep(.001)
         raise AssertionError('未应答')
-    yield SimpleNamespace(plc=plc, request=request, batch=batch, events=events, updated=updated, path=path, camera=camera, state=state)
+    yield SimpleNamespace(plc=plc, request=request, batch=batch, events=events, updated=updated, path=path, camera=camera, state=state, clock=clock)
     clock.shutdown()
     FakeSession.outcome = 'done'
     FakeSession.target = (1., 0., 0.)
@@ -192,3 +192,46 @@ def test_slow_calibration_runs_outside_tick(rig, monkeypatch, caplog):
     rig.plc.actual = (1., 0., 0.)
     assert rig.request(2, 80)[0] == 81
     assert not [r for r in caplog.records if 'slow tick' in r.getMessage().lower()]
+
+
+def reply_row(rig, task):
+    deadline=time.monotonic()+2
+    while time.monotonic()<deadline:
+        rig.clock.tick_once()
+        found=[r for r in rows(rig) if r['event']=='reply' and r['task_id']==task]
+        if found: return found[-1]
+        time.sleep(.001)
+    raise AssertionError('缺少应答事件')
+
+def assert_diagnostic(row, code):
+    assert row['func']==code
+    assert all(row.get(k) for k in ('reason_code','what','where','hint'))
+
+def test_reply_diagnostics_protocol_arrival_camera_and_82(rig):
+    assert rig.request(1, 80)[0]==80
+    assert rig.request(2, 80)[0]==999
+    arrival=reply_row(rig,2); assert_diagnostic(arrival,999); assert '超差' in arrival['what']
+    FakeSession.outcome='fail'
+    assert rig.request(3,80)[0]==82
+    glare=reply_row(rig,3); assert_diagnostic(glare,82); assert glare['reason_code']=='CAMCAL-GLARE' and '亮斑' in glare['what']
+    FakeSession.outcome='done'; rig.camera.fail=True
+    assert rig.request(4,80)[0]==82
+    capture=reply_row(rig,4); assert_diagnostic(capture,82); assert '采图失败' in capture['what']
+    assert rig.request(5,655)[0]==999
+    protocol=reply_row(rig,5); assert_diagnostic(protocol,999); assert protocol['reason_code']=='WORK-PROTOCOL'
+
+def test_reply_diagnostic_internal_and_tooltip(rig,monkeypatch):
+    def broken(*args): raise RuntimeError('模拟内部异常')
+    monkeypatch.setattr(FakeSession,'add',broken)
+    assert rig.request(1,80)[0]==82
+    row=reply_row(rig,1); assert_diagnostic(row,82); assert '模拟内部异常' in row['what']
+    assert rig.request(2,100)[0]==131
+    row=reply_row(rig,2); assert_diagnostic(row,131)
+
+def test_internal_999_reply_diagnostic(rig, monkeypatch):
+    from nest_clear.flow.camera_calibration import Prepare
+    def broken(self): raise RuntimeError('模拟位置检查内部异常')
+    monkeypatch.setattr(Prepare, 'perform', broken)
+    assert rig.request(1,80)[0] == 999
+    row=reply_row(rig,1); assert_diagnostic(row,999)
+    assert row['reason_code']=='INTERNAL-ERROR' and '模拟位置检查内部异常' in row['what']

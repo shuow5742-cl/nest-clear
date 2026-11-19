@@ -7,6 +7,7 @@ from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 
 from nest_clear.plan.scan_path import guard_position
+from nest_clear.guard import diagnostic
 from .calibration import change_mode
 from .leaves import CallWorker, Instant, PrepareError
 from .modes import Mode
@@ -72,6 +73,8 @@ class Process(Instant):
         step, raw = result['step'], result['raw_path']
         bb.write("raw_path", raw, self.name)
         if step.kind == "fail":
+            hint = "请" + step.reason.rsplit("请", 1)[1] if step.reason and "请" in step.reason else "检查标定板、相机光照和运动位置。"
+            bb.write("reply_diagnostic", diagnostic(step.reason, code=step.code or "CAMCAL-FAILED", where="相机标定", hint=hint), self.name)
             finish(ctx, bb, "failed", code=step.code, reason=step.reason, detail=step.detail, raw_path=raw)
             reply = 82
         elif step.kind == "done":
@@ -87,7 +90,7 @@ class Process(Instant):
             ctx.calibration = step.result.calibration
             ctx.events.calibration_placeholder = False
             ctx.events.meta_update(task_id=bb.read("task_id"), request_func=80, calibration=str(path), backup=str(backup) if backup else None, report=step.result.report)
-            finish(ctx, bb, "done", report=step.result.report)
+            finish(ctx, bb, "done", report=step.result.report, calibration_path=str(path), backup_path=str(backup) if backup else None)
             reply = 81
         elif step.kind == "move":
             target = tuple(step.target_xyz)
@@ -116,6 +119,7 @@ class Failed(Instant):
         reason = str(bb.read("error"))
         if bb.read("camcal_session", None):
             finish(self.ctx, bb, "failed", code="CAMCAL-FLOW", reason=reason, detail={}, raw_path=bb.read("raw_path"))
+        bb.write("reply_diagnostic", bb.read("error_diagnostic", None) or diagnostic(reason, code="CAMCAL-FLOW", where="相机标定", hint="检查相机连接、标定板和光照。"), self.name)
         bb.write("reply_func", 82, self.name)
         bb.write("reply_coordinates", {}, self.name)
         bb.write("reply_tool", None, self.name)

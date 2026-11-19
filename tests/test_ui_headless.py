@@ -1,0 +1,167 @@
+"""无显示服务时也遍历窗口构造、刷新、页面名和截图控制路径。"""
+from types import SimpleNamespace
+from unittest.mock import patch
+import pytest
+from nest_clear.ui.demo import write_demo
+
+
+class Widget:
+    def __init__(self, parent=None, **kwargs):
+        self.parent = parent; self.options = dict(kwargs); self.children = []; self.rows = {}; self.sel = ()
+        self.tk = self; self.destroyed = False; self.text_calls = []
+        if isinstance(parent, Widget): parent.children.append(self)
+    def call(self, *args): pass
+    def winfo_fpixels(self, arg): return 96.0
+    def winfo_screenwidth(self): return 1366
+    def winfo_screenheight(self): return 768
+    def winfo_width(self): return 600
+    def winfo_height(self): return 300
+    def winfo_rootx(self): return 5
+    def winfo_rooty(self): return 7
+    def rowconfigure(self, *args, **kwargs): pass
+    def columnconfigure(self, *args, **kwargs): pass
+    def grid(self, *args, **kwargs): pass
+    def bind(self, *args, **kwargs): pass
+    def option_add(self, *args): pass
+    def title(self, *args): pass
+    def minsize(self, *args): pass
+    def geometry(self, *args): pass
+    def state(self, *args): pass
+    def attributes(self, *args): pass
+    def after(self, *args): pass
+    def configure(self, **kwargs): self.options.update(kwargs)
+    config = configure
+    def update_idletasks(self): pass
+    def destroy(self): self.destroyed = True
+    def add(self, item, **kwargs): self.children.append(item)
+    def select(self, index): self.selected = index
+    def heading(self, *args, **kwargs): pass
+    def column(self, *args, **kwargs): pass
+    def tag_configure(self, *args, **kwargs): pass
+    def yview(self, *args): pass
+    def set(self, *args): pass
+    def insert(self, parent, where, iid=None, **kwargs):
+        iid = str(iid) if iid is not None else str(len(self.rows))
+        self.rows[iid] = kwargs; return iid
+    def item(self, iid, option=None, **kwargs):
+        self.rows[iid].update(kwargs)
+        return self.rows[iid].get(option) if option else self.rows[iid]
+    def get_children(self): return tuple(self.rows)
+    def delete(self, *args):
+        for key in args: self.rows.pop(key, None)
+    def selection(self): return self.sel
+    def create_text(self, *args, **kwargs): self.text_calls.append(kwargs.get('text'))
+    def create_oval(self, *args, **kwargs): pass
+    def create_rectangle(self, *args, **kwargs): pass
+    def create_polygon(self, *args, **kwargs): pass
+    def create_image(self, *args, **kwargs): pass
+    def scan_mark(self, *args): pass
+    def scan_dragto(self, *args, **kwargs): pass
+
+
+class Style:
+    def __init__(self, root): pass
+    def theme_use(self, theme): assert theme == 'clam'
+    def configure(self, *args, **kwargs): pass
+    def map(self, *args, **kwargs): pass
+
+
+def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
+    from nest_clear.ui import app
+    write_demo(tmp_path, initial=True)
+    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text'):
+        monkeypatch.setattr(app.tk, name, Widget)
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button'):
+        monkeypatch.setattr(app.ttk, name, Widget)
+    monkeypatch.setattr(app.ttk, 'Style', Style)
+    monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
+    class FakeCard(Widget):
+        def __init__(self, parent, title, theme):
+            super().__init__(parent); self.body = Widget(self)
+    class FakePicture(Widget):
+        def __init__(self, parent, path, theme): super().__init__(parent)
+        def poll(self): pass
+    class FakeKeyValueGrid(Widget):
+        def __init__(self, parent, keys, theme): super().__init__(parent); self.values_data = {}
+        def set(self, values): self.values_data = values
+    monkeypatch.setattr(app, 'Card', FakeCard)
+    monkeypatch.setattr(app, 'Picture', FakePicture)
+    monkeypatch.setattr(app, 'KeyValueGrid', FakeKeyValueGrid)
+    for page in app.App.PAGE_NAMES:
+        ui = app.App(tmp_path, page=page)
+        assert any(child.options.get('text') == app.FONT_WARNING for child in ui.root.children)
+        for index, name in enumerate(app.App.PAGE_NAMES):
+            ui.select_page(name + '页' if name != '主页' else name)
+            assert ui.tabs.selected == index
+        ui.refresh()
+        assert len(ui.table.rows) == 3
+        assert len(ui.tiptable.rows) == 2
+        assert ui.process_table.options['height'] == 2
+        assert ui.pick_values['视野'].options['text'] == '11/24'
+        assert ui.cam_step.values_data['检出角点'] == '35/40'
+        assert ui.cam_step.values_data['步骤'] == '移动拍照'
+        assert ui.cam_step.values_data['亮斑'] == '(510,120)–(560,170)'
+        plan_titles = list(ui.plan.text_calls)
+        for kind, expected in [('done','完成'), ('fail','失败'), ('other','other')]:
+            ui.update_cam({'kind':kind, 'detail':{'bbox':[1,2,3,4],'area_px':42}})
+            assert ui.cam_step.values_data['步骤'] == expected
+            assert ui.cam_step.values_data['亮斑'] == '(1,2)–(3,4)，面积 42 px'
+        ui.update_cam({'kind':'move', 'detail':{}})
+        assert ui.cam_step.values_data['亮斑'] == '无'
+        assert len([t for t in plan_titles if t and t.startswith('Z')]) == 5
+        assert {'Z0', 'Z-5', 'Z-2.5', 'Z+2.5', 'Z+5'} == {t.split(' · ')[0] for t in plan_titles if t and t.startswith('Z')}
+        assert ui.reply_info.values_data['原因']
+        assert ui.tip_result.values_data['迭代次数'] == 2
+        target = tmp_path / 'screen' / (page + '.png')
+        class Capture:
+            def save(self, path): path.write_bytes(b'screenshot')
+        with patch.object(app.ImageGrab, 'grab', return_value=Capture()) as grab:
+            ui.capture_and_exit(target)
+            grab.assert_called_once_with(bbox=(5, 7, 605, 307))
+        assert ui.root.destroyed and target.is_file()
+
+
+def test_invalid_page_rejected(tmp_path, monkeypatch):
+    from nest_clear.ui import app
+    ui = object.__new__(app.App); ui.tabs = Widget()
+    with pytest.raises(ValueError, match='字符串'): ui.select_page(Widget())
+    with pytest.raises(ValueError, match='未知页面'): ui.select_page('无此页')
+
+
+@pytest.mark.parametrize('alias,index', [('main',0),('home',0),('camcal',1),('camera',1),('offset',2),('tool-offset',2),('pickacc',3),('pick-accuracy',3),('baseline',4),('toolcal',5),('tooltip',5)])
+def test_page_aliases(alias,index):
+    from nest_clear.ui.app import App
+    ui = object.__new__(App); ui.tabs = Widget(); ui.select_page(alias)
+    assert ui.tabs.selected == index
+
+
+def test_font_backend_check():
+    from nest_clear.ui.app import supports_xft
+    class TK:
+        def __init__(self, result): self.result = result
+        def call(self, *args):
+            assert args == ('::tk::pkgconfig','get','fontsystem')
+            if isinstance(self.result, Exception): raise self.result
+            return self.result
+    assert supports_xft(SimpleNamespace(tk=TK('xft')))
+    assert not supports_xft(SimpleNamespace(tk=TK('x11')))
+    assert not supports_xft(SimpleNamespace(tk=TK(RuntimeError('not supported'))))
+
+def test_plan_layers_are_separate_and_show_relative_progress():
+    from nest_clear.ui.app import App
+    ui = object.__new__(App); ui.plan = Widget(); ui.cache = {}; ui.theme = SimpleNamespace(table=('x',11),body=('x',12))
+    points = [[0,0,100], [1,0,100], [0,1,95], [0,0,97.5], [0,0,102.5], [0,0,105]]
+    ui.draw_plan(points, 3, origin_z=100)
+    labels = ui.plan.text_calls
+    assert labels == ['Z0 · 2/2','Z-5 · 0/1','Z-2.5 · 0/1','Z+2.5 · 0/1','Z+5 · 0/1']
+
+def test_key_value_wrap_tracks_card_width():
+    from nest_clear.ui.app import KeyValueGrid
+    class Key:
+        def winfo_reqwidth(self): return 80
+    class Value:
+        def configure(self, **kwargs): self.options=kwargs
+    value=Value()
+    fake=SimpleNamespace(grid_slaves=lambda column: [Key()], values={'原因':value})
+    KeyValueGrid._rewrap(fake, SimpleNamespace(width=320))
+    assert value.options['wraplength']==228

@@ -14,11 +14,14 @@ import json
 import logging
 import os
 import subprocess
+from pathlib import Path
+from datetime import datetime
 import time
 from typing import Any
 
 from ..comm.handshake import Handshake
 from ..config import Config
+from ..guard import diagnostic
 from ..paths import main_alive_file, supervisor_state_file
 from ..record.events import EventRecorder
 from .device_state import (
@@ -61,6 +64,16 @@ class Supervisor:
         self._alive = main_alive_file(config.record_directory)
         self._state = supervisor_state_file(config.record_directory)
         self._started_at: float | None = None
+        self._wall_start = datetime.now().astimezone().isoformat()
+        self._child_start_wall = None
+        self._last_exit = None
+        self._plc_last_read = None
+        self._heartbeat_last_write = None
+        self._ready = None
+        self.ui_process = None
+        self._ui_failures = []
+        self._ui_next = 0.0
+        self._ui_disabled = False
 
     def _abandon_reply(self, reason: str, task_id: int | None = None, func: int | None = None) -> None:
         """记录 PLC 主动放弃的请求；读不到上下文时保留可用信息。"""
@@ -111,10 +124,10 @@ class Supervisor:
                 if retry:
                     self._pending_reply = None
                 return
-            Handshake(self.plc, self.plc.contract, self.config.plc.write_readback, self.events).write_reply(task_id, 999)
+            Handshake(self.plc, self.plc.contract, self.config.plc.write_readback, self.events).write_reply(task_id, 999, failure=diagnostic(reason, code="SUPERVISOR-CHILD", where="父程序代答", hint="检查主程序退出原因、看门狗和设备状态后重新初始化。"))
             if retry:
                 self._pending_reply = None
-            self.events.emit("supervisor_reply_999", task_id=task_id, reason=reason)
+            self.events.emit("supervisor_reply_999", task_id=task_id, request_func=pending.get("func"), reply_func=999, reason=reason, **diagnostic(reason, code="SUPERVISOR-CHILD", where="父程序代答", hint="检查主程序退出原因、看门狗和设备状态后重新初始化。"))
             logger.error("主程序%s；已给 Task_ID=%s 回 999", reason, task_id)
         except Exception as exc:
             if retry and task_id is None:
@@ -130,6 +143,7 @@ class Supervisor:
         if code is None:
             return True
         reason = f"意外退出，退出码 {code}"
+        self._last_exit = reason
         logger.error("主程序%s；等待下一次初始化信号", reason)
         self.events.emit("child_exit", reason=reason, code=code)
         self.child = None
@@ -143,6 +157,7 @@ class Supervisor:
         if not self._running():
             return False
         assert self.child is not None
+        self._last_exit = reason
         logger.warning("停止主程序：%s", reason)
         self.events.emit("child_stop", reason=reason, child_pid=self.child.pid)
         try:
@@ -179,6 +194,7 @@ class Supervisor:
             self._alive.unlink(missing_ok=True)
             self.child = subprocess.Popen(self.config.supervisor.child_command)
             self._started_at = time.monotonic()
+            self._child_start_wall = datetime.now().astimezone().isoformat()
             logger.info("主程序已启动，PID %s，命令 %s", self.child.pid, self.config.supervisor.child_command)
             self.events.emit(
                 "child_start",
@@ -197,7 +213,7 @@ class Supervisor:
         try:
             self._state.parent.mkdir(parents=True, exist_ok=True)
             temporary = self._state.with_suffix(".json.tmp")
-            state = {"word": self.word, "bits": describe(self.word or 0), "paused": self.paused}
+            state = {"word": self.word, "bits": describe(self.word or 0), "paused": self.paused, "pid": os.getpid(), "start_time": self._wall_start, "plc_connected": None if self._plc_last_read is None and not self._failures else not bool(self._failures), "plc_last_read": self._plc_last_read, "heartbeat_last_write": self._heartbeat_last_write, "heartbeat_interrupted": bool(self._heartbeat_failures), "child_pid": self.child.pid if self.child else None, "child_state": ("就绪" if self._ready else "启动中") if self.child else ("退出" if self._last_exit else "未启动"), "child_start_time": self._child_start_wall, "child_last_exit_reason": self._last_exit, "algorithm_ready": self._ready}
             temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             os.replace(temporary, self._state)
             return True
@@ -228,6 +244,11 @@ class Supervisor:
                     exc,
                 )
         else:
+            self._plc_last_read = datetime.now().astimezone().isoformat()
+            try:
+                self._ready = int(self.plc.read("algorithm_ready"))
+            except Exception:
+                self._ready = None
             if self._failures:
                 logger.info("PLC 状态读取恢复，之前连续失败 %s 次", self._failures)
                 self.events.emit("plc_restored", failures=self._failures, duration_s=time.monotonic() - self._failure_since)
@@ -283,6 +304,7 @@ class Supervisor:
             try:
                 self._heartbeat = (self._heartbeat + 1) % 65536
                 self.plc.write("heartbeat", self._heartbeat)
+                self._heartbeat_last_write = datetime.now().astimezone().isoformat()
                 if self._heartbeat_failures:
                     self.events.emit("heartbeat_restored", address=40931, failures=self._heartbeat_failures, duration_s=now - self._heartbeat_failure_since)
                     self._heartbeat_failures = 0
@@ -327,16 +349,69 @@ class Supervisor:
                     if self._stop(reason):
                         self._reply_after_failure(f"被看门狗停止：{reason}")
 
+    def _ui_tick(self):
+        if self._ui_disabled or not self.config.ui.enabled:
+            return
+        now = time.monotonic()
+        if self.ui_process is not None:
+            code = self.ui_process.poll()
+            if code is None:
+                return
+            self.events.emit("ui_exit", code=code)
+            self.ui_process = None
+            self._ui_failures = [t for t in self._ui_failures if now - t < 60] + [now]
+            if len(self._ui_failures) >= 5:
+                logger.error("显示界面一分钟内连续退出五次，停止重启")
+                self.events.emit("error", operation="ui_restart", reason="一分钟内连续退出五次，停止重启")
+                self._ui_disabled = True
+                return
+            self._ui_next = now + 5
+        if now < self._ui_next:
+            return
+        try:
+            source = str(Path(__file__).resolve().parents[2])
+            env = os.environ.copy()
+            env["PYTHONPATH"] = source + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+            command = [self.config.ui.python, "-m", "nest_clear.ui", "--root", self.config.record_directory, "--refresh-ms", str(self.config.ui.refresh_ms)]
+            if self.config.ui.fullscreen:
+                command.append("--fullscreen")
+            self.ui_process = subprocess.Popen(command, env=env)
+            self.events.emit("ui_start", pid=self.ui_process.pid)
+        except OSError as exc:
+            self.events.emit("error", operation="ui_start", reason=str(exc))
+            self._ui_failures = [t for t in self._ui_failures if now-t < 60] + [now]
+            self._ui_next = now + 5
+            if len(self._ui_failures) >= 5:
+                self._ui_disabled = True
+                logger.error("显示界面启动失败五次，停止重启")
+
     def run(self) -> None:
         """持续运行直至中断，并在退出时释放子进程与连接。"""
         self.events.emit("process_start", **self.metadata)
+        if self.config.ui.enabled and not os.environ.get("DISPLAY"):
+            logger.warning("无 DISPLAY，显示界面不会启动")
+            self._ui_disabled = True
         try:
             while True:
+                try:
+                    self._ui_tick()
+                except Exception:
+                    logger.exception("显示界面管理失败，父程序继续运行")
                 self.tick()
+                self._publish()
                 time.sleep(self.config.supervisor.poll_s)
         except KeyboardInterrupt:
             logger.info("收到退出信号")
         finally:
+            if self.ui_process is not None:
+                try:
+                    self.ui_process.terminate()
+                    self.ui_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.ui_process.kill()
+                    self.ui_process.wait()
+                except OSError:
+                    logger.exception("停止显示界面失败")
             self._stop("父程序退出")
             self._reply_after_failure("父程序退出", retry=False)
             self.plc.close()

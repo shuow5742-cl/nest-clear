@@ -13,7 +13,7 @@ from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 from autoweaver.motion_policy.nodes.node import TreeNode, Status
 
-from nest_clear.guard import GuardError
+from nest_clear.guard import GuardError, diagnostic
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.summary import write_tooltip_summary
 from nest_clear.tooltip import SilhouetteTipDetector, check_quality, compute_compensation, is_aligned, solve_correction
@@ -237,7 +237,7 @@ class DetectTips(Instant):
         for view in ("front", "side"):
             paths["overlay"][view] = archive.calibration(
                 images[view], session["tool"], bb.read("task_id"), paths["iteration"], view,
-                points[view], targets[view], paths["raw"].get(view), focus=focus) if archive and (self.ctx.events.run_directory is None or paths["raw"].get(view)) else None
+                points[view], targets[view], paths["raw"].get(view), focus=focus) if archive else None
         bb.write("tooltip_points", points, self.name)
 
 
@@ -476,6 +476,7 @@ class CalibrationFailed(Instant):
         change_mode(bb, self.ctx, Mode.IDLE, self.name)
         bb.write("tooltip_session", None, self.name)
         bb.write("tooltip_baseline", None, self.name)
+        bb.write("reply_diagnostic", bb.read("error_diagnostic", None) or diagnostic(reason, code="TOOLTIP-FAILED", where="换针对刀", hint="检查对刀基准、相机和设备位置。"), self.name)
         bb.write("reply_func", 131, self.name)
         bb.write("reply_coordinates", {}, self.name)
         bb.write("reply_tool", None, self.name)

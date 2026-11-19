@@ -137,7 +137,9 @@ def apply_reply(bb: Any, reply: Any, ctx: FlowContext) -> None:
     if reply.event.get("warning"):
         logger.warning("视野 %s 粗拍次数超限，强制离开", reply.event.get("view_index"))
         ctx.events.emit("warning", task_id=bb.read("task_id"), reason="粗拍次数超限", scan_index=reply.event.get("view_index"))
-    ctx.events.emit("work_cycle", task_id=bb.read("task_id"), reply_func=reply.func_code, **reply.event)
+    cycle = bb.read("work_cycle")
+    progress = {"total_views": len(ctx.path), "tray_id": cycle.tray, "removable_count": cycle.n0, "red_count": cycle.red_count, "sent_count": cycle.attempt_count, **reply.event}
+    ctx.events.emit("work_cycle", task_id=bb.read("task_id"), reply_func=reply.func_code, **progress)
 
 
 class UnpackCapture(Instant):

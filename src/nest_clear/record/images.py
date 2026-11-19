@@ -117,8 +117,8 @@ class ImageArchive:
     def _write_live(self, image: np.ndarray) -> None:
         """在归档线程原子替换最新画面，失败时只记录警告。"""
         try:
-            path = ((self.events.run_directory / "live") if self.events.run_directory else
-                    daily_file(self.events.directory, "live", self.events.clock().date())) / "latest.jpg"
+            from nest_clear.paths import live_image_file
+            path = live_image_file(self.events.directory)
             path.parent.mkdir(parents=True, exist_ok=True)
             ok, data = cv2.imencode(".jpg", image)
             if not ok:
@@ -126,6 +126,11 @@ class ImageArchive:
             temp = path.with_suffix(".tmp")
             temp.write_bytes(data.tobytes())
             os.replace(temp, path)
+            legacy = ((self.events.run_directory / "live") if self.events.run_directory else daily_file(self.events.directory, "live", self.events.clock().date())) / "latest.jpg"
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            tmp = legacy.with_suffix(".tmp")
+            tmp.write_bytes(data.tobytes())
+            os.replace(tmp, legacy)
         except Exception as exc:
             record_image_error(self.events, "最新画面", exc)
 
@@ -173,6 +178,8 @@ class ImageArchive:
         """提交对刀原图或针尖与目标像素叠加图，沿用同一限流队列。"""
         stem = f"calib_{tool}_{task_id}_{iteration}_{view}_{self.events.clock().strftime('%H%M%S_%f')}"
         if point is None:
+            from nest_clear.record.live import write_live
+            self.executor.submit(write_live, self.events.directory, f"calib_{view}_latest", image.copy())
             return self._submit(image, None, iteration, task_id, raw_path, stem)
         rendered = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image.copy()
         scale = max(.5, rendered.shape[1] / 1280)
@@ -187,7 +194,8 @@ class ImageArchive:
             text = " ".join(f"{name}: {data.get('edge_width_px')}px {'OK' if data.get('focused') else 'BLUR'}" for name, data in focus.items())
             cv2.putText(rendered, text, (round(10*scale), round(48*scale)), cv2.FONT_HERSHEY_SIMPLEX, .55*scale, (0,255,255), width, cv2.LINE_AA)
         path = self._submit(rendered, [], iteration, task_id, raw_path, stem)
-        self.executor.submit(self._write_live, rendered.copy())
+        from nest_clear.record.live import write_live
+        self.executor.submit(write_live, self.events.directory, f"calib_{view}_latest", rendered.copy())
         return path
 
     def _submit(

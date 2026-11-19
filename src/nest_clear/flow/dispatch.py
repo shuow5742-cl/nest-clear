@@ -14,6 +14,7 @@ from .leaves import Instant, Predicate, PrepareError
 from .modes import Mode
 from .picking import next_branch, scan_branch
 from .work_cycle import ProtocolViolation
+from nest_clear.guard import diagnostic
 
 logger = logging.getLogger("nest_clear.flow.dispatch")
 BranchFactory = Callable[[FlowContext], TreeNode]
@@ -54,11 +55,14 @@ class RejectMode(Instant):
             except ProtocolViolation as exc:
                 reason = str(exc)
                 bb.write("error_type", type(exc).__name__, self.name)
+                bb.write("error_diagnostic", diagnostic(exc), self.name)
         elif mode == Mode.PICKING and func in (100, 101):
             reason = "挑毛进行中收到对刀指令，须先停止挑毛并由 PLC 重新初始化"
         else:
             reason = f"当前模式 {mode.value} 不允许功能码 {func}"
         bb.write("error", reason, self.name)
+        if not bb.read("error_diagnostic", None):
+            bb.write("error_diagnostic", diagnostic(reason, code="WORK-PROTOCOL", where="请求分发", hint="检查 PLC 功能码和当前运行模式。"), self.name)
         logger.warning("模式拒绝：当前模式=%s，盘号=%s，扫描位=%s，功能码=%s，原因=%s", mode.value, self.events.tray_id, bb.read("next_index"), func, reason)
         self.events.emit("mode_rejected", mode=mode.value, scan_index=bb.read("next_index"), request_func=func, task_id=bb.read("task_id"), reason=reason)
 
