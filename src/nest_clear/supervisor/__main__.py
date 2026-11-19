@@ -78,7 +78,7 @@ def main() -> None:
         logger.info(
             "父程序启动：nest-clear commit %s；Auto_Weaver commit %s",
             _commit(ROOT),
-            _commit(Path("/home/shuow/Auto_Weaver")),
+            _commit(ROOT.parent / "Auto_Weaver"),  # 与 pyproject 的 ../Auto_Weaver 同级约定一致
         )
         metadata = {
             "nest_commit": _commit(ROOT),
