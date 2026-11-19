@@ -206,6 +206,7 @@ class App:
             logger.warning(FONT_WARNING)
             banner = tk.Label(self.root, text=FONT_WARNING, bg='#fef0c7', fg='#7a4b00', font=self.theme.status, anchor='w', padx=8, pady=4)
             banner.grid(row=0, column=0, sticky='ew', padx=6, pady=(4, 0))
+        self.commtest_banner = tk.Label(self.root, text='通信联调模式：下发坐标为假点', bg='#b00020', fg='white', font=self.theme.title, padx=8, pady=4)
         self.tail = EventTail(root); self.pictures = []; self.cache = {}; self.events = []; self.files = {}
         self.build_status()
         self.tabs = ttk.Notebook(self.root)
@@ -427,6 +428,8 @@ class App:
     def refresh(self):
         supervisor = self.file_data(supervisor_state_file(self.directory))
         main = self.file_data(main_status_file(self.directory))
+        if main.get('run_mode') == 'commtest': self.commtest_banner.grid(row=0, column=0, sticky='ew')
+        elif hasattr(self.commtest_banner, 'grid_remove'): self.commtest_banner.grid_remove()
         for name, (color, value) in status_indicators(supervisor, main).items():
             dot, label = self.lights[name]; dot.config(fg=COLORS[color]); label.config(text=str(value))
         for label, item in zip(self.bits, decode_status(supervisor.get('word'))):

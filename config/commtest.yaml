@@ -1,0 +1,189 @@
+ui:
+  enabled: true
+  fullscreen: false
+  refresh_ms: 300
+  python: /usr/bin/python3
+plc:
+  ip: 192.168.10.10
+  local_ip: 192.168.10.101
+  port: 502
+  timeout_s: 3.0
+scan:
+  mode: corners
+  tray:
+    origin_xy:
+    - 0.0
+    - 0.0
+    size_mm:
+    - 182.7
+    - 171.8
+    x_direction: -1
+    y_direction: 1
+  fov_mm: null
+  min_overlap_mm: 20.0
+  corners:
+  - - 160
+    - 0
+  - - 100
+    - 0
+  - - 160
+    - 140
+  step_x: 60
+  step_y: 70
+  z: 0
+arrival_tolerance_mm: 0.1
+pick_depth_z: 0.0
+travel:
+  x:
+  - 80
+  - 180
+  y:
+  - -10
+  - 150
+  z:
+  - 0
+  - 0
+camera:
+  sn: auto
+  image_size:
+  - 4024
+  - 3036
+  exposure_us: 10000.0
+  gain_db: 0.0
+  balance_ratio:
+  - 1.0
+  - 1.0
+  - 1.0
+record:
+  directory: runs_commtest
+  image_enabled: true
+  image_format: png
+  image_quality: 3
+  image_queue_size: 32
+  image_retention_days: 30
+supervisor:
+  poll_s: 0.1
+  watchdog_s: 6.0
+  startup_grace_s: 60.0
+  child_command:
+  - .venv/bin/python
+  - -m
+  - nest_clear.main
+  - --config
+  - config/commtest.yaml
+vision:
+  max_fine_targets: 10
+  fine_box_half_mm: 4.0
+  cap_ratio: 1.2
+  tool_check_min_attempts: 3
+  tool_check_ratio: 0.5
+  max_coarse_shots_per_view: 30
+  scale_z_bin_mm: 0.1
+  responsibility_zone: true
+  pick_region_mm: null
+  ignore_regions_px: []
+  detector: hair
+  allow_placeholder_calibration: false
+  review_radius_mm: 0.3
+  skip_radius_mm: 0.6
+  max_picks_per_view: 30
+  preview:
+    window: false
+  camera_backend: daheng
+  calibration: calibration/camera.yaml
+  pixels: []
+  dedup_radius_mm: 1.0
+  max_targets: 10
+  hair_detector:
+    expected_um_per_px: 23.6
+    scale_tolerance: 0.05
+    reference_um_per_px: 6.959
+    pick_point:
+      mode: thick_central
+      thick_pow: 1.0
+      central_pow: 2.0
+      dens_pow: 0.0
+    hair_dark_max: 55
+    dark_open_k: 5
+    dark_close_k: 21
+    covered_dilate_k: 15
+    line_blur_sigma: 15
+    line_contrast: 13
+    line_min_area: 150
+    fiber_min_area: 1500
+    fiber_dens_win_ds: 15
+    fiber_close_k_ds: 11
+    bridge_max_hop: 170
+    line_min_span: 120.0
+    merge_gap_px: 30
+    contain_overlap: 0.8
+    seed_grow_max_area: 220000
+    trace_step: 6.0
+    pick_dens_sigma: 10.0
+    min_length_mm: 2.0
+    min_area_mm2: 1.2
+    min_width_mm: 0.35
+    max_gray_ratio: 0.7
+    min_dark_frac: 0.15
+tool_calibration:
+  unreliable_action: fail
+  click_timeout_s: 120
+  enabled: false
+  directory: config/commtest_calibration
+  cameras:
+    front:
+      backend: uvc
+      device: 0
+    side:
+      backend: uvc
+      device: 1
+  detection:
+    front:
+      direction:
+      - 0
+      - 1
+      threshold: 127
+      min_area: 5
+      probe_offset_px: 7
+      max_edge_width_px: 6.0
+    side:
+      direction:
+      - 0
+      - 1
+      threshold: 127
+      min_area: 5
+      probe_offset_px: 7
+      max_edge_width_px: 6.0
+  position_tolerance_mm: 0.05
+  tip_tolerance_mm: 0.03
+  consistency_tolerance_mm: 0.01
+  max_iterations: 10
+  max_residual_mm: 0.03
+  max_condition: 100.0
+  z_disagreement_mm: 0.03
+camera_calibration:
+  cols: 21
+  rows: 16
+  square_mm: 5.0
+  marker_mm: 3.75
+  dictionary: DICT_5X5_250
+  board_thickness_mm: 3.0
+  xy_limit_mm: 25.0
+  z_limit_mm: 5.0
+  grid_half_mm: 20.0
+  z_outer_mm: 5.0
+  z_inner_mm: 2.5
+  position_tolerance_mm: 0.05
+  min_corner_ratio: 0.6
+  saturation_level: 250
+  max_saturated_fraction: 0.01
+  glare_blob_min_px: 2000
+  max_rms_px: 0.25
+  max_image_rms_px: 0.5
+  max_repeat_px: 0.5
+  max_axis_scale_error: 0.002
+  min_coverage: 0.9
+run_mode: commtest
+commtest:
+  scenario: mixed
+  seed: 26

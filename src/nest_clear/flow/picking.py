@@ -106,6 +106,9 @@ class WorkRequest(Instant):
                 fields.setdefault("request_func", bb.read("request_func"))
                 fields.setdefault("xid", getattr(self.ctx.events, "xid", 0))
                 self.ctx.events.emit(event, **fields)
+            if getattr(self.ctx.config, "run_mode", "production") == "commtest":
+                from nest_clear.commtest import coordinates
+                fine_coord, pick_coords = coordinates(self.ctx.config)
             cycle = WorkCycle(self.ctx.path, fine_coord, pick_coords, self.ctx.config.vision,
                               record=record, tray=getattr(self.ctx.events, "tray_id", None) or "0000")
             self.ctx.events.active_cycle = cycle
@@ -293,7 +296,7 @@ def work_branch(ctx: FlowContext) -> TreeNode:
         UnpackCapture(ctx),
         RecordCapture(ctx.events),
         CallWorker(ctx.board, "vision", lambda bb: {"image": bb.read("image"), "pose": bb.read("actual"),
-                   "work_action": bb.read("work_action"), "cycle": bb.read("work_cycle"),
+                   "work_action": bb.read("work_action"), "capture_id": bb.read("capture_id"), "cycle": bb.read("work_cycle"),
                    "scan": ctx.path[bb.read("work_cycle").view_index], "scan_path": ctx.path},
                    "detection", name="检测并换算目标"),
         FinishCapture(ctx),

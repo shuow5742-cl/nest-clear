@@ -25,6 +25,7 @@ class MainStatus:
     def observe(self, row):
         with self.lock:
             e = row.get('event',''); d = self.data
+            if e == 'process_start' and row.get('run_mode'): d['run_mode'] = row['run_mode']
             if e == 'mode_change': d['mode'] = row.get('mode','空闲')
             if e == 'request': d.update(task_id=row.get('task_id'), request_func=row.get('func'))
             if e == 'reply':

@@ -173,7 +173,8 @@ def report(root: str | Path, day: date) -> str:
     calibrations = _day_rows(root, "tooltip_summary.jsonl", day, "end_time")
     # 统计严格按事件发生日期归日；跨午夜的运行不需要拆分文件。
     tray_events = list(events)
-    lines = [f"设备日报 {day.isoformat()}"]
+    label = " 通信联调模式：下发坐标为假点" if any(r.get("run_mode") == "commtest" for r in events) else ""
+    lines = [f"设备日报 {day.isoformat()}{label}"]
     processes = [row for row in events if row.get("event") in ("process_start", "process_stop")]
     periods = []
     for row in processes:

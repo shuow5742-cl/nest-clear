@@ -95,9 +95,33 @@ def file_snapshot(path: Path) -> dict[str, Any]:
             "sha256": hashlib.sha256(content).hexdigest(), "mtime": path.stat().st_mtime}
 
 
+class ProductionAssembly:
+    """默认装配策略，直接连接生产 worker 与坐标逻辑。"""
+    def prepare(self, config, path):
+        pass
+
+    def detector(self, config, calibration, path):
+        detector = HairDetector(config.vision.hair_detector, calibration, path[0][2], config.vision.scale_z_bin_mm)
+        for z in {point[2] for point in path}:
+            detector.for_z(z)
+        return detector
+
+    def camera_sn(self, config):
+        return config.camera_sn
+
+    def vision(self, real, config, path, events):
+        return real
+
+    def branches(self):
+        return None
+
+    def scale_error(self, exc, z):
+        raise exc
+
+
 def write_meta(events: EventRecorder, config_path: Path, calibration_path: Path,
                config: Config, camera: CameraWorker, detector: Any, path: list,
-               calib_camera: CalibCameraWorker | None = None) -> None:
+               calib_camera: CalibCameraWorker | None = None, assembly: Any = None) -> None:
     """记录启动快照；记录故障不改变设备握手。"""
     if events.run_directory is None:
         return
@@ -111,13 +135,16 @@ def write_meta(events: EventRecorder, config_path: Path, calibration_path: Path,
         calibration = load_calibration(calibration_path)
         scales = []
         for z in sorted({point[2] for point in path}):
-            if isinstance(detector, HairDetector) and detector.calibration is not None:
-                parameters = detector.for_z(z)
-            else:
-                scale = scale_um_per_px(calibration, calibration.plane_z, z)
-                parameters = scaled(replace(config.vision.hair_detector, um_per_px=scale))
-            scales.append({"z_mm": z, "um_per_px": parameters.um_per_px,
-                           "parameters": asdict(parameters)})
+            try:
+                if isinstance(detector, HairDetector) and detector.calibration is not None:
+                    parameters = detector.for_z(z)
+                else:
+                    scale = scale_um_per_px(calibration, calibration.plane_z, z)
+                    parameters = scaled(replace(config.vision.hair_detector, um_per_px=scale))
+                scales.append({"z_mm": z, "um_per_px": parameters.um_per_px,
+                               "parameters": asdict(parameters)})
+            except Exception as exc:
+                scales.append((assembly or ProductionAssembly()).scale_error(exc, z))
         calibration_cameras = {}
         if calib_camera is not None:
             for name, device in calib_camera.cameras.items():
@@ -140,6 +167,7 @@ def write_meta(events: EventRecorder, config_path: Path, calibration_path: Path,
                 calibration_cameras[name] = info
         metadata = {
             "run_id": events.run_id, "machine_id": config.machine_id,
+            "run_mode": config.run_mode, "scenario": config.commtest.get("scenario"), "seed": config.commtest.get("seed"),
             "code": {"sha": repository_commit(ROOT), "dirty": repository_dirty(ROOT)},
             "auto_weaver": {"version": framework_version, "sha": framework_commit()},
             "config": file_snapshot(config_path),
@@ -192,6 +220,7 @@ class Application:
                         "请重新建立对应工具的基准。",
                     )
         self.events = events or EventRecorder(config.record_directory, machine_id=config.machine_id, run=True)
+        self.events.run_mode = config.run_mode
         config_bytes = Path(config_path).read_bytes()
         calibration_path = Path(config.vision.calibration)
         if not calibration_path.is_absolute():
@@ -199,6 +228,7 @@ class Application:
         calibration_info = yaml.safe_load(calibration_path.read_text(encoding="utf-8"))
         commit = repository_commit(ROOT)
         metadata = {
+            "run_mode": config.run_mode,
             "nest_commit": commit,
             "framework_commit": framework_commit(),
             "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
@@ -222,6 +252,11 @@ class Application:
         )
         self.events.archive = self.archive
         self.path = build_scan_path(config.scan, config.travel)
+        assembly = ProductionAssembly()
+        if config.run_mode == "commtest":
+            from nest_clear.commtest import assembly_factory
+            assembly = assembly_factory()
+        assembly.prepare(config, self.path)
         details = scan_details(config.scan, self.path)
         logger.info("扫描规划：%s", details)
         self.events.emit("scan_plan", **details)
@@ -231,9 +266,7 @@ class Application:
         calibration = load_calibration(calibration_path)
         self.calibration = calibration
         if detector is None and config.vision.detector == "hair":
-            detector = HairDetector(config.vision.hair_detector, calibration, self.path[0][2], config.vision.scale_z_bin_mm)
-            for z in {point[2] for point in self.path}:
-                detector.for_z(z)
+            detector = assembly.detector(config, calibration, self.path)
         self.events.calibration_placeholder = calibration.placeholder
         contract = load_contract(ROOT / "config/plc_contract.yaml")
         self.io = PLCClient(config.plc.ip, config.plc.port, config.plc.timeout_s, contract)
@@ -242,16 +275,18 @@ class Application:
         self.calib_camera = None
         self.clock = None
         try:
-            self.camera = CameraWorker(config.vision.camera_backend, config.camera_sn, camera, timeout_s=config.capture_timeout_s, exposure_us=config.exposure_us, gain_db=config.gain_db, balance_ratio=config.balance_ratio, principal=(float(calibration.K[0][2]), float(calibration.K[1][2])), image_size=config.camera_image_size)
+            camera_sn = assembly.camera_sn(config)
+            self.camera = CameraWorker(config.vision.camera_backend, camera_sn, camera, timeout_s=config.capture_timeout_s, exposure_us=config.exposure_us, gain_db=config.gain_db, balance_ratio=config.balance_ratio, principal=(float(calibration.K[0][2]), float(calibration.K[1][2])), image_size=config.camera_image_size)
             self.camera.open()
             if config.tool_calibration.enabled:
                 self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras, timeout_s=config.capture_timeout_s, events=self.events)
                 self.calib_camera.open()
             detector = detector or (HairDetector(config.vision.hair_detector, calibration, config.scan.z, config.vision.scale_z_bin_mm) if config.vision.detector == "hair" else StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels]))
-            write_meta(self.events, Path(config_path), calibration_path, config, self.camera, detector, self.path, self.calib_camera)
+            write_meta(self.events, Path(config_path), calibration_path, config, self.camera, detector, self.path, self.calib_camera, assembly)
             vision = VisionWorker(
                 detector, calibration, config.vision.dedup_radius_mm, config.vision.max_targets, config.vision
             )
+            vision = assembly.vision(vision, config, self.path, self.events)
             self.vision = vision
             self.calibration_path = calibration_path
             self.board = WorldBoard()
@@ -265,7 +300,8 @@ class Application:
             self.events.emit("baseline", task_id=baseline, ignored=bool(baseline))
             self.tracker = RequestTracker(baseline)
             context = FlowContext(self.board, config, self.path, self.tracker, self.events, calibration)
-            logger.info("主程序行为树结构：\n%s", format_tree(build_tree(context)))
+            self.branches = assembly.branches()
+            logger.info("主程序行为树结构：\n%s", format_tree(build_tree(context, self.branches)))
             self.io.write("algorithm_ready", 1)
         except BaseException:
             if self.clock is not None:
@@ -301,7 +337,7 @@ class Application:
                         "BATCH-FAILED", f"一盘执行失败：{result}", "主程序", "查看前面的 PLC 或行为树错误。"
                     )
             self.handle = self.clock.submit(
-                build_batch(self.board, self.config, self.path, self.tracker, self.events, calibration=self.calibration, calibration_updated=self.update_calibration, calibration_path=self.calibration_path)
+                build_batch(self.board, self.config, self.path, self.tracker, self.events, branches=self.branches, calibration=self.calibration, calibration_updated=self.update_calibration, calibration_path=self.calibration_path)
             )
         self.clock.tick_once()
 

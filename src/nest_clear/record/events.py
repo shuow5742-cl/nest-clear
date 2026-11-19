@@ -74,6 +74,8 @@ class EventRecorder:
         if fields.get("task_id") == self.request_task and self.request_task is not None:
             fields.setdefault("request_func", self.request_func)
             fields.setdefault("xid", self.xid)
+        if getattr(self, "run_mode", None) == "commtest" and event in ("reply", "reply_sent"):
+            fields["commtest"] = True
         row = {
             "ts": now.isoformat(),
             "wall": now.isoformat(), "run_id": self.run_id,
@@ -131,6 +133,8 @@ class EventRecorder:
         """Append a communication edge without letting recording affect the handshake."""
         if self.run_directory is None:
             return
+        if event == "reply" and getattr(self, "run_mode", None) == "commtest":
+            fields["commtest"] = True
         try:
             with self._lock:
                 now = self.clock()
