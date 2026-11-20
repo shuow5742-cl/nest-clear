@@ -53,7 +53,7 @@ camera:
   image_size:
   - 4024
   - 3036
-  exposure_us: 10000.0
+  exposure_us: 6000.0  # 11-20 用户大恒软件实测：两侧白格不饱和，中间白40-52/黑3-9；光源不均（中暗边亮约10倍）待修
   gain_db: 0.0
   balance_ratio:
   - 2.4219
