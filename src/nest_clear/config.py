@@ -269,14 +269,17 @@ def _camera_calibration(data: Any) -> dict[str, Any]:
     numbers = {"square_mm", "marker_mm", "board_thickness_mm", "xy_limit_mm", "z_limit_mm",
                "grid_half_mm", "z_outer_mm", "z_inner_mm", "position_tolerance_mm", "max_rms_px",
                "max_image_rms_px", "max_repeat_px"} | fractions
-    allowed = integers | numbers | {"dictionary"}
+    allowed = integers | numbers | {"dictionary", "start_xyz"}
     if not isinstance(data, dict):
         _fail("camera_calibration", "应为映射")
     if set(data) - allowed:
         _fail("camera_calibration", f"未知字段 {sorted(set(data) - allowed)}")
     for key, value in data.items():
         path = f"camera_calibration.{key}"
-        if key == "dictionary":
+        if key == "start_xyz":
+            if value is not None:
+                _vector(value, path, 3)
+        elif key == "dictionary":
             _string(value, path)
         elif key in integers:
             if type(value) is not int or value < (2 if key in {"cols", "rows"} else 1) or (key == "saturation_level" and value > 255):
@@ -347,6 +350,12 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             _fail("commtest", "场景或随机种子无效")
     elif ct is not None:
         _fail("commtest", "仅联调模式可配置 commtest")
+    camcal = _camera_calibration(root["camera_calibration"])
+    start = camcal.get("start_xyz")
+    if mode == "commtest" and start is not None and any(
+        not lo <= value <= hi for value, (lo, hi) in zip(start, ct["camcal_travel"])
+    ):
+        _fail("camera_calibration.start_xyz", "必须在 commtest.camcal_travel 范围内")
     plc_data = root["plc"]
     if isinstance(plc_data, dict):
         for key in ("stall_warn_s", "comm_fail_timeout_s"):
@@ -615,7 +624,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         record["image_queue_size"],
         tuple(image_size),
         _string(record["machine_id"], "record.machine_id"),
-        _camera_calibration(root["camera_calibration"]),
+        camcal,
         UIConfig(**ui_data),
         mode, ct or {}, preview_data,
     )

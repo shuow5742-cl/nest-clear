@@ -167,6 +167,7 @@ tool_calibration:
   max_condition: 100.0
   z_disagreement_mm: 0.03
 camera_calibration:
+  start_xyz: [92.651, 88.445, -11.904]  # 用户 11-20 现场预览找的起始位
   cols: 21
   rows: 16
   square_mm: 5.0

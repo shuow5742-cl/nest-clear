@@ -138,6 +138,7 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
 
 # 主相机标定，未列出的字段使用 CameraCalibConfig 缺省值
 camera_calibration:
+  start_xyz: null  # 待填写
   cols: 21
   rows: 16
   square_mm: 5.0

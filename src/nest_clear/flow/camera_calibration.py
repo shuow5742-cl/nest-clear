@@ -9,7 +9,7 @@ from autoweaver.motion_policy.nodes.control.sequence import Sequence
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.guard import GuardError, diagnostic
 from .calibration import change_mode
-from .leaves import CallWorker, Instant, PrepareError
+from .leaves import CallWorker, Instant, Predicate
 from .modes import Mode
 
 
@@ -38,7 +38,7 @@ def guard_commtest(ctx, point):
         return
     for axis, value, (lo, hi) in zip("xyz", point, ctx.config.commtest["camcal_travel"]):
         if not lo <= value <= hi:
-            raise GuardError("COMMTEST-CAMCAL-TRAVEL", f"相机标定 {axis.upper()} 轴值 {value} 超出范围 [{lo}, {hi}]", "相机标定", "检查实际位置和 commtest.camcal_travel。")
+            raise GuardError("COMMTEST-CAMCAL-TRAVEL", f"相机标定 {axis.upper()} 轴值 {value} 超出范围 [{lo}, {hi}]", "相机标定", "检查目标坐标和 commtest.camcal_travel。")
 
 
 class Prepare(Instant):
@@ -52,22 +52,39 @@ class Prepare(Instant):
         actual = bb.read("actual")
         if not isinstance(actual, (tuple, list)) or len(actual) != 3 or not all(math.isfinite(x) for x in actual):
             raise ValueError("相机标定实时坐标无效")
+        bb.write("camcal_goto_start", False, self.name)
+        tolerance = self.ctx.config.camera_calibration.get("position_tolerance_mm", 0.05)
         if session is None:
-            guard_commtest(self.ctx, actual)
+            start = self.ctx.config.camera_calibration.get("start_xyz")
+            if start is None:
+                raise GuardError("CAMCAL-START-UNSET", "未配置相机标定起始坐标", "相机标定", "在配置 camera_calibration.start_xyz 填写起始坐标。")
+            target = tuple(start)
+            move = any(abs(a-b) > tolerance for a, b in zip(actual, target))
+            if move:
+                guard_commtest(self.ctx, target)
+                if self.ctx.config.run_mode != "commtest":
+                    guard_position(target, self.ctx.config.travel, "相机标定")
             now = self.ctx.events.clock()
-            session = {"start": tuple(actual), "target": None, "shots": 0, "engine": None,
+            session = {"start": None if move else tuple(actual), "target": target if move else None, "shots": 0, "engine": None,
                        "start_time": now.isoformat(), "directory": now.strftime("%Y%m%d_%H%M%S_%f")}
             bb.write("camcal_session", session, self.name)
             self.ctx.events.active_camcal = session
             self.ctx.events.abort_camcal = lambda reason: finish(self.ctx, bb, "aborted", reason=reason)
             change_mode(bb, self.ctx, Mode.CAMERA_CALIBRATING, self.name)
-            self.ctx.events.emit("camcal_start", task_id=bb.read("task_id"), start_xyz=actual)
+            self.ctx.events.emit("camcal_start", task_id=bb.read("task_id"), start_xyz=target)
+            if move:
+                bb.write("camcal_goto_start", True, self.name)
+                bb.write("reply_coordinates", {"camcal_xyz": target}, self.name)
+                bb.write("reply_func", 80, self.name)
+                bb.write("reply_tool", None, self.name)
+                self.ctx.events.emit("camcal_goto_start", task_id=bb.read("task_id"), actual=actual, target=target)
         elif session["target"] is not None:
-            tolerance = self.ctx.config.camera_calibration.get("position_tolerance_mm", 0.05)
             if any(abs(a-b) > tolerance for a,b in zip(actual, session["target"])):
                 reason = f"相机标定到位超差：期望 {session['target']}，实际 {actual}，公差 {tolerance} mm"
                 finish(self.ctx, bb, "aborted", reason=reason)
                 raise ValueError(reason)
+            if session["start"] is None:
+                session["start"] = tuple(actual)
 
 
 class Process(Instant):
@@ -163,4 +180,4 @@ def camera_branch(ctx):
         "context": ctx, "session": bb.read("camcal_session"), "captured": bb.read("image"),
         "actual": bb.read("actual"), "task_id": bb.read("task_id")}, "camcal_result", name="异步相机标定"),
         Process(ctx)], name="采样及求解"), Failed(ctx)], name="相机标定或 82")
-    return Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual"}, "actual", name="读取相机标定坐标"), Prepare(ctx), sample, CheckTarget(ctx)], name="相机标定")
+    return Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual"}, "actual", name="读取相机标定坐标"), Prepare(ctx), Fallback([Predicate("前往起始位", lambda bb: bb.read("camcal_goto_start")), sample]), CheckTarget(ctx)], name="相机标定")

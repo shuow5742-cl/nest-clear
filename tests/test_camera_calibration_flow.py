@@ -62,7 +62,7 @@ class FakeSession:
 @pytest.fixture
 def rig(tmp_path, request):
     cfg = load_config('config/nest_clear.yaml')
-    cfg = replace(cfg, travel=((-100., 100.),)*3)
+    cfg = replace(cfg, travel=((-100., 100.),)*3, camera_calibration={**cfg.camera_calibration, 'start_xyz': [0., 0., 0.]})
     commtest = getattr(request, 'param', False)
     if commtest:
         from nest_clear.commtest import branches
@@ -92,7 +92,7 @@ def rig(tmp_path, request):
             assert handle.result is None
             time.sleep(.001)
         raise AssertionError('未应答')
-    yield SimpleNamespace(plc=plc, request=request, batch=batch, events=events, updated=updated, path=path, camera=camera, state=state, clock=clock)
+    yield SimpleNamespace(plc=plc, request=request, batch=batch, events=events, updated=updated, path=path, camera=camera, state=state, clock=clock, cfg=cfg)
     clock.shutdown()
     FakeSession.outcome = 'done'
     FakeSession.target = (1., 0., 0.)
@@ -256,7 +256,7 @@ def test_commtest_complete_and_raw(rig):
     assert list(rig.events.run_directory.glob('camcal/*/session_record.json'))
 
 @pytest.mark.parametrize('rig', [True], indirect=True)
-@pytest.mark.parametrize('start,target', [((11.,0.,0.), (1.,0.,0.)), ((0.,0.,0.), (11.,0.,0.))])
+@pytest.mark.parametrize('start,target', [((0.,0.,0.), (11.,0.,0.))])
 def test_commtest_camcal_travel(rig, start, target):
     rig.plc.actual = start
     FakeSession.target = target
@@ -273,7 +273,7 @@ def test_commtest_rendered_real_session(tmp_path):
     from sim.charuco_scene import CharucoScene
 
     cfg = load_config('config/commtest.yaml')
-    cfg = replace(cfg, commtest={**cfg.commtest, 'camcal_travel': ((80., 180.), (-10., 150.), (100., 120.))})
+    cfg = replace(cfg, camera_calibration={**cfg.camera_calibration, 'start_xyz': [130., 70., 110.]}, commtest={**cfg.commtest, 'camcal_travel': ((80., 180.), (-10., 150.), (100., 120.))})
     production = __import__('pathlib').Path('config/calibration/camera.yaml')
     before = sha256(production.read_bytes()).digest()
     path = tmp_path / 'commtest_calibration' / 'camera.yaml'
@@ -315,3 +315,64 @@ def test_commtest_rendered_real_session(tmp_path):
         assert all(k in done for k in ('K', 'distortion', 'rms_px', 'repeat_px', 'axis_scale', 'um_per_px_at_principal'))
     finally:
         clock.shutdown()
+
+
+def test_start_unset(rig):
+    rig.cfg.camera_calibration['start_xyz'] = None
+    assert rig.request(1, 80)[0] == 999
+    row = reply_row(rig, 1)
+    assert row['reason_code'] == 'CAMCAL-START-UNSET'
+    assert 'camera_calibration.start_xyz' in row['hint']
+    assert not [r for r in rows(rig) if r['event'] == 'capture']
+
+
+def test_goto_start_then_capture(rig):
+    rig.cfg.camera_calibration['start_xyz'] = [92.651, 88.445, -11.904]
+    rig.plc.actual = (-19.59, 88.445, -11.904)
+    assert rig.request(1, 80) == (80, {'camcal_xyz': (92.651, 88.445, -11.904)})
+    assert not [r for r in rows(rig) if r['event'] == 'capture']
+    event = next(r for r in rows(rig) if r['event'] == 'camcal_goto_start')
+    assert event['actual'][0] == -19.59 and event['target'] == [92.651, 88.445, -11.904]
+    rig.plc.actual = (92.651, 88.445, -11.904)
+    FakeSession.target = rig.plc.actual
+    assert rig.request(2, 80)[0] == 80
+    assert len([r for r in rows(rig) if r['event'] == 'capture']) == 1
+
+
+def test_start_outside_commtest_config(tmp_path):
+    import yaml
+    from nest_clear.guard import GuardError
+    source = yaml.safe_load(open('config/commtest.yaml', encoding='utf-8'))
+    source['camera_calibration']['start_xyz'] = [79, 88, -12]
+    path = tmp_path / 'bad.yaml'
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(GuardError, match='camera_calibration.start_xyz'):
+        load_config(path)
+
+
+@pytest.mark.parametrize('rig', [True], indirect=True)
+def test_commtest_goto_start_outside_actual_travel(rig):
+    rig.cfg.commtest['camcal_travel'] = ((80., 180.), (-10., 150.), (-15., 0.))
+    rig.cfg.camera_calibration['start_xyz'] = [92.651, 88.445, -11.904]
+    rig.plc.actual = (-19.59, 88.445, -11.904)
+    target = (92.651, 88.445, -11.904)
+    assert rig.request(1, 80) == (80, {'camcal_xyz': target})
+    assert rig.request(2, 80)[0] == 999
+    assert rig.batch.blackboard.read('mode') == Mode.IDLE
+    assert rig.request(3, 80) == (80, {'camcal_xyz': target})
+    rig.plc.actual = target
+    FakeSession.target = target
+    assert rig.request(4, 80)[0] == 80
+    assert len([r for r in rows(rig) if r['event'] == 'capture']) == 1
+
+
+@pytest.mark.parametrize('start', [[0, 0], [0, 0, float('nan')], [0, True, 0], '1,2,3'])
+def test_start_invalid_config(tmp_path, start):
+    import yaml
+    from nest_clear.guard import GuardError
+    source = yaml.safe_load(open('config/nest_clear.yaml', encoding='utf-8'))
+    source['camera_calibration']['start_xyz'] = start
+    path = tmp_path / 'bad.yaml'
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(GuardError, match='camera_calibration.start_xyz'):
+        load_config(path)

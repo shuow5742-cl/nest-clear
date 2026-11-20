@@ -39,7 +39,9 @@ class FakeSession:
 
 def test_camcal_tcp(tmp_path):
     with FakePLC() as plc:
-        config = replace(load_config('config/nest_clear.yaml'), travel=((-100., 100.),)*3)
+        config = load_config('config/nest_clear.yaml')
+        config = replace(config, travel=((-100., 100.),)*3,
+                         camera_calibration={**config.camera_calibration, 'start_xyz': [2., 0., 0.]})
         io = PLCClient(plc.host, plc.port, 1, plc.contract)
         board = WorldBoard()
         clock = BTClock(board)
@@ -60,8 +62,9 @@ def test_camcal_tcp(tmp_path):
         thread.start()
         try:
             replies = plc.start_camera_calibration((0., 0., 0.), timeout_s=5)
-            assert [r['func_code'] for r in replies] == [80, 81]
-            assert replies[0]['camcal_xyz'] == [1., 0., 0.]
+            assert [r['func_code'] for r in replies] == [80, 80, 81]
+            assert replies[0]['camcal_xyz'] == [2., 0., 0.]
+            assert replies[1]['camcal_xyz'] == [1., 0., 0.]
             assert path.exists() and updated == ['new']
             assert 40972 in [address for address, _ in plc.writes]
         finally:

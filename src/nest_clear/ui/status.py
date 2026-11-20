@@ -29,7 +29,7 @@ class MainStatus:
             if e == 'mode_change': d['mode'] = row.get('mode','空闲')
             if e == 'request':
                 d.update(task_id=row.get('task_id'), request_func=row.get('func'))
-                if row.get('func') == 80 and d['camcal'].get('event') not in ('camcal_start', 'camcal_step'):
+                if row.get('func') == 80 and d['camcal'].get('event') not in ('camcal_start', 'camcal_goto_start', 'camcal_step'):
                     d['camcal'] = {'event': 'camcal_starting'}
             if e == 'reply':
                 reply = row.get('reply_func', row.get('func'))

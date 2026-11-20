@@ -32,7 +32,7 @@ def running(tmp_path, monkeypatch):
         path = tmp_path / 'camera.yaml'
         path.write_bytes((ROOT / 'config/calibration/camera.yaml').read_bytes())
         cfg = load_config(ROOT / 'config/nest_clear.yaml')
-        cfg = replace(cfg, plc=replace(cfg.plc, ip=plc.host, port=plc.port),
+        cfg = replace(cfg, camera_calibration={**cfg.camera_calibration, 'start_xyz': [0., 0., 110.]}, plc=replace(cfg.plc, ip=plc.host, port=plc.port),
                       record_directory=str(tmp_path / 'record'),
                       vision=replace(cfg.vision, calibration=str(path), camera_backend='mock',
                                      detector='stub', allow_placeholder_calibration=True),

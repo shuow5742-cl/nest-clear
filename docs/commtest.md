@@ -39,7 +39,7 @@ PLC 先发 1，PC 回 1 和首扫描位；PLC 到位后发 20，PC 真实拍照�
 
 ## 相机标定
 
-`commtest.camcal_travel` 单独限制标定起始位和每个目标位；X、Y 分别不得超出 [80,180]、[-10,150]，Z 必须明确提供递增范围。当前 Z [0,1] 仅为待确认值，Claude 部署前须按设备实际安全范围修改，否则无法完成 Z±5 标定。越界返回 999 `COMMTEST-CAMCAL-TRAVEL`。打印纸厚度按 0.1 mm 配置，贴硬板时改为实测总厚。
+配置 `camera_calibration.start_xyz` 后，第一次 80 若未在起始位则回 80 和起始坐标，PLC 到位后再发 80 才拍首图。`commtest.camcal_travel` 限制标定起始目标位和每个目标位；X、Y 分别不得超出 [80,180]、[-10,150]，Z 必须明确提供递增范围。当前 Z 行程和标定幅度见配置。越界返回 999 `COMMTEST-CAMCAL-TRAVEL`。打印纸厚度按 0.1 mm 配置，贴硬板时改为实测总厚。
 
 标定使用 `config/commtest_calibration/camera.yaml` 和其 `history`，不会覆盖生产标定。原图及 `session_record.json` 保存在 `runs_commtest` 的会话目录，成功事件的 report 记录精度指标。离线重解例如：
 

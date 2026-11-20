@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class CameraCalibConfig:
+    start_xyz: tuple[float, float, float] | None = None
     cols: int = 21
     rows: int = 16
     square_mm: float = 5.0

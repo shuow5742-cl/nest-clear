@@ -570,7 +570,7 @@ class App:
         else:
             glare = '无'
         kind = data.get('kind') or '—'
-        step = {'move': '移动拍照', 'done': '完成', 'fail': '失败'}.get(kind, kind)
+        step = '前往起始位' if data.get('event') == 'camcal_goto_start' else {'move': '移动拍照', 'done': '完成', 'fail': '失败'}.get(kind, kind)
         code = data.get('code')
         self.cam_step.set({'步骤': f'{step}  {code}' if code else step, '检出角点': f"{detail.get('detected_corners', '—')}/{detail.get('predicted_corners', '—')}", '饱和比例': saturation, '亮斑': glare})
 
