@@ -63,7 +63,7 @@ registers:
   address: 40931
   type: UINT16
   direction: PC→PLC
-  description: 心跳
+  description: 心跳，0/1 交替，每秒翻转一次
 - name: algorithm_ready
   address: 40932
   type: UINT16

@@ -302,8 +302,9 @@ class Supervisor:
         if now >= self._next_heartbeat:
             self._next_heartbeat = now + 1.0
             try:
-                self._heartbeat = (self._heartbeat + 1) % 65536
-                self.plc.write("heartbeat", self._heartbeat)
+                next_heartbeat = 1 - self._heartbeat
+                self.plc.write("heartbeat", next_heartbeat)
+                self._heartbeat = next_heartbeat
                 self._heartbeat_last_write = datetime.now().astimezone().isoformat()
                 if self._heartbeat_failures:
                     self.events.emit("heartbeat_restored", address=40931, failures=self._heartbeat_failures, duration_s=now - self._heartbeat_failure_since)

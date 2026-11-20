@@ -43,10 +43,12 @@ def test_plc_and_child(tmp_path, caplog) -> None:
             fake.set_status(1 << 7)
             supervisor.tick()
             assert supervisor.child is not None and supervisor.child.poll() is None
-            first = fake.io.read("heartbeat")
-            supervisor._next_heartbeat = 0
-            supervisor.tick()
-            assert fake.io.read("heartbeat") == first + 1
+            values = [fake.io.read("heartbeat")]
+            for _ in range(2):
+                supervisor._next_heartbeat = 0
+                supervisor.tick()
+                values.append(fake.io.read("heartbeat"))
+            assert values == [1, 0, 1]
             fake.set_status(1 << 3)
             supervisor.tick()
             assert json.loads((tmp_path / "supervisor.json").read_text())["paused"]
@@ -63,6 +65,39 @@ def test_plc_and_child(tmp_path, caplog) -> None:
         finally:
             supervisor._stop("测试结束")
             plc.close()
+
+
+def test_heartbeat_write_failure_preserves_sequence(tmp_path) -> None:
+    """写失败后重试同一个值，成功写入的心跳继续交替。"""
+    class PLC:
+        broken = False
+        values = None
+
+        def __init__(self):
+            self.values = []
+
+        def read(self, name):
+            return 0
+
+        def write(self, name, value):
+            if name == "heartbeat":
+                if self.broken:
+                    raise OSError("断线")
+                self.values.append(value)
+
+    plc = PLC()
+    config = replace(load_config("config/nest_clear.yaml"), record_directory=str(tmp_path))
+    supervisor = Supervisor(config, plc)
+    supervisor.tick()
+    plc.broken = True
+    for _ in range(2):
+        supervisor._next_heartbeat = 0
+        supervisor.tick()
+    plc.broken = False
+    for _ in range(2):
+        supervisor._next_heartbeat = 0
+        supervisor.tick()
+    assert plc.values == [1, 0, 1]
 
 
 def test_watchdog_does_not_restart(tmp_path) -> None:
