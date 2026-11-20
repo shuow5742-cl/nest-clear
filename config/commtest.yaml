@@ -183,7 +183,7 @@ camera_calibration:
   position_tolerance_mm: 0.05
   min_corner_ratio: 0.6
   saturation_level: 250
-  max_saturated_fraction: 0.01
+  max_saturated_fraction: 0.02  # 11-20 光源不均，6000us 时全图饱和约 0.83%，留余量；分析表明轻微饱和不影响角点精度
   glare_blob_min_px: 2000
   max_rms_px: 0.25
   max_image_rms_px: 0.5

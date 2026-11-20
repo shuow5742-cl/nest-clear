@@ -35,6 +35,14 @@ def _board(cfg):
 def _rot(v):
     return cv2.Rodrigues(np.asarray(v, dtype=float))[0]
 
+def _visible_mask(board_points, square_mm, rvec, tvec, nominal, image_size):
+    offsets = np.array([[-1, -1, 0], [-1, 1, 0], [1, -1, 0], [1, 1, 0]], float) * square_mm
+    points = (board_points[:, None, :] + offsets).reshape(-1, 3)
+    uv = cv2.projectPoints(points, rvec, tvec, nominal.K, nominal.distortion)[0].reshape(-1, 4, 2)
+    w, h = image_size
+    return np.all((uv[:, :, 0] >= 8) & (uv[:, :, 0] < w-8) &
+                  (uv[:, :, 1] >= 8) & (uv[:, :, 1] < h-8), axis=1)
+
 def _plan(cfg, start, center):
     s = np.asarray(start, float); c = np.asarray(center, float)
     if np.any(np.abs(c[:2]-s[:2]) > cfg.xy_limit_mm-5):
@@ -185,9 +193,12 @@ class CameraCalibrationSession:
             except cv2.error: pass
         if predicted is None and self._rb is not None:
             rc=self.nominal.rotation.T @ self._rb; tc=self.nominal.rotation.T @ (self._tb-pose)
-            predicted=cv2.projectPoints(self._board_points,cv2.Rodrigues(rc)[0],tc,self.nominal.K,self.nominal.distortion)[0].reshape(-1,2)
-        if predicted is None: predicted=np.empty((0,2))
-        w,h=self.image_size; visible=(predicted[:,0]>=8)&(predicted[:,0]<w-8)&(predicted[:,1]>=8)&(predicted[:,1]<h-8)
+            rv, tv = cv2.Rodrigues(rc)[0], tc
+            predicted=cv2.projectPoints(self._board_points,rv,tv,self.nominal.K,self.nominal.distortion)[0].reshape(-1,2)
+        if predicted is None:
+            predicted=np.empty((0,2)); visible=np.empty(0, dtype=bool)
+        else:
+            visible=_visible_mask(self._board_points,cfg.square_mm,rv,tv,self.nominal,self.image_size)
         missing = [i for i in np.flatnonzero(visible) if i not in set(ids.tolist())]
         mask=np.zeros(gray.shape,np.uint8)
         if len(predicted):

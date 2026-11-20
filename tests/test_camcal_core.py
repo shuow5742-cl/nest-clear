@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import pytest
 from nest_clear.camcal import CameraCalibConfig, CameraCalibrationSession, CalibResult, save_calibration, solve_offline
-from nest_clear.camcal.session import _board, _plan
+from nest_clear.camcal.session import _board, _plan, _visible_mask
 from nest_clear.vision.geometry import Calibration, load_calibration, pixel_to_module
 
 CFG=CameraCalibConfig()
@@ -71,6 +71,20 @@ def rendered_board(offset=0.):
     uv=cv2.projectPoints(pc,np.zeros(3),np.zeros(3),k,np.zeros(5))[0].reshape(-1,2).astype('float32')
     transform=cv2.getPerspectiveTransform(np.array([[0,0],[1049,0],[1049,799],[0,799]],'float32'),uv)
     return cv2.warpPerspective(texture,transform,(640,480),borderValue=180),nominal
+
+def test_visible_mask_requires_complete_surrounding_squares():
+    points = np.asarray(_board(CFG).getChessboardCorners(), float)
+    k = np.array([[100., 0, 50], [0, 100., 50], [0, 0, 1.]])
+    nominal = replace(N, K=k, distortion=np.zeros(5))
+    rv = np.zeros(3); tv = np.array([-50., -35., 100.])
+    uv = cv2.projectPoints(points, rv, tv, k, nominal.distortion)[0].reshape(-1, 2)
+    old = (uv[:, 0] >= 8) & (uv[:, 0] < 92) & (uv[:, 1] >= 8) & (uv[:, 1] < 92)
+    visible = _visible_mask(points, CFG.square_mm, rv, tv, nominal, (100, 100))
+    edge = np.flatnonzero(np.all(points == [10, 35, 0], axis=1))[0]
+    inside = np.flatnonzero(np.all(points == [50, 35, 0], axis=1))[0]
+    assert old[edge] and not visible[edge]
+    assert old[inside] and visible[inside]
+    assert 0 < visible.sum() < old.sum()
 
 def test_rendered_detection_glare_and_offcenter():
     image, nominal=rendered_board(); session=CameraCalibrationSession(CFG,nominal,(640,480),(0,0,110))
