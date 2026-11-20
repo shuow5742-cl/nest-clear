@@ -43,6 +43,16 @@ def _visible_mask(board_points, square_mm, rvec, tvec, nominal, image_size):
     return np.all((uv[:, :, 0] >= 8) & (uv[:, :, 0] < w-8) &
                   (uv[:, :, 1] >= 8) & (uv[:, :, 1] < h-8), axis=1)
 
+def _glare_margin(predicted, cfg):
+    """Median projected spacing of horizontally and vertically adjacent corners."""
+    if predicted is not None and np.shape(predicted) == ((cfg.cols-1)*(cfg.rows-1), 2):
+        grid = np.asarray(predicted).reshape(cfg.rows-1, cfg.cols-1, 2)
+        distances = np.concatenate((np.linalg.norm(np.diff(grid, axis=0), axis=2).ravel(),
+                                    np.linalg.norm(np.diff(grid, axis=1), axis=2).ravel()))
+        distances = distances[np.isfinite(distances) & (distances > 0)]
+        if len(distances): return float(np.median(distances))
+    return 10.0
+
 def _plan(cfg, start, center):
     s = np.asarray(start, float); c = np.asarray(center, float)
     if np.any(np.abs(c[:2]-s[:2]) > cfg.xy_limit_mm-5):
@@ -209,9 +219,9 @@ class CameraCalibrationSession:
         for idx in range(1,num):
             x,y,bw,bh,area=map(int,stats[idx]);
             if area < cfg.glare_blob_min_px: continue
-            margin=max(10,int(cfg.square_mm * self.nominal.K[0,0]/max(1, abs(pose[2]-self.nominal.plane_z))))
+            margin=_glare_margin(predicted, cfg)
             lost=[i for i in missing if x-margin <= predicted[i,0] <= x+bw+margin and y-margin <= predicted[i,1] <= y+bh+margin]
-            if lost:
+            if len(lost) >= cfg.glare_min_lost_corners:
                 blob={'bbox':[x,y,x+bw-1,y+bh-1],'area_px':area,'missing_corners':len(lost)}; cv2.rectangle(overlay,(x,y),(x+bw-1,y+bh-1),(255,0,255),2); break
         for u,v in pts: cv2.circle(overlay,(round(u),round(v)),4,(0,255,0),-1)
         for i in missing:

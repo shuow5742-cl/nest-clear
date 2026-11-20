@@ -264,7 +264,7 @@ def _hair_config(value: Any) -> HairDetectConfig:
 
 def _camera_calibration(data: Any) -> dict[str, Any]:
     """校验共享接口字段；缺省值由运行时 CameraCalibConfig 提供。"""
-    integers = {"cols", "rows", "saturation_level", "glare_blob_min_px"}
+    integers = {"cols", "rows", "saturation_level", "glare_blob_min_px", "glare_min_lost_corners"}
     fractions = {"min_corner_ratio", "max_saturated_fraction", "min_coverage", "max_axis_scale_error"}
     numbers = {"square_mm", "marker_mm", "board_thickness_mm", "xy_limit_mm", "z_limit_mm",
                "grid_half_mm", "z_outer_mm", "z_inner_mm", "position_tolerance_mm", "max_rms_px",

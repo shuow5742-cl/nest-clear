@@ -158,6 +158,18 @@ def test_invalid_config(tmp_path):
         load_config(path)
 
 
+@pytest.mark.parametrize('value', [0, -1, 1.5, True])
+def test_invalid_glare_min_lost_corners(tmp_path, value):
+    import yaml
+    from nest_clear.guard import GuardError
+    source = yaml.safe_load(open('config/nest_clear.yaml', encoding='utf-8'))
+    source['camera_calibration']['glare_min_lost_corners'] = value
+    path = tmp_path / 'bad.yaml'
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(GuardError, match='camera_calibration.glare_min_lost_corners'):
+        load_config(path)
+
+
 def test_capture_failure(rig):
     rig.camera.fail = True
     assert rig.request(1, 80)[0] == 82

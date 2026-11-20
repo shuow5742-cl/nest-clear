@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import pytest
 from nest_clear.camcal import CameraCalibConfig, CameraCalibrationSession, CalibResult, save_calibration, solve_offline
-from nest_clear.camcal.session import _board, _plan, _visible_mask
+from nest_clear.camcal.session import _board, _glare_margin, _plan, _visible_mask
 from nest_clear.vision.geometry import Calibration, load_calibration, pixel_to_module
 
 CFG=CameraCalibConfig()
@@ -91,9 +91,47 @@ def test_rendered_detection_glare_and_offcenter():
     step=session.add(image,(0,0,110)); assert step.kind=='move' and step.detail['detected_corners']>100
     glare=image.copy(); cv2.ellipse(glare,(320,240),(30,24),0,0,360,255,-1)
     step=CameraCalibrationSession(CFG,nominal,(640,480),(0,0,110)).add(glare,(0,0,110))
-    assert step.code=='CAMCAL-GLARE' and step.detail['bbox']==[290,216,350,264] and step.detail['missing_corners']>0
+    assert step.code=='CAMCAL-GLARE' and step.detail['bbox']==[290,216,350,264] and step.detail['missing_corners']>=2
     image,nominal=rendered_board(24.); step=CameraCalibrationSession(CFG,nominal,(640,480),(0,0,110)).add(image,(0,0,110))
     assert step.code=='CAMCAL-OFFCENTER'
+
+def test_glare_margin_uses_adjacent_projected_corners():
+    cfg = replace(CFG, cols=4, rows=3)
+    points = np.array([[0, 0], [10, 0], [20, 0], [0, 20], [10, 20], [20, 20]], float)
+    assert _glare_margin(points, cfg) == 10
+    assert _glare_margin(None, cfg) == 10
+
+def test_edge_glare_does_not_claim_distant_missing_corners():
+    image, nominal = rendered_board()
+    detector = cv2.aruco.CharucoDetector(_board(CFG))
+    corners, ids, _, _ = detector.detectBoard(image)
+    pts = corners.reshape(-1, 2)
+    keep = ~((abs(pts[:, 0]-320) < 50) & (abs(pts[:, 1]-240) < 50))
+    cv2.rectangle(image, (280, 200), (360, 280), 30, -1)
+    cv2.rectangle(image, (590, 160), (605, 300), 255, -1)
+    class Detector:
+        def detectBoard(self, gray):
+            return corners[keep], ids[keep], None, None
+    session = CameraCalibrationSession(replace(CFG, glare_blob_min_px=100), nominal, (640, 480), (0, 0, 110))
+    session._detector = Detector()
+    step = session.add(image, (0, 0, 110))
+    assert step.kind == 'move' and step.detail['missing_corners'] >= 2
+
+def test_glare_minimum_lost_corners_is_configurable():
+    image, nominal = rendered_board()
+    corners, ids, _, _ = cv2.aruco.CharucoDetector(_board(CFG)).detectBoard(image)
+    pts = corners.reshape(-1, 2)
+    index = np.argmin(np.linalg.norm(pts - [320, 240], axis=1))
+    u, v = np.round(pts[index]).astype(int)
+    cv2.circle(image, (u, v), 10, 255, -1)
+    keep = np.arange(len(ids)) != index
+    class Detector:
+        def detectBoard(self, gray):
+            return corners[keep], ids[keep], None, None
+    for minimum, expected in [(2, None), (1, 'CAMCAL-GLARE')]:
+        session = CameraCalibrationSession(replace(CFG, glare_blob_min_px=100, glare_min_lost_corners=minimum), nominal, (640, 480), (0, 0, 110))
+        session._detector = Detector()
+        assert session.add(image, (0, 0, 110)).code == expected
 
 def test_rendered_multiview_solve():
     board=_board(CFG); tex=(board.generateImage((2100,1600)).astype(float)*.8).astype('uint8')
