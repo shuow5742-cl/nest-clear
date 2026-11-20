@@ -73,6 +73,7 @@ class Supervisor:
         self._plc_last_read = None
         self._heartbeat_last_write = None
         self._ready = None
+        self._startup_ready_pending = False
         self.ui_process = None
         self._ui_failures = []
         self._ui_next = 0.0
@@ -197,6 +198,12 @@ class Supervisor:
             logger.error("算法启动完成标志清零失败：%s；请检查 PLC 连接", exc)
             self.events.emit("error", operation="clear_algorithm_ready", reason=str(exc))
             return False
+
+    def _clear_startup_ready(self) -> None:
+        """无子进程时完成启动清零，失败留待 PLC 恢复后重试。"""
+        if self._startup_ready_pending and self.child is None and self._clear_ready():
+            self._startup_ready_pending = False
+            self.events.emit("algorithm_ready_cleared", reason="supervisor_start")
 
     def _stop_preview(self, reason: str) -> bool:
         process = self.preview_process
@@ -323,6 +330,8 @@ class Supervisor:
                 )
         else:
             self._plc_last_read = datetime.now().astimezone().isoformat()
+            # 先清除启动遗留值，再处理可能拉起子进程的初始化边沿。
+            self._clear_startup_ready()
             try:
                 self._ready = int(self.plc.read("algorithm_ready"))
             except Exception:
@@ -485,6 +494,8 @@ class Supervisor:
         if threading.current_thread() is threading.main_thread():
             previous_term = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
         try:
+            self._startup_ready_pending = True
+            self._clear_startup_ready()
             while True:
                 try:
                     self._ui_tick()
