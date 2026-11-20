@@ -7,8 +7,8 @@ from nest_clear.ui.demo import write_demo
 
 class Widget:
     def __init__(self, parent=None, **kwargs):
-        self.parent = parent; self.options = dict(kwargs); self.children = []; self.rows = {}; self.sel = ()
-        self.tk = self; self.destroyed = False; self.text_calls = []
+        self.parent = parent; self.master = parent; self.options = dict(kwargs); self.children = []; self.rows = {}; self.sel = ()
+        self.tk = self; self.destroyed = False; self.text_calls = []; self.row_options = {}; self.bindings = {}
         if isinstance(parent, Widget): parent.children.append(self)
     def call(self, *args): pass
     def winfo_fpixels(self, arg): return 96.0
@@ -16,12 +16,15 @@ class Widget:
     def winfo_screenheight(self): return 768
     def winfo_width(self): return 600
     def winfo_height(self): return 300
+    def winfo_reqheight(self): return 22
     def winfo_rootx(self): return 5
     def winfo_rooty(self): return 7
-    def rowconfigure(self, *args, **kwargs): pass
+    def rowconfigure(self, index, **kwargs): self.row_options.setdefault(index, {}).update(kwargs)
     def columnconfigure(self, *args, **kwargs): pass
     def grid(self, *args, **kwargs): pass
-    def bind(self, *args, **kwargs): pass
+    def grid_configure(self, **kwargs): self.options.update(kwargs)
+    def grid_propagate(self, *args): pass
+    def bind(self, event, callback, *args, **kwargs): self.bindings[event] = callback
     def option_add(self, *args): pass
     def title(self, *args): pass
     def minsize(self, *args): pass
@@ -66,6 +69,29 @@ class Style:
     def map(self, *args, **kwargs): pass
 
 
+def test_home_picture_width_tracks_height_and_image_ratio():
+    from nest_clear.ui.app import resize_home_picture
+    container = Widget(); body = Widget(); picture = SimpleNamespace(image=None)
+    resize_home_picture(container, body, picture)
+    assert container.options['width'] == round(300 * 4024 / 3036) + 24
+    picture.image = SimpleNamespace(size=(960, 600))
+    resize_home_picture(container, body, picture)
+    assert container.options['width'] == 504
+    container.winfo_width = lambda: 503
+    container.options.clear()
+    resize_home_picture(container, body, picture)
+    assert not container.options
+
+
+def test_demo_images_use_camera_aspect_ratio(tmp_path):
+    from PIL import Image
+    from nest_clear.paths import live_image_file
+    write_demo(tmp_path)
+    for name in ('latest', 'camcal_latest', 'preview_latest', 'calib_front_latest', 'calib_side_latest'):
+        with Image.open(live_image_file(tmp_path, name)) as image:
+            assert image.size == (1006, 759)
+
+
 def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     from nest_clear.ui import app
     write_demo(tmp_path, initial=True)
@@ -77,7 +103,7 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
     class FakeCard(Widget):
         def __init__(self, parent, title, theme):
-            super().__init__(parent); self.body = Widget(self)
+            super().__init__(parent); self.body = Widget(self); self.title_label = Widget(self)
     class FakePicture(Widget):
         def __init__(self, parent, path, theme): super().__init__(parent)
         def poll(self): pass
@@ -89,6 +115,34 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     monkeypatch.setattr(app, 'KeyValueGrid', FakeKeyValueGrid)
     for page in app.App.PAGE_NAMES:
         ui = app.App(tmp_path, page=page)
+        left = ui.home.children[0]
+        device_content = ui.bits[0].parent
+        pick_content = ui.pick_values['盘号'].parent
+        log_card = ui.table.parent.master
+        left.winfo_reqheight = lambda: 280 + 4 * device_content.row_options[0]['minsize']
+        log_card.winfo_reqheight = lambda: 160
+        ui.home.winfo_height = lambda: 700
+        ui.home.bindings['<Configure>'](None)
+        assert device_content.master.options['pady'] == (0, 0)
+        assert device_content.master.master.options['pady'] == 1
+        ui.root.winfo_height = lambda: 1080
+        ui.home.bindings['<Configure>'](None)
+        assert device_content.master.options['pady'] == (2, 6)
+        assert device_content.master.master.options['pady'] == 3
+        assert ui.home.row_options[0]['weight'] == 0
+        assert ui.home.row_options[1] == {'weight': 1, 'minsize': 166}
+        ui.home.winfo_height = lambda: 500
+        ui.home.bindings['<Configure>'](None)
+        assert ui.home.row_options[0]['weight'] == 1
+        assert left.row_options[0]['weight'] == 1
+        assert device_content.row_options[0]['minsize'] == 22
+        assert pick_content.row_options[0]['minsize'] == 22
+        ui.home.bindings['<Configure>'](None)
+        assert device_content.row_options[0]['minsize'] == 22
+        ui.home.winfo_height = lambda: 700
+        ui.home.bindings['<Configure>'](None)
+        assert device_content.row_options[0]['minsize'] == 30
+        ui.root.winfo_height = lambda: 300
         assert any(child.options.get('text') == app.FONT_WARNING for child in ui.root.children)
         for index, name in enumerate(app.App.PAGE_NAMES):
             ui.select_page(name + '页' if name != '主页' else name)

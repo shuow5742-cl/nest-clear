@@ -93,8 +93,8 @@ class Card(tk.Frame):
         super().__init__(parent, bg=WHITE, highlightbackground=BORDER, highlightcolor=BORDER, highlightthickness=1)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
-        tk.Label(self, text=title, font=theme.title, bg=WHITE, fg=INK, anchor='w').grid(
-            row=0, column=0, sticky='ew', padx=8, pady=(5, 0))
+        self.title_label = tk.Label(self, text=title, font=theme.title, bg=WHITE, fg=INK, anchor='w')
+        self.title_label.grid(row=0, column=0, sticky='ew', padx=8, pady=(5, 0))
         self.body = tk.Frame(self, bg=WHITE)
         self.body.grid(row=1, column=0, sticky='nsew', padx=8, pady=(2, 6))
         self.body.rowconfigure(0, weight=1)
@@ -137,6 +137,7 @@ class Picture(tk.Label):
         self.results = queue.Queue()
         self.busy = False
         self.size = None
+        self.aspect_changed = None
         self.bind('<Button-1>', self.enlarge)
 
     def poll(self):
@@ -164,9 +165,12 @@ class Picture(tk.Label):
             return
         self.busy = False
         if original is not None and path == self.path:
+            old_size = self.image.size if self.image is not None else None
             self.image, self.mtime, self.size = original, stamp, size
             self.photo = ImageTk.PhotoImage(preview)
             self.configure(image=self.photo, text='')
+            if self.aspect_changed and (old_size is None or old_size[0] * original.height != original.width * old_size[1]):
+                self.aspect_changed()
 
     def enlarge(self, _event=None):
         if self.image is None:
@@ -180,6 +184,16 @@ class Picture(tk.Label):
         canvas.create_image(0, 0, image=photo, anchor='nw'); canvas.image = photo
         canvas.bind('<ButtonPress-1>', lambda event: canvas.scan_mark(event.x, event.y))
         canvas.bind('<B1-Motion>', lambda event: canvas.scan_dragto(event.x, event.y, gain=1))
+
+
+def resize_home_picture(container, body, picture):
+    height = body.winfo_height()
+    if height <= 1:
+        return
+    width, original_height = picture.image.size if picture.image is not None else (4024, 3036)
+    target = round(height * width / original_height) + 24
+    if abs(container.winfo_width() - target) >= 2:
+        container.configure(width=target)
 
 
 class App:
@@ -296,44 +310,87 @@ class App:
         return tree
 
     def build_home(self):
-        self.home.columnconfigure(0, weight=38, uniform='homecols')
-        self.home.columnconfigure(1, weight=62, uniform='homecols')
-        self.home.rowconfigure(0, weight=75, uniform='homerows')
-        self.home.rowconfigure(1, weight=25, uniform='homerows')
+        self.home.columnconfigure(0, weight=1)
+        self.home.rowconfigure(1, weight=1)
         left = tk.Frame(self.home, bg=BG)
         left.grid(row=0, column=0, sticky='nsew')
-        left.columnconfigure(0, weight=1)
-        for i, weight in enumerate((4, 3, 3, 2)):
-            left.rowconfigure(i, weight=weight)
-        left.rowconfigure(1, minsize=120)
+        left.columnconfigure(0, weight=3, uniform='homeleft')
+        left.columnconfigure(1, weight=2, uniform='homeleft')
         device = self.card(left, '设备状态 40901', 0, 0)
-        for i in range(4): device.rowconfigure(i, weight=1)
-        for i in range(3): device.columnconfigure(i, weight=1, uniform='bits')
+        device_content = tk.Frame(device, bg=WHITE)
+        device_content.grid(row=0, column=0, sticky='new')
+        for i in range(4): device_content.rowconfigure(i, minsize=30)
+        for i in range(3): device_content.columnconfigure(i, weight=1, uniform='bits')
         self.bits = []
         for i in range(12):
-            label = self.label(device)
+            label = self.label(device_content)
             label.grid(row=i // 3, column=i % 3, sticky='w')
             self.bits.append(label)
-        process = self.card(left, '进程', 1, 0)
+        process = self.card(left, '进程', 1, 0, columnspan=2)
         cols = ('程序', 'PID', '启动时间', '运行时长', '状态', '最近退出原因')
         self.process_table = self.table_widget(process, cols, (55, 55, 75, 75, 60, 100), stretch=('最近退出原因',), height=2)
         self.process_table.insert('', 'end', iid='parent'); self.process_table.insert('', 'end', iid='child')
-        pick = self.card(left, '挑毛进度', 2, 0)
+        pick = self.card(left, '挑毛进度', 0, 1)
+        pick_content = tk.Frame(pick, bg=WHITE)
+        pick_content.grid(row=0, column=0, sticky='new')
+        for i in range(3): pick_content.rowconfigure(i, minsize=30)
         self.pick_values = {}
         for i, title in enumerate(('盘号', '视野', '粗拍次数', '可去数量', '红框数量', '已下发')):
             r, c = divmod(i, 2)
-            pick.rowconfigure(r, weight=1); pick.columnconfigure(c * 2 + 1, weight=1)
-            self.label(pick, title + '  ', fg=MUTED).grid(row=r, column=c * 2, sticky='w')
-            value = self.label(pick, '—', font=self.theme.mono)
+            pick_content.columnconfigure(c * 2 + 1, weight=1)
+            label = self.label(pick_content, title + '  ', fg=MUTED)
+            label.grid(row=r, column=c * 2, sticky='w')
+            value = self.label(pick_content, '—', font=self.theme.mono)
             value.grid(row=r, column=c * 2 + 1, sticky='w'); self.pick_values[title] = value
-        reply = self.card(left, '最近应答', 3, 0)
+        reply = self.card(left, '最近应答', 2, 0, columnspan=2)
         self.reply_table = self.table_widget(reply, ('时间', 'Task_ID', '功能码', '原因'),
                                              (80, 65, 85, 120), stretch=('原因',), height=5)
-        image = self.card(self.home, '最新标注图 · 点击放大', 0, 1)
-        self.picture(image, 'latest')
+        image_container = tk.Frame(self.home, bg=BG, width=400)
+        image_container.grid(row=0, column=1, sticky='nsew')
+        image_container.grid_propagate(False)
+        image_container.rowconfigure(0, weight=1); image_container.columnconfigure(0, weight=1)
+        image = self.card(image_container, '最新标注图 · 点击放大', 0, 0)
+        picture = self.picture(image, 'latest')
+        def resize_image(_event=None):
+            resize_home_picture(image_container, image, picture)
+        image.bind('<Configure>', resize_image)
+        picture.aspect_changed = resize_image
         logs = self.card(self.home, '异常日志 · 双击查看详情', 1, 0, columnspan=2)
         cols = ('时间', '类别', 'Task_ID', '功能码', '现象', '位置', '排查建议')
-        self.table = self.table_widget(logs, cols, (90, 70, 70, 70, 250, 200, 250), stretch=('现象', '排查建议'), height=6)
+        self.table = self.table_widget(logs, cols, (90, 70, 70, 70, 250, 200, 250), stretch=('现象', '排查建议'), height=4)
+        layout_state = {}
+        def resize_home(_event):
+            if self.home.winfo_height() <= 1 or logs.master.winfo_reqheight() <= 1:
+                return
+            small = self.root.winfo_height() <= 800
+            if layout_state.get('small') != small:
+                for body in (device, pick, process, reply, logs):
+                    body.master.grid_configure(pady=1 if small else 3)
+                    body.master.title_label.grid_configure(pady=(0, 0) if small else (5, 0))
+                    body.grid_configure(pady=(0, 0) if small else (2, 6))
+                layout_state['small'] = small
+            log_height = logs.master.winfo_reqheight() + 6
+            current_row = layout_state.get('row_height', 30)
+            natural_row = max(widget.winfo_reqheight() for widget in self.bits)
+            full_height = left.winfo_reqheight() + 4 * (
+                max(30, natural_row) - max(current_row, natural_row))
+            shortage = max(0, full_height + log_height - self.home.winfo_height())
+            row_height = max(22, 30 - (shortage + 3) // 4)
+            if current_row != row_height:
+                for index in range(4): device_content.rowconfigure(index, minsize=row_height)
+                for index in range(3): pick_content.rowconfigure(index, minsize=row_height)
+                layout_state['row_height'] = row_height
+            compact = self.home.winfo_height() < left.winfo_reqheight() + log_height
+            if layout_state.get('log_height') != log_height:
+                self.home.rowconfigure(1, minsize=log_height)
+                layout_state['log_height'] = log_height
+            if layout_state.get('compact') != compact:
+                self.home.rowconfigure(0, weight=int(compact))
+                left.rowconfigure(0, weight=int(compact))
+                layout_state['compact'] = compact
+        self.home.bind('<Configure>', resize_home)
+        left.bind('<Configure>', resize_home)
+        logs.master.bind('<Configure>', resize_home)
         for color in ('red', 'yellow', 'green'):
             for stripe, bg in (('even', WHITE), ('odd', '#f8fafc')):
                 self.table.tag_configure(f'{color}_{stripe}', foreground=COLORS[color], background=bg)

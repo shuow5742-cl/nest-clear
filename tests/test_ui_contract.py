@@ -43,6 +43,108 @@ def test_ui_restarts_and_gives_up(tmp_path,monkeypatch):
     assert len(starts)==5 and s._ui_disabled
 
 @pytest.mark.skipif(not os.environ.get('DISPLAY'),reason='无 DISPLAY')
+@pytest.mark.parametrize('geometry', ['1366x768', '1920x1080'])
+def test_home_layout_with_system_python(tmp_path, geometry):
+    import subprocess
+    import tkinter
+    from pathlib import Path
+    python = Path('/usr/bin/python3')
+    if not python.exists():
+        pytest.skip('系统 Python 不存在')
+    try:
+        probe = tkinter.Tk()
+    except tkinter.TclError:
+        pytest.skip('DISPLAY 不可连接')
+    probe.destroy()
+    code = '''
+import sys, time
+from nest_clear.ui.app import App
+from nest_clear.ui.demo import write_demo
+write_demo(sys.argv[1], initial=True)
+app = App(sys.argv[1], 50, page='main')
+try:
+    app.root.state('normal')
+    app.root.attributes('-zoomed', False)
+    app.root.geometry(sys.argv[2])
+    app.refresh()
+    for index in range(4):
+        app.table.insert('', 'end', iid=f'test-{index}')
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        app.root.update()
+        time.sleep(0.01)
+    for content in (app.bits[0].master, app.pick_values['盘号'].master):
+        body = content.master
+        for widget in content.winfo_children():
+            bottom = widget.winfo_rooty() + widget.winfo_height()
+            for ancestor in (body, body.master, body.master.master, app.home):
+                assert bottom <= ancestor.winfo_rooty() + ancestor.winfo_height(), (widget, ancestor)
+    for table, count in ((app.process_table, 2), (app.reply_table, 5), (app.table, 4)):
+        bbox = table.bbox(table.get_children()[count - 1])
+        assert bbox and bbox[1] + bbox[3] <= table.winfo_height(), (table, bbox)
+    if sys.argv[2] == '1920x1080':
+        assert app.bits[3].winfo_y() - app.bits[0].winfo_y() == 30
+finally:
+    app.root.destroy()
+'''
+    result = subprocess.run([str(python), '-c', code, str(tmp_path), geometry],
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not os.environ.get('DISPLAY'),reason='无 DISPLAY')
+@pytest.mark.parametrize('geometry', ['1366x768', '1680x1050', '1920x1080'])
+def test_home_tables_fit_window(tmp_path, geometry):
+    import tkinter
+    from nest_clear.ui.app import App
+    from nest_clear.ui.demo import write_demo
+    try:
+        probe = tkinter.Tk()
+    except tkinter.TclError:
+        pytest.skip('DISPLAY 不可连接')
+    probe.destroy()
+    write_demo(tmp_path, initial=True)
+    app = App(tmp_path, 50)
+    try:
+        try:
+            app.root.state('normal')
+            app.root.attributes('-zoomed', False)
+        except tkinter.TclError:
+            pass
+        app.root.geometry(geometry)
+        app.refresh()
+        for index in range(4):
+            app.table.insert('', 'end', iid=f'test-{index}')
+        for _ in range(5):
+            app.root.update()
+        for table, count in ((app.process_table, 2), (app.reply_table, 5), (app.table, 4)):
+            row = table.get_children()[count - 1]
+            bbox = table.bbox(row)
+            assert bbox and bbox[1] + bbox[3] <= table.winfo_height()
+        for table in (app.process_table, app.reply_table):
+            bbox = table.bbox(table.get_children()[-1])
+            assert table.winfo_height() - bbox[1] - bbox[3] <= 4
+        from tkinter import font as tkfont
+        assert tkfont.Font(root=app.root, font=app.bits[0].cget('font')).actual('size') == 12
+        assert tkfont.Font(root=app.root, font=app.pick_values['盘号'].cget('font')).actual('size') == 12
+        for widgets in (app.bits[::3], list(app.pick_values.values())[::2]):
+            assert all(22 <= second.winfo_y() - first.winfo_y() <= 34
+                       for first, second in zip(widgets, widgets[1:]))
+            content = widgets[0].master
+            body = content.master
+            assert content.winfo_y() == 0
+            assert content.winfo_height() <= body.winfo_height()
+            for widget in content.winfo_children():
+                bottom = widget.winfo_rooty() + widget.winfo_height()
+                for ancestor in (body, body.master, body.master.master, app.home):
+                    assert bottom <= ancestor.winfo_rooty() + ancestor.winfo_height()
+        if geometry == '1920x1080':
+            assert app.table.winfo_height() >= 26 * 7
+    finally:
+        app.root.destroy()
+
+
+@pytest.mark.skipif(not os.environ.get('DISPLAY'),reason='无 DISPLAY')
 def test_ui_smoke(tmp_path, monkeypatch):
     import tkinter
     from nest_clear.ui.app import App

@@ -2,8 +2,6 @@
 import argparse
 import json
 import os
-import subprocess
-import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -49,14 +47,14 @@ def write_demo(root, step=0, *, initial=False, preview_state="on"):
         'tooltip':{'tool':1,'iterations':2,'event':'tooltip_aligned','history':history,'new':[0.02,-0.01,0.01]}})
     for name in ('latest', 'camcal_latest', 'preview_latest', 'calib_front_latest', 'calib_side_latest'):
         path = live_image_file(root, name); path.parent.mkdir(parents=True, exist_ok=True)
-        image = Image.new('RGB', (960, 600), '#253444'); draw = ImageDraw.Draw(image)
+        image = Image.new('RGB', (1006, 759), '#253444'); draw = ImageDraw.Draw(image)
         draw.rectangle((100 + step % 20 * 3, 100, 600, 450), outline='#00ff88', width=4)
         for x in range(170, 590, 65):
             for y in range(150, 440, 60): draw.ellipse((x-4,y-4,x+4,y+4), fill='#46a7ff')
         draw.rectangle((510,120,560,170),outline='#ffdd55',width=3)
         if name == 'preview_latest':
-            draw.line((480, 0, 480, 600), fill='#00ffff', width=2); draw.line((0, 300, 960, 300), fill='#00ffff', width=2)
-            draw.line((465, 300, 495, 300), fill='red', width=3); draw.line((480, 285, 480, 315), fill='red', width=3)
+            draw.line((503, 0, 503, 759), fill='#00ffff', width=2); draw.line((0, 379, 1006, 379), fill='#00ffff', width=2)
+            draw.line((488, 379, 518, 379), fill='red', width=3); draw.line((503, 364, 503, 394), fill='red', width=3)
         draw.text((30, 30), f'{name}  frame {step}', fill='white')
         temp = path.with_suffix('.tmp'); image.save(temp, format='JPEG'); os.replace(temp, path)
     if initial:
@@ -85,7 +83,7 @@ def generate(root):
 
 def main():
     from .__main__ import add_view_arguments, validate_view_arguments
-    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); add_view_arguments(parser)
+    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--geometry', help='窗口尺寸，例如 1366x768'); add_view_arguments(parser)
     args = parser.parse_args(); validate_view_arguments(parser, args)
     # 先同步生成第一帧，让短延迟截图也有完整内容。
     write_demo(args.root, initial=True, preview_state=args.preview_state)
@@ -94,9 +92,15 @@ def main():
         while True:
             time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state); step += 1
     threading.Thread(target=update, daemon=True).start()
-    command = [sys.executable, '-m', 'nest_clear.ui', '--root', args.root, '--page', args.page]
-    if args.screenshot is not None:
-        command += ['--screenshot', args.screenshot, '--screenshot-after-ms', str(args.screenshot_after_ms)]
-    subprocess.run(command, check=False)
+    from .app import App
+    app = App(args.root, page=args.page, screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms)
+    if args.geometry:
+        try:
+            app.root.state('normal')
+            app.root.attributes('-zoomed', False)
+        except Exception:
+            pass
+        app.root.geometry(args.geometry)
+    app.run()
 
 if __name__ == '__main__': main()
