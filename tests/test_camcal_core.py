@@ -62,6 +62,48 @@ def test_overexposure():
     session=CameraCalibrationSession(CFG,N,(100,100),(0.,0.,110.)); step=session.add(np.full((100,100,3),255,np.uint8),(0.,0.,110.))
     assert step.code=='CAMCAL-OVEREXPOSED' and step.detail['saturated_fraction']==1
 
+def test_saturation_uses_projected_board_and_falls_back(monkeypatch):
+    image, nominal = rendered_board()
+    image = cv2.copyMakeBorder(cv2.resize(image, (320, 240)), 120, 120, 160, 160, cv2.BORDER_CONSTANT, value=180)
+    nominal = replace(nominal, K=np.array([[400., 0, 320], [0, 400., 240], [0, 0, 1.]]))
+    corners, ids, _, _ = cv2.aruco.CharucoDetector(_board(CFG)).detectBoard(image)
+    class Detector:
+        def detectBoard(self, gray):
+            return corners, ids, None, None
+    def run(frame):
+        session = CameraCalibrationSession(replace(CFG, min_corner_ratio=.4), nominal, (640, 480), (0, 0, 110))
+        session._detector = Detector()
+        return session.add(frame, (0, 0, 110))
+    # Saturated bands lie outside the projected board.
+    outside = image.copy()
+    outside[:30, :] = 255
+    outside[-30:, :] = 255
+    step = run(outside)
+    assert step.kind == 'move'
+    assert step.detail['saturation_scope'] == 'board'
+    assert step.detail['saturated_fraction'] < CFG.max_saturated_fraction
+    assert step.detail['saturated_fraction_full'] > CFG.max_saturated_fraction
+    inside = image.copy()
+    inside[180:280, 260:380] = 255
+    step = run(inside)
+    assert step.code == 'CAMCAL-OVEREXPOSED'
+    assert '标定板区域内饱和比例' in step.reason
+    assert step.detail['saturation_scope'] == 'board'
+    step = CameraCalibrationSession(CFG, nominal, (640, 480), (0, 0, 110)).add(
+        np.full((480, 640), 255, np.uint8), (0, 0, 110))
+    assert step.code == 'CAMCAL-OVEREXPOSED'
+    assert step.detail['saturation_scope'] == 'image'
+    assert step.detail['saturated_fraction'] == step.detail['saturated_fraction_full'] == 1
+    step = CameraCalibrationSession(CFG, nominal, (640, 480), (0, 0, 110)).add(
+        np.zeros((480, 640), np.uint8), (0, 0, 110))
+    assert step.code == 'CAMCAL-NO-BOARD' and step.detail['saturation_scope'] == 'image'
+    import nest_clear.camcal.session as session_module
+    monkeypatch.setattr(session_module, '_board_mask', lambda *args: np.zeros((480, 640), np.uint8))
+    step = run(outside)
+    assert step.code == 'CAMCAL-OVEREXPOSED'
+    assert step.detail['saturation_scope'] == 'image'
+    assert step.detail['saturated_fraction'] == step.detail['saturated_fraction_full']
+
 def rendered_board(offset=0.):
     board=_board(CFG); texture=(board.generateImage((1050,800)).astype(float)*.8).astype('uint8')
     k=np.array([[800.,0,320],[0,800,240],[0,0,1.]])

@@ -43,6 +43,25 @@ def _visible_mask(board_points, square_mm, rvec, tvec, nominal, image_size):
     return np.all((uv[:, :, 0] >= 8) & (uv[:, :, 0] < w-8) &
                   (uv[:, :, 1] >= 8) & (uv[:, :, 1] < h-8), axis=1)
 
+def _board_mask(cfg, rvec, tvec, nominal, image_size):
+    """Project the sampled outer board boundary and clip it to the image."""
+    w, h = image_size
+    width, height = cfg.cols * cfg.square_mm, cfg.rows * cfg.square_mm
+    t = np.linspace(0., 1., 33, endpoint=False)
+    boundary = np.array([(width*x, 0., 0.) for x in t] +
+                        [(width, height*x, 0.) for x in t] +
+                        [(width*(1-x), height, 0.) for x in t] +
+                        [(0., height*(1-x), 0.) for x in t])
+    camera = boundary @ _rot(np.asarray(rvec).ravel()).T + np.asarray(tvec).reshape(1, 3)
+    if not np.isfinite(camera).all() or np.any(camera[:, 2] <= 0):
+        return None
+    uv = cv2.projectPoints(boundary, rvec, tvec, nominal.K, nominal.distortion)[0].reshape(-1, 2)
+    if not np.isfinite(uv).all() or np.max(np.abs(uv)) > 1e7:
+        return None
+    mask = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(mask, [np.round(uv).astype(np.int32)], 1)
+    return mask
+
 def _glare_margin(predicted, cfg):
     """Median projected spacing of horizontally and vertically adjacent corners."""
     if predicted is not None and np.shape(predicted) == ((cfg.cols-1)*(cfg.rows-1), 2):
@@ -182,10 +201,6 @@ class CameraCalibrationSession:
         gray = cv2.cvtColor(image,cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
         overlay = cv2.cvtColor(gray,cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image[:,:,:3].copy()
         saturated = np.any(image >= cfg.saturation_level,axis=2) if image.ndim == 3 else image >= cfg.saturation_level
-        fraction = float(np.mean(saturated)); detail={'image_index':n,'actual_xyz':pose.tolist(),'saturated_fraction':fraction}
-        if fraction > cfg.max_saturated_fraction:
-            cv2.putText(overlay,f'{n} xyz={tuple(np.round(pose,2))} sat={fraction:.3%}',(10,30),cv2.FONT_HERSHEY_SIMPLEX,.7,(255,255,0),2)
-            return self._fail('CAMCAL-OVEREXPOSED',f'第 {n} 张饱和比例 {fraction:.3%} 超过 {cfg.max_saturated_fraction:.3%}；请降低照明。',detail,overlay)
         try:
             corners, ids, _, _ = self._detector.detectBoard(gray)
         except cv2.error:
@@ -209,11 +224,26 @@ class CameraCalibrationSession:
             predicted=np.empty((0,2)); visible=np.empty(0, dtype=bool)
         else:
             visible=_visible_mask(self._board_points,cfg.square_mm,rv,tv,self.nominal,self.image_size)
-        missing = [i for i in np.flatnonzero(visible) if i not in set(ids.tolist())]
-        mask=np.zeros(gray.shape,np.uint8)
+        mask = None
         if len(predicted):
-            polygon=cv2.convexHull(np.round(predicted).astype(np.int32)); cv2.fillConvexPoly(mask,polygon,1)
-        elif len(pts)>=3: cv2.fillConvexPoly(mask,cv2.convexHull(np.round(pts).astype(np.int32)),1)
+            try:
+                mask = _board_mask(cfg, rv, tv, self.nominal, self.image_size)
+            except cv2.error:
+                pass
+        full_fraction = float(np.mean(saturated))
+        if mask is not None and np.count_nonzero(mask) >= 0.05 * mask.size:
+            fraction = float(np.mean(saturated[mask > 0])); scope = 'board'
+        else:
+            mask = np.ones(gray.shape, np.uint8)
+            fraction = full_fraction; scope = 'image'
+        detail={'image_index':n, 'actual_xyz':pose.tolist(), 'saturated_fraction':fraction,
+                'saturated_fraction_full':full_fraction, 'saturation_scope':scope,
+                'detected_corners':len(ids), 'predicted_corners':int(visible.sum())}
+        if fraction > cfg.max_saturated_fraction:
+            cv2.putText(overlay,f'{n} xyz={tuple(np.round(pose,2))} sat={fraction:.3%}',(10,30),cv2.FONT_HERSHEY_SIMPLEX,.7,(255,255,0),2)
+            label = '标定板区域内饱和比例' if scope == 'board' else '全图饱和比例（无法确定有效标定板区域）'
+            return self._fail('CAMCAL-OVEREXPOSED',f'第 {n} 张{label} {fraction:.3%} 超过 {cfg.max_saturated_fraction:.3%}；请降低照明。',detail,overlay)
+        missing = [i for i in np.flatnonzero(visible) if i not in set(ids.tolist())]
         num, labels, stats, _=cv2.connectedComponentsWithStats((saturated & (mask>0)).astype(np.uint8),8)
         blob=None
         for idx in range(1,num):
