@@ -116,8 +116,7 @@ def tooltip_progress(status):
 
 def preview_controls(status, age_s):
     preview = status.get('preview') if isinstance(status.get('preview'), dict) else {}
-    camcal = camcal_progress(status)
-    active = camcal.get('event') in ('camcal_starting', 'camcal_start', 'camcal_step')
-    reason = '主程序未运行' if age_s is None or age_s > 3 else '相机标定进行中' if active else preview.get('blocked_reason')
-    return {'enabled': age_s is not None and age_s <= 3 and not active,
-            'on': bool(preview.get('on')), 'reason': reason}
+    live = bool(status.get('pid')) and age_s is not None and age_s <= 3
+    running = bool(status.get('child_pid')) or status.get('child_state') in ('启动中', '运行', '就绪')
+    reason = '父程序未运行' if not live else '挑毛主流程运行中，预览不可用' if running else None
+    return {'enabled': live and not running, 'on': bool(preview.get('on')), 'reason': reason}

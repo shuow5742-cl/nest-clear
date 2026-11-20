@@ -590,8 +590,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _fail("ui", "开关须为布尔值，刷新间隔须为不小于 50 的整数")
     if not isinstance(root["ui_preview"], dict):
         _fail("ui_preview", "应为映射")
-    preview_data = _mapping({"interval_s": .5, **root["ui_preview"]}, "ui_preview", ["interval_s"])
+    preview_data = _mapping({"interval_s": .15, "width": 960, "jpeg_quality": 75, "analysis_interval_s": 1.0, **root["ui_preview"]}, "ui_preview", ["interval_s", "width", "jpeg_quality", "analysis_interval_s"])
     preview_data["interval_s"] = _number(preview_data["interval_s"], "ui_preview.interval_s", True)
+    preview_data["analysis_interval_s"] = _number(preview_data["analysis_interval_s"], "ui_preview.analysis_interval_s", True)
+    if type(preview_data["width"]) is not int or preview_data["width"] < 100 or type(preview_data["jpeg_quality"]) is not int or not 1 <= preview_data["jpeg_quality"] <= 100:
+        _fail("ui_preview", "width 须不小于 100，jpeg_quality 须在 1 至 100 之间")
     return Config(
         plc,
         scan,

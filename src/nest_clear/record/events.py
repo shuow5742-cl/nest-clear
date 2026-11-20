@@ -61,9 +61,6 @@ class EventRecorder:
             logger.exception("事件写入失败：%s", event)
 
     def _emit(self, event: str, **fields: Any) -> None:
-        preview = getattr(self, "preview_controller", None)
-        if preview is not None:
-            preview.observe(event, fields)
         now = self.clock()
         if self.process == "supervisor":
             try:

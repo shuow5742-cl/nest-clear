@@ -27,7 +27,8 @@ def write_demo(root, step=0, *, initial=False, preview_state="on"):
     sequence = 63 + step % 5
     atomic(supervisor_state_file(root), {'pid': os.getpid(), 'start_time': start, 'word': 0x126,
         'plc_connected': True, 'plc_last_read': stamp, 'heartbeat_last_write': stamp,
-        'algorithm_ready': 1, 'child_pid': os.getpid(), 'child_state': '运行', 'child_start_time': start,
+        'algorithm_ready': 1, 'child_pid': os.getpid() if preview_state == 'blocked' else None, 'child_state': '运行' if preview_state == 'blocked' else '未启动', 'child_start_time': start,
+        'preview': {'on': preview_state == 'on', 'seq': 1, 'fps': 6.0, 'frames': 36, 'actual_xyz': [125.2, 73.4, 110.0], 'sharpness': 568.3, 'corners': 124, 'board_offset_mm': [0.3, -0.2]},
         'child_last_exit_reason': None})
     history = [
         {'event':'tooltip_detect', 'delta':[0.12, -0.08, 0.04], 'focus':{
@@ -40,7 +41,6 @@ def write_demo(root, step=0, *, initial=False, preview_state="on"):
     atomic(main_status_file(root), {'mode': '相机标定中', 'picking': {
         'tray':1,'view_index':10,'total_views':24,'coarse_shots':3,'removable_count':5,'red_count':1,'sent_count':7},
         'last_reply_time':stamp,'last_reply_task_id':103,'last_reply_request_func':80,'last_reply_func':82,
-        'preview': {'on': preview_state == 'on', 'seq': 1, 'fps': 2.0, 'frames': 36, 'actual_xyz': [125.2, 73.4, 110.0], 'sharpness': 568.3, 'corners': 124, 'board_offset_mm': [0.3, -0.2]},
         'camcal':{'event': 'camcal_step' if preview_state == 'blocked' else 'camcal_done', 'sequence':sequence,'plan':points,'start_xyz':[0,0,0],'kind':'move','detail':{
             'detected_corners':35,'predicted_corners':40,'saturated_fraction':0.01,'bbox':[510,120,560,170]}},
         'tooltip':{'tool':1,'iterations':2,'event':'tooltip_aligned','history':history,'new':[0.02,-0.01,0.01]}})

@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 class MainStatus:
     def __init__(self, root):
         self.path = main_status_file(root); self.lock = threading.Lock(); self.last = 0; self.timer = None
-        self.data = {'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'picking':{}, 'camcal':{}, 'tooltip':{}, 'preview':{}}
+        self.data = {'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'picking':{}, 'camcal':{}, 'tooltip':{}}
         self.write()
     def write(self):
         try:
@@ -22,11 +22,6 @@ class MainStatus:
     def flush(self):
         with self.lock:
             self.write(); self.last = time.monotonic(); self.timer = None
-    def update_preview(self, data):
-        with self.lock:
-            self.data["preview"] = dict(data)
-            self.write(); self.last = time.monotonic()
-
     def observe(self, row):
         with self.lock:
             e = row.get('event',''); d = self.data

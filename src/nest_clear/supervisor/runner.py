@@ -12,7 +12,10 @@ Task_ID，有则通过握手层回 999，通知 PLC 停机并要求人工处理�
 
 import json
 import logging
+import multiprocessing
 import os
+import signal
+import threading
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -22,7 +25,7 @@ from typing import Any
 from ..comm.handshake import Handshake
 from ..config import Config
 from ..guard import diagnostic
-from ..paths import main_alive_file, supervisor_state_file
+from ..paths import main_alive_file, supervisor_state_file, ui_command_file
 from ..record.events import EventRecorder
 from .device_state import (
     ACTION_ESTOP,
@@ -74,6 +77,15 @@ class Supervisor:
         self._ui_failures = []
         self._ui_next = 0.0
         self._ui_disabled = False
+        self.preview_process = None
+        self.preview_seq = 0
+        self.preview_xyz = None
+        self._preview_command_stamp = None
+        self._preview_xyz_next = 0.0
+        try:
+            self._preview_command_stamp = ui_command_file(config.record_directory).stat().st_mtime_ns
+        except OSError:
+            pass
 
     def _abandon_reply(self, reason: str, task_id: int | None = None, func: int | None = None) -> None:
         """记录 PLC 主动放弃的请求；读不到上下文时保留可用信息。"""
@@ -186,8 +198,65 @@ class Supervisor:
             self.events.emit("error", operation="clear_algorithm_ready", reason=str(exc))
             return False
 
+    def _stop_preview(self, reason: str) -> bool:
+        process = self.preview_process
+        if process is None:
+            return True
+        started = time.monotonic()
+        try:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=2)
+            if process.is_alive():
+                return False
+            self.events.emit("preview_stop", reason=reason, duration_s=time.monotonic() - started)
+            self.preview_process = None
+            return True
+        except (OSError, ValueError) as exc:
+            logger.error("停止预览失败：%s", exc)
+            return False
+
+    def _preview_tick(self):
+        process = self.preview_process
+        if process is not None and not process.is_alive():
+            process.join()
+            self.events.emit("preview_exit", code=process.exitcode)
+            self.preview_process = None
+        path = ui_command_file(self.config.record_directory)
+        try:
+            stamp = path.stat().st_mtime_ns
+            if stamp == self._preview_command_stamp:
+                return
+            command = json.loads(path.read_text(encoding="utf-8"))
+            seq, wanted = command['seq'], command['preview']
+            if type(seq) is not int or type(wanted) is not bool:
+                return
+            self._preview_command_stamp = stamp
+            if seq <= self.preview_seq:
+                return
+            self.preview_seq = seq
+            if not wanted:
+                self._stop_preview('ui')
+            elif self.child is not None:
+                self.events.emit('preview_rejected', reason='child_running')
+            elif self.preview_process is None:
+                from ..preview.process import run_preview
+                status = Path(self.config.record_directory) / 'state' / 'preview_status.json'
+                status.unlink(missing_ok=True)
+                self.preview_process = multiprocessing.get_context('spawn').Process(target=run_preview, args=(self.config,))
+                self.preview_process.start()
+                self.events.emit('preview_start', pid=self.preview_process.pid)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("读取预览命令失败：%s", exc)
+
     def _start(self) -> None:
         """清除旧活性点并启动配置的命令，失败后等待下一条边沿。"""
+        if not self._stop_preview("child_start"):
+            logger.error("预览进程未退出，拒绝启动主程序")
+            return
         if not self._clear_ready():
             return
         try:
@@ -214,6 +283,15 @@ class Supervisor:
             self._state.parent.mkdir(parents=True, exist_ok=True)
             temporary = self._state.with_suffix(".json.tmp")
             state = {"word": self.word, "bits": describe(self.word or 0), "paused": self.paused, "pid": os.getpid(), "start_time": self._wall_start, "plc_connected": None if self._plc_last_read is None and not self._failures else not bool(self._failures), "plc_last_read": self._plc_last_read, "heartbeat_last_write": self._heartbeat_last_write, "heartbeat_interrupted": bool(self._heartbeat_failures), "child_pid": self.child.pid if self.child else None, "child_state": ("就绪" if self._ready else "启动中") if self.child else ("退出" if self._last_exit else "未启动"), "child_start_time": self._child_start_wall, "child_last_exit_reason": self._last_exit, "algorithm_ready": self._ready}
+            preview = {'on': self.preview_process is not None, 'seq': self.preview_seq}
+            try:
+                data = json.loads((Path(self.config.record_directory) / 'state' / 'preview_status.json').read_text(encoding='utf-8'))
+                preview.update(data)
+            except (OSError, ValueError):
+                pass
+            preview['actual_xyz'] = self.preview_xyz
+            state['preview'] = preview
+            state['preview_xyz'] = self.preview_xyz
             temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             os.replace(temporary, self._state)
             return True
@@ -298,7 +376,18 @@ class Supervisor:
                     logger.error(
                         "错误码：SUPERVISOR-STATE；无法发布暂停状态，主程序未启动；位置：初始化；排查建议：修复状态文件后重新初始化"
                     )
+        self._preview_tick()
         now = time.monotonic()
+        if self.preview_process is not None and now >= self._preview_xyz_next:
+            self._preview_xyz_next = now + .5
+            try:
+                if self._failures:
+                    raise ConnectionError('PLC disconnected')
+                self.preview_xyz = (self.plc.read_real32_block(self.plc.contract['actual_x'].address, 3)
+                                    if hasattr(self.plc, 'read_real32_block') else
+                                    [self.plc.read(name) for name in ('actual_x', 'actual_y', 'actual_z')])
+            except Exception:
+                self.preview_xyz = None
         if now >= self._next_heartbeat:
             self._next_heartbeat = now + 1.0
             try:
@@ -392,6 +481,9 @@ class Supervisor:
         if self.config.ui.enabled and not os.environ.get("DISPLAY"):
             logger.warning("无 DISPLAY，显示界面不会启动")
             self._ui_disabled = True
+        previous_term = None
+        if threading.current_thread() is threading.main_thread():
+            previous_term = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
         try:
             while True:
                 try:
@@ -404,6 +496,9 @@ class Supervisor:
         except KeyboardInterrupt:
             logger.info("收到退出信号")
         finally:
+            if previous_term is not None:
+                signal.signal(signal.SIGTERM, previous_term)
+            self._stop_preview("supervisor_exit")
             if self.ui_process is not None:
                 try:
                     self.ui_process.terminate()

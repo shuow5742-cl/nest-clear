@@ -223,6 +223,7 @@ class App:
         self.tip = self.new_page('换针对刀'); self.build_tip()
         self.select_page(page)
         self.root.after(50, self.refresh)
+        self.root.after(50, self.poll_pictures)
         if screenshot is not None and screenshot_after_ms is not None:
             self.root.after(screenshot_after_ms, lambda: self.capture_and_exit(screenshot))
 
@@ -460,7 +461,7 @@ class App:
         rows = self.tail.poll()
         self.update_reply(main, rows)
         self.update_cam(camcal_progress(main))
-        self.update_preview(main)
+        self.update_preview(supervisor)
         self.update_tip(tooltip_progress(main))
         key = (date.today(), json.dumps(rows, ensure_ascii=False, default=str))
         if key != self.cache.get('events'):
@@ -469,8 +470,12 @@ class App:
                 values = [display_time(row.get('time'))] + [row.get(k) for k in ('category', 'task_id', 'func', 'phenomenon', 'location', 'suggestion')]
                 self.table.insert('', 'end', iid=str(i), values=values, tags=(f"{row['color']}_{'odd' if i % 2 else 'even'}",))
             self.cache['events'] = key
-        for picture in self.pictures: picture.poll()
         self.root.after(self.interval, self.refresh)
+
+    def poll_pictures(self):
+        for picture in self.pictures:
+            picture.poll()
+        self.root.after(50, self.poll_pictures)
 
     def update_reply(self, main, rows):
         code = main.get('last_reply_func')
@@ -535,13 +540,13 @@ class App:
         except (OSError, ValueError, TypeError):
             logger.exception('写预览命令失败')
 
-    def update_preview(self, main):
+    def update_preview(self, supervisor):
         try:
-            age = max(0, time.time() - main_status_file(self.directory).stat().st_mtime)
+            age = max(0, time.time() - supervisor_state_file(self.directory).stat().st_mtime)
         except OSError:
             age = None
-        controls = preview_controls(main, age)
-        self.preview_data = main.get('preview') if isinstance(main.get('preview'), dict) else {}
+        controls = preview_controls(supervisor, age)
+        self.preview_data = supervisor.get('preview') if isinstance(supervisor.get('preview'), dict) else {}
         self.preview_button.config(text='关闭相机预览' if controls['on'] else '打开相机预览',
                                    state='normal' if controls['enabled'] else 'disabled')
         text = ('不可用：' + controls['reason'] if controls['reason'] else
@@ -555,7 +560,7 @@ class App:
             self.cam_picture.image = self.cam_picture.photo = None
             self.cam_picture.config(image='', text='暂无图片')
         p = self.preview_data
-        self.preview_values.set({'模组 XYZ': p.get('actual_xyz'), '清晰度': p.get('sharpness'),
+        self.preview_values.set({'模组 XYZ': p.get('actual_xyz') if p.get('actual_xyz') is not None else '--', '清晰度': p.get('sharpness'),
                            '检出角点': p.get('corners'), '板中心偏移 mm': p.get('board_offset_mm'),
                            '提示': '偏移接近 0 且清晰度最大处即为推荐起始位'})
 

@@ -1,7 +1,12 @@
+ui_preview:
+  interval_s: 0.15
+  width: 960
+  jpeg_quality: 75
+  analysis_interval_s: 1.0
 ui:  # 本地只读显示界面
   enabled: true
   fullscreen: false
-  refresh_ms: 300
+  refresh_ms: 150
   python: /usr/bin/python3  # 带 Xft 的系统 Tk
 
 plc:  # PLC 网络参数，现场调试时与设备网络设置核对

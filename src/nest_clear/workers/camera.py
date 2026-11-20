@@ -33,7 +33,6 @@ class CameraWorker(AsyncRequestWorker):
         self.role = role
         self.needs_reopen = False
         self.capture_lock = threading.Lock()
-        self.preview_image = None
         self.size = None
         self.expected_size = image_size
         try:
@@ -129,11 +128,7 @@ class CameraWorker(AsyncRequestWorker):
 
     def execute(self, payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         with self.capture_lock:
-            image, meta = self._execute(payload)
-            if payload.get("stage") == "preview":
-                self.preview_image = image
-                return None, meta
-            return image, meta
+            return self._execute(payload)
 
     def _execute(self, payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         stage = {"coarse": "粗拍", "fine": "精定位"}.get(payload.get("stage"), payload.get("stage", "未知阶段"))
