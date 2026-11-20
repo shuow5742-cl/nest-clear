@@ -147,7 +147,7 @@ def _work_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
             stats["ambiguous"] += 1
         elif event == "reply_sent":
             stats["picks"] += 1
-        if row.get("event") == "reply" and row.get("func") in (9, 10, 999):
+        if row.get("event") == "reply" and row.get("func") in (60, 9, 10, 999):
             stats["replies"][row["func"]] += 1
         if row.get("event") != "work_cycle":
             continue
@@ -196,7 +196,7 @@ def report(root: str | Path, day: date) -> str:
                      f"成功 {stats['success']}、失败 {stats['failed']}、待判定 {stats['pending']}，"
                      f"未下发 {stats['not_sent']}，范围外 {stats['out_of_range']} 根，成功率 {rate}，拒绝原因 {dict(stats['rejections'])}，缺图 {stats['missing']}，"
                      f"上限视野 {stats['limits']}，回 10 判定 {stats['checks']}，"
-                     f"回 9/10/999 次数 {stats['replies'].get(9, 0)}/{stats['replies'].get(10, 0)}/{stats['replies'].get(999, 0)}")
+                     f"回 60/9/10/999 次数 {stats['replies'].get(60, 0)}/{stats['replies'].get(9, 0)}/{stats['replies'].get(10, 0)}/{stats['replies'].get(999, 0)}")
         for target_id, names in stats["failed_targets"]:
             lines.append(f"  失败目标 {target_id}：{names[0]} → {names[1]}")
         if stats["missing"]:

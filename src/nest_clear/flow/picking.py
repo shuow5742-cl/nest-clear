@@ -120,6 +120,8 @@ class WorkRequest(Instant):
         elif action == "picked":
             cycle.mark_done(bb.read("task_id"), getattr(self.ctx.events, "xid", 0))
             apply_reply(bb, cycle.on_picked(), self.ctx)
+        elif action == "next":
+            apply_reply(bb, cycle.on_next(), self.ctx)
 
 
 def apply_reply(bb: Any, reply: Any, ctx: FlowContext) -> None:
@@ -141,7 +143,7 @@ def apply_reply(bb: Any, reply: Any, ctx: FlowContext) -> None:
         logger.warning("视野 %s 粗拍次数超限，强制离开", reply.event.get("view_index"))
         ctx.events.emit("warning", task_id=bb.read("task_id"), reason="粗拍次数超限", scan_index=reply.event.get("view_index"))
     cycle = bb.read("work_cycle")
-    progress = {"total_views": len(ctx.path), "tray_id": cycle.tray, "removable_count": cycle.n0, "red_count": cycle.red_count, "sent_count": cycle.attempt_count, **reply.event}
+    progress = {"state": cycle.state.value, "total_views": len(ctx.path), "tray_id": cycle.tray, "removable_count": cycle.n0, "red_count": cycle.red_count, "sent_count": cycle.attempt_count, **reply.event}
     ctx.events.emit("work_cycle", task_id=bb.read("task_id"), reply_func=reply.func_code, **progress)
 
 
@@ -301,7 +303,7 @@ def work_branch(ctx: FlowContext) -> TreeNode:
                    "detection", name="检测并换算目标"),
         FinishCapture(ctx),
     ], name="到位拍照")
-    return Sequence([WorkRequest(ctx), Fallback([capture, Predicate("无需拍照", lambda bb: bb.read("work_action") in ("start", "picked"))])], name="工作模式")
+    return Sequence([WorkRequest(ctx), Fallback([capture, Predicate("无需拍照", lambda bb: bb.read("work_action") in ("start", "picked", "next"))])], name="工作模式")
 
 
 scan_branch = work_branch

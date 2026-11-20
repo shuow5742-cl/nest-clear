@@ -20,7 +20,7 @@ from .work_cycle import ProtocolViolation
 from .modes import Mode, transition
 
 logger = logging.getLogger("nest_clear.flow")
-REQUEST_NAMES = {1: "扫描到位或请求首个扫描位", 60: "挑取完成下一步"}
+REQUEST_NAMES = {1: "请求扫描位或下一任务", 60: "挑取完成"}
 
 
 class CallWorker(FrameworkCallWorker):

@@ -67,7 +67,8 @@ Auto_Weaver 的 git commit 写进日志与运行记录。pymodbus>=3.11、pyyaml
 | WAIT_COARSE | 20 | 离开视野：换工具回 10；否则有下一视野回 1，无下一视野回 9 | TOOL_CHANGE / WAIT_COARSE / DONE |
 | WAIT_FINE | 20 | 到位校验、精拍识别；成功写两工具坐标并回 3 | WAIT_PICK |
 | WAIT_FINE | 20 | 精定位失败，记原因并回 1 与当前视野粗拍坐标 | WAIT_COARSE |
-| WAIT_PICK | 60 | 名单有剩余且未到上限时回 1 与下个精拍坐标；否则回 1 与当前粗拍坐标 | WAIT_FINE / WAIT_COARSE |
+| WAIT_PICK | 60 | 记录挑取完成，回 60，不写坐标与 40941 | WAIT_NEXT |
+| WAIT_NEXT | 1 | 名单有剩余且未到上限时回 1 与下个精拍坐标；否则回 1 与当前粗拍坐标 | WAIT_FINE / WAIT_COARSE |
 | DONE / TOOL_CHANGE | 任意 | 回 999，等待 PLC 初始化重启 | 原终态 |
 | 其他状态 | 不符合该状态的功能码 | 回 999，记录状态、期望与实际功能码 | 原状态 |
 

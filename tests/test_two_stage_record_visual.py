@@ -42,7 +42,7 @@ def test_report_two_stage_events(tmp_path):
     assert "粗拍 2 次，精定位 6 次" in text
     assert "成功 1、失败 1、待判定 1" in text
     assert all(reason in text for reason in ("fine_empty", "fine_point_outside", "fine_rejected", "cap", "coarse_limit"))
-    assert "回 9/10/999 次数 1/1/1" in text
+    assert "回 60/9/10/999 次数 0/1/1/1" in text
 
 
 def test_fine_render_and_stage_archive(tmp_path):

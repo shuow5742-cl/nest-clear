@@ -42,6 +42,22 @@ def test_work_adapter_both_tools_and_terminal():
                                              "pick2_xyz": (6, 8, config.pick_depth_z + 6)}
     bb.write("request_func", 60)
     request.perform()
+    assert bb.read("reply_func") == 60 and bb.read("reply_coordinates") == {}
+    assert ctx.events.rows[-1][1]["state"] == "WAIT_NEXT"
+    from nest_clear.flow.leaves import PrepareError
+    for invalid in (20, 60):
+        bb.write("request_func", invalid)
+        request.on_start()
+        bb.write("next_index", 1)
+        bb.write("raw_path", None)
+        error = PrepareError(ctx.events)
+        error._blackboard = bb
+        error.perform()
+        assert bb.read("reply_func") == 999
+        reason = ctx.events.rows[-1][1]["reason"]
+        assert f"当前状态 WAIT_NEXT，期望功能码 1，实际功能码 {invalid}" in reason
+    bb.write("request_func", 1)
+    request.perform()
     bb.write("request_func", 20)
     request.perform()
     bb.write("detection", {"observations": []})
@@ -65,6 +81,9 @@ def test_data_precedes_commit():
     handshake = Handshake(io, contract, write_readback=False)
     handshake.write_reply(1, 3, {"pick1_xyz": (1, 2, 3), "pick2_xyz": (4, 5, 6)})
     assert io.writes == [contract[name].address for name in ("pick1_x", "pick2_x", "reply_func", "result_id")]
+    io.writes.clear()
+    handshake.write_reply(3, 60, {})
+    assert io.writes == [contract[name].address for name in ("reply_func", "result_id")]
     io.writes.clear()
     handshake.write_reply(2, 9, {"removable_count": 0})
     assert io.writes == [contract[name].address for name in ("removable_count", "reply_func", "result_id")]

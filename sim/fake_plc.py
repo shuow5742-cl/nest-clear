@@ -209,6 +209,8 @@ class FakePLC:
                 request_func = 20
             elif reply["func_code"] == 3:
                 request_func = 60
+            elif reply["func_code"] == 60:
+                request_func = 1
             elif reply["func_code"] in (9, 10, 999):
                 return records
             else:

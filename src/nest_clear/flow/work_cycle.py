@@ -14,6 +14,7 @@ class State(str, Enum):
     WAIT_COARSE = "WAIT_COARSE"
     WAIT_FINE = "WAIT_FINE"
     WAIT_PICK = "WAIT_PICK"
+    WAIT_NEXT = "WAIT_NEXT"
     DONE = "DONE"
     TOOL_CHANGE = "TOOL_CHANGE"
 
@@ -125,6 +126,7 @@ class WorkCycle:
         expected, action = {
             State.IDLE: (1, "start"), State.WAIT_COARSE: (20, "coarse"),
             State.WAIT_FINE: (20, "fine"), State.WAIT_PICK: (60, "picked"),
+            State.WAIT_NEXT: (1, "next"),
         }.get(self._state, (None, ""))
         if expected is None or func_code != expected:
             raise ProtocolViolation(self._state, expected, func_code, self._view_index)
@@ -132,7 +134,7 @@ class WorkCycle:
 
     def _require(self, state: State, code: int) -> None:
         if self._state != state:
-            expected = {State.IDLE: 1, State.WAIT_COARSE: 20, State.WAIT_FINE: 20, State.WAIT_PICK: 60}.get(self._state)
+            expected = {State.IDLE: 1, State.WAIT_COARSE: 20, State.WAIT_FINE: 20, State.WAIT_PICK: 60, State.WAIT_NEXT: 1}.get(self._state)
             raise ProtocolViolation(self._state, expected, code, self._view_index)
 
     def start(self) -> Reply:
@@ -346,6 +348,11 @@ class WorkCycle:
 
     def on_picked(self) -> Reply:
         self._require(State.WAIT_PICK, 60)
+        self._state = State.WAIT_NEXT
+        return Reply(60, event={"type": "picked", "reason": "acknowledged", "view_index": self._view_index})
+
+    def on_next(self) -> Reply:
+        self._require(State.WAIT_NEXT, 1)
         if self._attempts >= self._allowed:
             self._final_check = True
             reason = "cap"

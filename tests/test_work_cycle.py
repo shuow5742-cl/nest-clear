@@ -39,7 +39,7 @@ def test_multiview_and_failures():
     assert (r.removable_count, r.scan_xyz) == (2, (5., 9., 5.))
     r = fine(c, 2.05)
     assert (r.func_code, r.tool1_xyz, r.tool2_xyz) == (3, (3.05, 0, 1), (4.05, 0, 2))
-    assert c.on_picked().scan_xyz == (4., 9., 5.)
+    assert (c.on_picked(), c.on_next())[1].scan_xyz == (4., 9., 5.)
     for i, failure in enumerate(("fine_empty", "fine_point_outside", "fine_rejected")):
         r = c.on_fine((0, 0, 5), FineResult(failure))
         assert r.scan_xyz == (0., 0., 5.)
@@ -73,7 +73,7 @@ def test_cap_final_check(initial, allowed):
         if c.state == State.WAIT_COARSE:
             c.on_coarse((0, 0, 5), [obs(1000 + i * 10)])
         fine(c, c.current_target().target.xyz[0])
-        c.on_picked()
+        c.on_picked(); c.on_next()
     assert c.final_check and c.state == State.WAIT_COARSE
     r = c.on_coarse((0, 0, 5), [obs(9999)])
     assert r.func_code == 9 and r.removable_count == 1 and r.event["reason"] == "cap"
@@ -85,7 +85,7 @@ def test_tool_check(min_attempts, red, expected):
     c.start()
     c.on_coarse((0, 0, 5), [obs(1)])
     fine(c, 1)
-    c.on_picked()
+    c.on_picked(); c.on_next()
     r = c.on_coarse((0, 0, 5), [obs(1)] if red else [])
     assert r.func_code == expected
     assert r.event["tool_check_total"] == int(red)
@@ -100,7 +100,7 @@ def test_attempted_observation_respects_responsibility(status, reason, expected_
     c.start()
     c.on_coarse((0, 0, 5), [obs(1)])
     fine(c, 1)
-    c.on_picked()
+    c.on_picked(); c.on_next()
     observation = obs(1, status=status, reason=reason)
     reply = c.on_coarse((0, 0, 5), [observation])
     assert observation.status == expected_status
@@ -136,7 +136,10 @@ def test_protocol_all_states():
     c.start(); check(20)
     c.on_coarse((0, 0, 5), [obs(1)]); check(20)
     fine(c, 1); check(60)
-    c.on_picked()
+    assert c.on_picked().func_code == 60
+    assert c.state == State.WAIT_NEXT
+    check(1)
+    c.on_next()
     c.on_coarse((0, 0, 5), [obs(1)]); assert c.state == State.TOOL_CHANGE
     check(None)
     d = cycle(); d.start(); d.on_coarse((0, 0, 5), [])
@@ -182,3 +185,28 @@ def test_pick_region_excludes_counts_and_preserves_other_priority():
     assert reply.event['reason'] == 'fine_out_of_range'
     reply = c.on_coarse((0, 0, 5), [obs(3), obs(4)])
     assert reply.func_code == 9 and reply.event['tool_check_total'] == 0
+
+
+def test_picked_ack_then_next_target_and_exhausted():
+    c = cycle(cap_ratio=3, tool_check_min_attempts=99)
+    c.start()
+    c.on_coarse((0, 0, 5), [obs(1), obs(2)])
+    fine(c, 1)
+    ack = c.on_picked()
+    assert (ack.func_code, ack.scan_xyz, ack.tool1_xyz, ack.tool2_xyz, ack.removable_count) == (60, None, None, None, None)
+    assert c.expect(1) == "next"
+    for code in (20, 60):
+        with pytest.raises(ProtocolViolation) as error:
+            c.expect(code)
+        assert (error.value.state, error.value.expected, error.value.actual) == (State.WAIT_NEXT, 1, code)
+    assert c.on_next().scan_xyz == (2., 7., 5.)
+    fine(c, 2)
+    assert c.on_picked().func_code == 60
+    reply = c.on_next()
+    assert reply.scan_xyz == (0., 0., 5.) and reply.event["reason"] == "list_exhausted"
+    assert c.state == State.WAIT_COARSE
+
+
+def test_daily_report_counts_pick_ack():
+    from nest_clear.record.report import _work_stats
+    assert _work_stats([{"event": "reply", "func": 60}])["replies"][60] == 1

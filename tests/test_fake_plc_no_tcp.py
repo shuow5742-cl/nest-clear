@@ -13,6 +13,7 @@ def test_drive_tray_requests(terminal: int) -> None:
     replies = iter([
         {"func_code": 1, "scan_xyz": (1, 2, 3)},
         {"func_code": 3},
+        {"func_code": 60},
         {"func_code": 1, "scan_xyz": (4, 5, 6)},
         {"func_code": terminal},
     ])
@@ -30,9 +31,9 @@ def test_drive_tray_requests(terminal: int) -> None:
     fake.wait_reply = reply
     fake.set_actual_xyz = arrivals.append
     result = fake.drive_tray()
-    assert requests == [1, 20, 60, 20]
+    assert requests == [1, 20, 60, 1, 20]
     assert arrivals == [(1, 2, 3), (4, 5, 6)]
-    assert [row["func_code"] for row in result] == [1, 3, 1, terminal]
+    assert [row["func_code"] for row in result] == [1, 3, 60, 1, terminal]
 
 
 def test_drive_tray_injected_error() -> None:

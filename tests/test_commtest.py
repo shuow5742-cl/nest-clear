@@ -47,6 +47,8 @@ def drive(scenario, broken=False):
             if reply.func_code in (9, 10): break
             if cycle.state.value == 'WAIT_PICK':
                 cycle.mark_reply(task, task, {}); cycle.mark_done(task, task); reply = cycle.on_picked()
+            elif cycle.state.value == 'WAIT_NEXT':
+                reply = cycle.on_next()
             else:
                 stage = 'coarse' if cycle.state.value == 'WAIT_COARSE' else 'fine'
                 image, _ = camera.execute({'stage':stage, 'task_id':task}); captures += 1
@@ -162,13 +164,17 @@ def test_real_tree_whole_tray_no_tcp(tmp_path, scenario, terminal):
                 a,b = data['pick1_xyz'],data['pick2_xyz']
                 guard_position(a, config.travel, 'tool'); guard_position(b, config.travel, 'tool')
                 assert b == pytest.approx((a[0]+2,a[1]+2,a[2])); func = 60
+            elif reply == 60:
+                assert data == {}; func = 1
             else:
                 assert reply == terminal
                 break
         else: pytest.fail('未结束')
     finally: clock.shutdown()
+    expected = {'normal': (36, 24, 24, 1, 0), 'tool_change': (6, 4, 4, 0, 1),
+                'fine_fail': (39, 21, 21, 1, 0), 'mixed': (39, 21, 21, 1, 0)}
+    assert tuple(counts[code] for code in (1, 3, 60, 9, 10)) == expected[scenario]
     assert counts[terminal] == 1 and counts[999] == 0
-    if scenario == 'fine_fail': assert counts[1] > 36
 
 
 def test_auto_camera_requires_exactly_one(monkeypatch):

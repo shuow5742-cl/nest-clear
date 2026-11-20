@@ -44,8 +44,11 @@ def test_tray():
                         assert func == 20
                         assert client.read_real32_block(plc.contract["actual_x"].address, 3) == [1, 2, 3]
                         hand.write_reply(task, 3, {"pick1_xyz": [4, 5, 6], "pick2_xyz": [7, 8, 9]})
-                    else:
+                    elif task == 3:
                         assert func == 60
+                        hand.write_reply(task, 60)
+                    else:
+                        assert func == 1
                         hand.write_reply(task, 9)
                         return
             except Exception as exc:
@@ -55,8 +58,8 @@ def test_tray():
         thread.start()
         try:
             records = plc.drive_tray()
-            assert [r["func_code"] for r in records] == [1, 3, 9]
-            assert [r["request_func"] for r in records] == [1, 20, 60]
+            assert [r["func_code"] for r in records] == [1, 3, 60, 9]
+            assert [r["request_func"] for r in records] == [1, 20, 60, 1]
         finally:
             stop.set()
             thread.join(3)

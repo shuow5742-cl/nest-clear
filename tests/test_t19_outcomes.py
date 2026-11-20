@@ -37,7 +37,7 @@ def test_outcomes_and_target_identity(tmp_path):
             if outcome == "pending":
                 cycle.pending()
             else:
-                cycle.mark_done(2, 2); cycle.on_picked()
+                cycle.mark_done(2, 2); cycle.on_picked(); cycle.on_next()
                 repeat = obs(1.05)
                 cycle.on_coarse((0, 0, 0), [repeat] if outcome == "failed" else [], "review")
                 if outcome == "failed":
