@@ -298,8 +298,8 @@ class App:
     def build_home(self):
         self.home.columnconfigure(0, weight=38, uniform='homecols')
         self.home.columnconfigure(1, weight=62, uniform='homecols')
-        self.home.rowconfigure(0, weight=65, uniform='homerows')
-        self.home.rowconfigure(1, weight=35, uniform='homerows')
+        self.home.rowconfigure(0, weight=75, uniform='homerows')
+        self.home.rowconfigure(1, weight=25, uniform='homerows')
         left = tk.Frame(self.home, bg=BG)
         left.grid(row=0, column=0, sticky='nsew')
         left.columnconfigure(0, weight=1)
@@ -333,7 +333,7 @@ class App:
         self.picture(image, 'latest')
         logs = self.card(self.home, '异常日志 · 双击查看详情', 1, 0, columnspan=2)
         cols = ('时间', '类别', 'Task_ID', '功能码', '现象', '位置', '排查建议')
-        self.table = self.table_widget(logs, cols, (90, 70, 70, 70, 250, 200, 250), stretch=('现象', '排查建议'))
+        self.table = self.table_widget(logs, cols, (90, 70, 70, 70, 250, 200, 250), stretch=('现象', '排查建议'), height=6)
         for color in ('red', 'yellow', 'green'):
             for stripe, bg in (('even', WHITE), ('odd', '#f8fafc')):
                 self.table.tag_configure(f'{color}_{stripe}', foreground=COLORS[color], background=bg)
