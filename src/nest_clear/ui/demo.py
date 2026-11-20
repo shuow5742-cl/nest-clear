@@ -40,7 +40,10 @@ def write_demo(root, step=0, *, initial=False, preview_state="on"):
     ]
     atomic(main_status_file(root), {'mode': '相机标定中', 'picking': {
         'tray':1,'view_index':10,'total_views':24,'coarse_shots':3,'removable_count':5,'red_count':1,'sent_count':7},
-        'last_reply_time':stamp,'last_reply_task_id':103,'last_reply_request_func':80,'last_reply_func':82,
+        'last_reply_time':stamp,'last_reply_task_id':107,'last_reply_request_func':1,'last_reply_func':1,
+        'recent_replies': [{'time': (now - timedelta(seconds=i)).isoformat(), 'task_id': task,
+                            'request_func': request, 'reply_func': reply}
+                           for i, (task, request, reply) in enumerate(((107, 1, 1), (106, 60, 60), (105, 3, 3), (104, 20, 9), (103, 80, 82)))],
         'camcal':{'event': 'camcal_step' if preview_state == 'blocked' else 'camcal_done', 'sequence':sequence,'plan':points,'start_xyz':[0,0,0],'kind':'move','detail':{
             'detected_corners':35,'predicted_corners':40,'saturated_fraction':0.01,'bbox':[510,120,560,170]}},
         'tooltip':{'tool':1,'iterations':2,'event':'tooltip_aligned','history':history,'new':[0.02,-0.01,0.01]}})

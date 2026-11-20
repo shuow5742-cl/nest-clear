@@ -327,8 +327,8 @@ class App:
             value = self.label(pick, '—', font=self.theme.mono)
             value.grid(row=r, column=c * 2 + 1, sticky='w'); self.pick_values[title] = value
         reply = self.card(left, '最近应答', 3, 0)
-        self.reply_info = KeyValueGrid(reply, ('时间', 'Task_ID', '功能码', '原因'), self.theme)
-        self.reply_info.grid(row=0, column=0, sticky='new')
+        self.reply_table = self.table_widget(reply, ('时间', 'Task_ID', '功能码', '原因'),
+                                             (80, 65, 85, 120), stretch=('原因',), height=5)
         image = self.card(self.home, '最新标注图 · 点击放大', 0, 1)
         self.picture(image, 'latest')
         logs = self.card(self.home, '异常日志 · 双击查看详情', 1, 0, columnspan=2)
@@ -478,13 +478,23 @@ class App:
         self.root.after(50, self.poll_pictures)
 
     def update_reply(self, main, rows):
-        code = main.get('last_reply_func')
-        if code is None:
-            self.reply_info.set({}); return
-        task = main.get('last_reply_task_id')
-        matching = next((r for r in rows if r.get('task_id') == task and r.get('func') == code), None)
-        reason = matching['phenomenon'] if matching else ('正常应答' if code not in (999, 131, 82) else '原因无数据')
-        self.reply_info.set({'时间': display_time(main.get('last_reply_time')), 'Task_ID': task, '功能码': f"{main.get('last_reply_request_func', '—')} → {code}", '原因': reason})
+        replies = main.get('recent_replies')
+        if replies is None:
+            replies = [{'time': main.get('last_reply_time'), 'task_id': main.get('last_reply_task_id'),
+                        'request_func': main.get('last_reply_request_func', '—'), 'reply_func': main.get('last_reply_func')}]
+        values = []
+        for reply in replies[:5]:
+            code = reply.get('reply_func')
+            if code is None: continue
+            task = reply.get('task_id')
+            matching = next((r for r in rows if r.get('task_id') == task and r.get('func') == code), None)
+            reason = matching['phenomenon'] if matching else ('正常应答' if code not in (999, 131, 82) else '原因无数据')
+            values.append((display_time(reply.get('time')), task, f"{reply.get('request_func', '—')} → {code}", reason))
+        key = tuple(values)
+        if key == self.cache.get('replies'): return
+        self.reply_table.delete(*self.reply_table.get_children())
+        for value in values: self.reply_table.insert('', 'end', values=value)
+        self.cache['replies'] = key
 
     def update_cam(self, data):
         points = data.get('plan') or []; count = data.get('sequence') or 0

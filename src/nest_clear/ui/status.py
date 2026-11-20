@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 class MainStatus:
     def __init__(self, root):
         self.path = main_status_file(root); self.lock = threading.Lock(); self.last = 0; self.timer = None
-        self.data = {'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'picking':{}, 'camcal':{}, 'tooltip':{}}
+        self.data = {'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'recent_replies':[], 'picking':{}, 'camcal':{}, 'tooltip':{}}
         self.write()
     def write(self):
         try:
@@ -37,6 +37,9 @@ class MainStatus:
                     if d['camcal'].get('event') == 'camcal_starting':
                         d['camcal']['event'] = 'camcal_aborted'
                     d.update(last_reply_func=reply, last_reply_time=row.get('wall'), last_reply_task_id=row.get('task_id'), last_reply_request_func=row.get('request_func', d.get('request_func')))
+                    d['recent_replies'].insert(0, {'time': row.get('wall'), 'task_id': row.get('task_id'),
+                        'request_func': row.get('request_func', d.get('request_func')), 'reply_func': reply})
+                    del d['recent_replies'][5:]
             if e in ('work_cycle','detection','capture','scan_plan','tray_end'): d['picking'].update({k:v for k,v in row.items() if k not in ('event','pid','mono')})
             if e == 'camcal_start': d['camcal'] = {}
             if e.startswith('camcal_'):

@@ -2,6 +2,18 @@ import json
 from datetime import date
 from nest_clear.ui.model import decode_status, status_indicators, classify_event, EventTail, read_json, camcal_progress, tooltip_progress
 
+def test_recent_replies_limit_and_order(tmp_path):
+    from nest_clear.ui.status import MainStatus
+    status = MainStatus(tmp_path)
+    assert status.data['recent_replies'] == []
+    status.observe({'event': 'request', 'func': 60})
+    for i in range(7):
+        status.observe({'event': 'reply', 'wall': str(i), 'task_id': i, 'reply_func': i})
+    status.flush()
+    assert status.data['recent_replies'] == [
+        {'time': str(i), 'task_id': i, 'request_func': 60, 'reply_func': i} for i in range(6, 1, -1)]
+    assert status.data['last_reply_func'] == 6
+
 def test_decode_and_status():
     bits=decode_status((1<<0)|(1<<6)|(1<<10)|(1<<11))
     assert [bits[i]['color'] for i in (0,1,6,10,11)] == ['green','gray','red','yellow','red']

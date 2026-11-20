@@ -110,7 +110,8 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert ui.cam_step.values_data['亮斑'] == '无'
         assert len([t for t in plan_titles if t and t.startswith('Z')]) == 5
         assert {'Z0', 'Z-5', 'Z-2.5', 'Z+2.5', 'Z+5'} == {t.split(' · ')[0] for t in plan_titles if t and t.startswith('Z')}
-        assert ui.reply_info.values_data['原因']
+        assert ui.reply_table.options['height'] == 5
+        assert len(ui.reply_table.rows) == 5
         assert ui.tip_result.values_data['迭代次数'] == 2
         target = tmp_path / 'screen' / (page + '.png')
         class Capture:
@@ -126,6 +127,19 @@ def test_invalid_page_rejected(tmp_path, monkeypatch):
     ui = object.__new__(app.App); ui.tabs = Widget()
     with pytest.raises(ValueError, match='字符串'): ui.select_page(Widget())
     with pytest.raises(ValueError, match='未知页面'): ui.select_page('无此页')
+
+
+def test_reply_legacy_fallback_and_cache():
+    from nest_clear.ui.app import App
+    ui = object.__new__(App); ui.reply_table = Widget(); ui.cache = {}
+    main = {'last_reply_time': '2026-01-02T11:00:00', 'last_reply_task_id': 42,
+            'last_reply_request_func': 20, 'last_reply_func': 9}
+    ui.update_reply(main, [])
+    assert list(ui.reply_table.rows.values())[0]['values'][1:] == (42, '20 → 9', '正常应答')
+    ui.update_reply(main, [{'task_id': 42, 'func': 9, 'phenomenon': '故障'}])
+    assert list(ui.reply_table.rows.values())[0]['values'][3] == '故障'
+    ui.update_reply({'recent_replies': []}, [])
+    assert not ui.reply_table.rows
 
 
 @pytest.mark.parametrize('alias,index', [('main',0),('home',0),('camcal',1),('camera',1),('offset',2),('tool-offset',2),('pickacc',3),('pick-accuracy',3),('baseline',4),('toolcal',5),('tooltip',5)])
