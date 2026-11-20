@@ -331,7 +331,16 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _fail("run_mode", "应为 production 或 commtest")
     ct = root["commtest"]
     if mode == "commtest":
-        ct = _mapping(ct, "commtest", ["scenario", "seed"])
+        ct = _mapping(ct, "commtest", ["scenario", "seed", "camcal_travel"])
+        bounds = _mapping(ct["camcal_travel"], "commtest.camcal_travel", ["x", "y", "z"])
+        ct["camcal_travel"] = tuple(_vector(bounds[a], f"commtest.camcal_travel.{a}", 2) for a in "xyz")
+        for axis, (lo, hi) in zip("xyz", ct["camcal_travel"]):
+            if lo >= hi:
+                _fail(f"commtest.camcal_travel.{axis}", "最小值必须小于最大值")
+            if axis in "xy":
+                safe = (80, 180) if axis == "x" else (-10, 150)
+                if lo < safe[0] or hi > safe[1]:
+                    _fail(f"commtest.camcal_travel.{axis}", f"必须在安全范围 {safe} 内")
         if ct["scenario"] not in ("normal", "tool_change", "fine_fail", "mixed") or type(ct["seed"]) is not int:
             _fail("commtest", "场景或随机种子无效")
     elif ct is not None:

@@ -7,7 +7,7 @@ from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 
 from nest_clear.plan.scan_path import guard_position
-from nest_clear.guard import diagnostic
+from nest_clear.guard import GuardError, diagnostic
 from .calibration import change_mode
 from .leaves import CallWorker, Instant, PrepareError
 from .modes import Mode
@@ -33,6 +33,14 @@ def finish(ctx, bb, outcome, **fields):
     ctx.events.abort_camcal = None
 
 
+def guard_commtest(ctx, point):
+    if ctx.config.run_mode != "commtest":
+        return
+    for axis, value, (lo, hi) in zip("xyz", point, ctx.config.commtest["camcal_travel"]):
+        if not lo <= value <= hi:
+            raise GuardError("COMMTEST-CAMCAL-TRAVEL", f"相机标定 {axis.upper()} 轴值 {value} 超出范围 [{lo}, {hi}]", "相机标定", "检查实际位置和 commtest.camcal_travel。")
+
+
 class Prepare(Instant):
     def __init__(self, ctx):
         super().__init__(name="检查相机标定位置")
@@ -45,6 +53,7 @@ class Prepare(Instant):
         if not isinstance(actual, (tuple, list)) or len(actual) != 3 or not all(math.isfinite(x) for x in actual):
             raise ValueError("相机标定实时坐标无效")
         if session is None:
+            guard_commtest(self.ctx, actual)
             now = self.ctx.events.clock()
             session = {"start": tuple(actual), "target": None, "shots": 0, "engine": None,
                        "start_time": now.isoformat(), "directory": now.strftime("%Y%m%d_%H%M%S_%f")}
@@ -90,14 +99,22 @@ class Process(Instant):
             ctx.calibration = step.result.calibration
             ctx.events.calibration_placeholder = False
             ctx.events.meta_update(task_id=bb.read("task_id"), request_func=80, calibration=str(path), backup=str(backup) if backup else None, report=step.result.report)
-            finish(ctx, bb, "done", report=step.result.report, calibration_path=str(path), backup_path=str(backup) if backup else None)
+            report = dict(step.result.report)
+            calibration = step.result.calibration
+            if hasattr(calibration, "K"):
+                report.update(K=calibration.K.tolist(), distortion=calibration.distortion.tolist())
+            finish(ctx, bb, "done", report=report, calibration_path=str(path), backup_path=str(backup) if backup else None)
             reply = 81
         elif step.kind == "move":
             target = tuple(step.target_xyz)
             cfg = session["cfg"]
-            if len(target) != 3 or any(not math.isfinite(v) for v in target) or any(abs(target[i]-session["start"][i]) > (cfg.xy_limit_mm if i < 2 else cfg.z_limit_mm) for i in range(3)):
+            outside_commtest = (ctx.config.run_mode == "commtest" and len(target) == 3
+                                and all(math.isfinite(v) for v in target)
+                                and any(not lo <= v <= hi for v, (lo, hi) in zip(target, ctx.config.commtest["camcal_travel"])))
+            if len(target) != 3 or any(not math.isfinite(v) for v in target) or (not outside_commtest and any(abs(target[i]-session["start"][i]) > (cfg.xy_limit_mm if i < 2 else cfg.z_limit_mm) for i in range(3))):
                 raise ValueError(f"相机标定目标超出起始位置相对行程：{target}")
-            guard_position(target, ctx.config.travel, "相机标定")
+            if ctx.config.run_mode != "commtest":
+                guard_position(target, ctx.config.travel, "相机标定")
             session["target"] = target
             bb.write("reply_coordinates", {"camcal_xyz": target}, self.name)
             reply = 80
@@ -107,6 +124,21 @@ class Process(Instant):
             bb.write("reply_coordinates", {}, self.name)
         bb.write("reply_func", reply, self.name)
         bb.write("reply_tool", None, self.name)
+
+
+class CheckTarget(Instant):
+    def __init__(self, ctx):
+        super().__init__(name="检查联调标定终点")
+        self.ctx = ctx
+
+    def perform(self):
+        bb = self._blackboard
+        if bb.read("reply_func") == 80:
+            try:
+                guard_commtest(self.ctx, bb.read("reply_coordinates")["camcal_xyz"])
+            except GuardError as exc:
+                finish(self.ctx, bb, "failed", code=exc.code, reason=exc.what)
+                raise
 
 
 class Failed(Instant):
@@ -131,4 +163,4 @@ def camera_branch(ctx):
         "context": ctx, "session": bb.read("camcal_session"), "captured": bb.read("image"),
         "actual": bb.read("actual"), "task_id": bb.read("task_id")}, "camcal_result", name="异步相机标定"),
         Process(ctx)], name="采样及求解"), Failed(ctx)], name="相机标定或 82")
-    return Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual"}, "actual", name="读取相机标定坐标"), Prepare(ctx), sample], name="相机标定")
+    return Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual"}, "actual", name="读取相机标定坐标"), Prepare(ctx), sample, CheckTarget(ctx)], name="相机标定")

@@ -114,8 +114,8 @@ def test_real_tree_no_tcp_unsupported_and_camera_failure(tmp_path):
             time.sleep(.001)
         pytest.fail('应答超时')
     try:
-        assert request(1, 80)[0] == 999
-        assert request(2, 100)[0] == 999
+        assert request(1, 100)[0] == 999
+        assert request(2, 131)[0] == 999
         code, data = request(3, 1); assert code == 1
         plc.actual = data['scan_xyz']
         assert request(4, 20)[0] == 999
@@ -193,3 +193,16 @@ def test_archive_falls_back_to_coordinates_when_projection_fails():
     archive.remember('capture', np.zeros((200,400,3), dtype=np.uint8), [], (100.,0.,0.), (0.,0.,999999.), cal, cycle, 'fine')
     archive.rendered(np.zeros((200,400,3), dtype=np.uint8), 1, 1, 'raw', capture_id='capture')
     assert np.any(base.image[:, :, 0] > 0)
+
+
+@pytest.mark.parametrize('z', [None, [1, 1], [2, 1], ['bad', 1]])
+def test_camcal_travel_invalid_z(tmp_path, z):
+    data = yaml.safe_load(Path('config/commtest.yaml').read_text())
+    if z is None:
+        del data['commtest']['camcal_travel']['z']
+    else:
+        data['commtest']['camcal_travel']['z'] = z
+    path = tmp_path / 'bad.yaml'
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(GuardError, match='commtest.camcal_travel'):
+        load_config(path)

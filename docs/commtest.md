@@ -17,7 +17,7 @@ PYTHONPATH=src .venv/bin/python -m nest_clear.main --config config/commtest.yaml
 
 ## 预期通信时序
 
-PLC 先发 1，PC 回 1 和首扫描位；PLC 到位后发 20，PC 真实拍照与检测，再回 1 和假目标精拍位；PLC 到位再发 20，PC 回 3 和两把工具假坐标；PLC 挑取完成发 60。PC 若有下一目标回 1 和下一精拍位，否则回 1 和当前或下一视野扫描位。循环直至回 9（整盘完成）或 10（换工具判定）。精定位失败回 1 和当前视野，PLC 到位后发 20 重拍。相机、到位、行程及通信等真实故障可回 999；80 和 100–131 回 999，诊断 `COMMTEST-UNSUPPORTED`。
+PLC 先发 1，PC 回 1 和首扫描位；PLC 到位后发 20，PC 真实拍照与检测，再回 1 和假目标精拍位；PLC 到位再发 20，PC 回 3 和两把工具假坐标；PLC 挑取完成发 60。PC 若有下一目标回 1 和下一精拍位，否则回 1 和当前或下一视野扫描位。循环直至回 9（整盘完成）或 10（换工具判定）。精定位失败回 1 和当前视野，PLC 到位后发 20 重拍。相机、到位、行程及通信等真实故障可回 999；80 执行真实主相机自动标定（80 移动、81 成功、82 标定失败）；100–131 回 999，诊断 `COMMTEST-UNSUPPORTED`。
 
 以默认种子和配置，PC 应答计数如下（包含最初扫描位）：
 
@@ -36,3 +36,15 @@ PLC 先发 1，PC 回 1 和首扫描位；PLC 到位后发 20，PC 真实拍照�
 真实 VisionWorker 在独立单线程里"影子运行"：假结果立即交给状态机/PLC，真检测对每张图完整跑并记 `real_detection`（status=ok/empty/error、elapsed_ms）。
 上一张未算完时，新图记 `status=skipped_busy`（不排队）。真检测耗时不会拖慢应答；现场看 `real_detection` 的 elapsed_ms 与 skipped_busy 数量评估图像处理速度。
 标注图只画下发的假点（品红），真检测结果以事件为准。
+
+## 相机标定
+
+`commtest.camcal_travel` 单独限制标定起始位和每个目标位；X、Y 分别不得超出 [80,180]、[-10,150]，Z 必须明确提供递增范围。当前 Z [0,1] 仅为待确认值，Claude 部署前须按设备实际安全范围修改，否则无法完成 Z±5 标定。越界返回 999 `COMMTEST-CAMCAL-TRAVEL`。打印纸厚度按 0.1 mm 配置，贴硬板时改为实测总厚。
+
+标定使用 `config/commtest_calibration/camera.yaml` 和其 `history`，不会覆盖生产标定。原图及 `session_record.json` 保存在 `runs_commtest` 的会话目录，成功事件的 report 记录精度指标。离线重解例如：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m nest_clear.tools.camera_calib_solve runs_commtest/.../camcal/.../session_record.json --config config/commtest.yaml --nominal config/commtest_calibration/camera.yaml
+```
+
+移除联调模式时还须移除相机标定专用行程检查及联调原图保存分支；保留生产标定流程。

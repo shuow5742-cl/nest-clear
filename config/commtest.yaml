@@ -90,7 +90,7 @@ vision:
   preview:
     window: false
   camera_backend: daheng
-  calibration: calibration/camera.yaml
+  calibration: commtest_calibration/camera.yaml
   pixels: []
   dedup_radius_mm: 1.0
   max_targets: 10
@@ -167,7 +167,7 @@ camera_calibration:
   square_mm: 5.0
   marker_mm: 3.75
   dictionary: DICT_5X5_250
-  board_thickness_mm: 3.0
+  board_thickness_mm: 0.1  # 打印纸代替标定板；若贴在硬板上，填纸+板实测总厚
   xy_limit_mm: 25.0
   z_limit_mm: 5.0
   grid_half_mm: 20.0
@@ -187,3 +187,7 @@ run_mode: commtest
 commtest:
   scenario: mixed
   seed: 26
+  camcal_travel:
+    x: [80, 180]
+    y: [-10, 150]
+    z: [0.0, 1.0]  # 待用户确认相机标定 Z 允许范围，Claude 部署前改

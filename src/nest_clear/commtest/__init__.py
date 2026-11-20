@@ -161,11 +161,11 @@ def unsupported_branch(ctx):
     class Unsupported(Instant):
         def __init__(self): super().__init__('联调不支持的功能码')
         def perform(self):
-            text = '通信联调模式不支持相机标定/换针对刀'
+            text = '通信联调模式不支持换针对刀'
             error = GuardError('COMMTEST-UNSUPPORTED', text, text, text)
             self._blackboard.write('error', str(error), self.name)
             self._blackboard.write('error_diagnostic', diagnostic(error), self.name)
-    return Sequence([Predicate('联调不支持', lambda bb: bb.read('request_func') == 80 or 100 <= bb.read('request_func') <= 131), Unsupported(), PrepareError(ctx.events)])
+    return Sequence([Predicate('联调不支持', lambda bb: 100 <= bb.read('request_func') <= 131), Unsupported(), PrepareError(ctx.events)])
 
 
 class ArchiveAdapter:
@@ -225,7 +225,7 @@ def branches():
     from nest_clear.flow.dispatch import BRANCHES
     from nest_clear.flow.modes import Mode
     result = dict(BRANCHES)
-    for code in (80, *range(100, 132)):
+    for code in range(100, 132):
         result[code] = (frozenset(Mode), unsupported_branch)
     return result
 

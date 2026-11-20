@@ -60,23 +60,28 @@ class FakeSession:
 
 
 @pytest.fixture
-def rig(tmp_path):
+def rig(tmp_path, request):
     cfg = load_config('config/nest_clear.yaml')
     cfg = replace(cfg, travel=((-100., 100.),)*3)
+    commtest = getattr(request, 'param', False)
+    if commtest:
+        from nest_clear.commtest import branches
+        cfg = replace(cfg, run_mode='commtest', commtest={'scenario': 'mixed', 'seed': 26, 'camcal_travel': ((-10., 10.), (-10., 10.), (-10., 10.))})
     events = EventRecorder(tmp_path, run=True)
     board, plc = WorldBoard(), PLC()
     clock = BTClock(board)
     camera = Camera()
     for w in (plc, camera, CamcalWorker()): clock.attach_worker(w)
     updated = []
-    path = tmp_path / 'camera.yaml'
+    path = tmp_path / 'commtest_calibration' / 'camera.yaml' if commtest else tmp_path / 'camera.yaml'
+    path.parent.mkdir(parents=True, exist_ok=True)
     state = {'save_fail': False}
     def save(result, path, history):
         if state['save_fail']: raise OSError('保存失败')
         path.write_text('placeholder: false\n')
     batch = build_batch(board, cfg, [(0.,0.,0.)], RequestTracker(0), events, calibration='old',
                         camcal_factory=FakeSession, camcal_save=save, calibration_path=path,
-                        calibration_updated=updated.append)
+                        calibration_updated=updated.append, branches=branches() if commtest else None)
     handle = clock.submit(batch)
     def request(task, func):
         plc.request = (task, func)
@@ -235,3 +240,78 @@ def test_internal_999_reply_diagnostic(rig, monkeypatch):
     assert rig.request(1,80)[0] == 999
     row=reply_row(rig,1); assert_diagnostic(row,999)
     assert row['reason_code']=='INTERNAL-ERROR' and '模拟位置检查内部异常' in row['what']
+
+
+@pytest.mark.parametrize('rig', [True], indirect=True)
+def test_commtest_complete_and_raw(rig):
+    import hashlib
+    production = __import__('pathlib').Path('config/calibration/camera.yaml')
+    before = hashlib.sha256(production.read_bytes()).digest()
+    assert rig.request(1, 80)[0] == 80
+    rig.plc.actual = (1., 0., 0.)
+    assert rig.request(2, 80)[0] == 81
+    assert rig.path.exists() and rig.path.parent.name == 'commtest_calibration'
+    assert hashlib.sha256(production.read_bytes()).digest() == before
+    assert len(list(rig.events.run_directory.glob('camcal/*/*.png'))) == 2
+    assert list(rig.events.run_directory.glob('camcal/*/session_record.json'))
+
+@pytest.mark.parametrize('rig', [True], indirect=True)
+@pytest.mark.parametrize('start,target', [((11.,0.,0.), (1.,0.,0.)), ((0.,0.,0.), (11.,0.,0.))])
+def test_commtest_camcal_travel(rig, start, target):
+    rig.plc.actual = start
+    FakeSession.target = target
+    assert rig.request(1, 80)[0] == 999
+    row = reply_row(rig, 1)
+    assert row['reason_code'] == 'COMMTEST-CAMCAL-TRAVEL'
+    assert 'X' in row['what'] and '11' in row['what']
+
+
+def test_commtest_rendered_real_session(tmp_path):
+    from hashlib import sha256
+    from nest_clear.commtest import branches
+    from nest_clear.vision.geometry import load_calibration
+    from sim.charuco_scene import CharucoScene
+
+    cfg = load_config('config/commtest.yaml')
+    cfg = replace(cfg, commtest={**cfg.commtest, 'camcal_travel': ((80., 180.), (-10., 150.), (100., 120.))})
+    production = __import__('pathlib').Path('config/calibration/camera.yaml')
+    before = sha256(production.read_bytes()).digest()
+    path = tmp_path / 'commtest_calibration' / 'camera.yaml'
+    path.parent.mkdir()
+    path.write_bytes(production.read_bytes())
+    events = EventRecorder(tmp_path / 'runs_commtest', run=True)
+    board, plc = WorldBoard(), PLC()
+    plc.actual = (130., 70., 110.)
+    scene = CharucoScene()
+    class RenderCamera(AsyncRequestWorker):
+        name = 'camera'
+        def execute(self, payload):
+            x, y, z = plc.actual
+            return scene.render((x - 130., y - 70., z)), {}
+    clock = BTClock(board)
+    for worker in (plc, RenderCamera(), CamcalWorker()): clock.attach_worker(worker)
+    calibration = load_calibration(path)
+    handle = clock.submit(build_batch(board, cfg, [(130., 70., 0.)], RequestTracker(0), events,
+                                     branches=branches(), calibration=calibration, calibration_path=path))
+    try:
+        for task in range(1, 55):
+            plc.request = (task, 80)
+            deadline = time.monotonic() + 120
+            while task not in plc.replies and time.monotonic() < deadline:
+                clock.tick_once()
+                assert handle.result is None
+                time.sleep(.001)
+            assert task in plc.replies
+            code, coords = plc.replies[task]
+            if code == 81: break
+            assert code == 80, (code, rows(SimpleNamespace(events=events))[-10:])
+            plc.actual = coords['camcal_xyz']
+        assert code == 81 and task == 53
+        assert len(list(events.run_directory.glob('camcal/*/*_raw.png'))) == 53
+        assert list(events.run_directory.glob('camcal/*/session_record.json'))
+        assert list((path.parent / 'history').glob('*.yaml'))
+        assert sha256(production.read_bytes()).digest() == before
+        done = [r for r in rows(SimpleNamespace(events=events)) if r['event'] == 'camcal_done'][-1]['report']
+        assert all(k in done for k in ('K', 'distortion', 'rms_px', 'repeat_px', 'axis_scale', 'um_per_px_at_principal'))
+    finally:
+        clock.shutdown()
