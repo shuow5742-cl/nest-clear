@@ -28,7 +28,11 @@ def main_status_file(root: str | Path) -> Path:
     return Path(root) / 'state' / 'main_status.json'
 
 
+def ui_command_file(root: str | Path) -> Path:
+    return Path(root) / 'state' / 'ui_command.json'
+
+
 def live_image_file(root: str | Path, name: str = 'latest') -> Path:
-    if name not in {'latest', 'camcal_latest', 'calib_front_latest', 'calib_side_latest'}:
+    if name not in {'latest', 'preview_latest', 'camcal_latest', 'calib_front_latest', 'calib_side_latest'}:
         raise ValueError('未知实时图片')
     return Path(root) / 'live' / (name + '.jpg')

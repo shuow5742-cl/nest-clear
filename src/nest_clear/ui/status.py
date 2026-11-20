@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 class MainStatus:
     def __init__(self, root):
         self.path = main_status_file(root); self.lock = threading.Lock(); self.last = 0; self.timer = None
-        self.data = {'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'picking':{}, 'camcal':{}, 'tooltip':{}}
+        self.data = {'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'picking':{}, 'camcal':{}, 'tooltip':{}, 'preview':{}}
         self.write()
     def write(self):
         try:
@@ -22,15 +22,25 @@ class MainStatus:
     def flush(self):
         with self.lock:
             self.write(); self.last = time.monotonic(); self.timer = None
+    def update_preview(self, data):
+        with self.lock:
+            self.data["preview"] = dict(data)
+            self.write(); self.last = time.monotonic()
+
     def observe(self, row):
         with self.lock:
             e = row.get('event',''); d = self.data
             if e == 'process_start' and row.get('run_mode'): d['run_mode'] = row['run_mode']
             if e == 'mode_change': d['mode'] = row.get('mode','空闲')
-            if e == 'request': d.update(task_id=row.get('task_id'), request_func=row.get('func'))
+            if e == 'request':
+                d.update(task_id=row.get('task_id'), request_func=row.get('func'))
+                if row.get('func') == 80 and d['camcal'].get('event') not in ('camcal_start', 'camcal_step'):
+                    d['camcal'] = {'event': 'camcal_starting'}
             if e == 'reply':
                 reply = row.get('reply_func', row.get('func'))
                 if reply is not None:
+                    if d['camcal'].get('event') == 'camcal_starting':
+                        d['camcal']['event'] = 'camcal_aborted'
                     d.update(last_reply_func=reply, last_reply_time=row.get('wall'), last_reply_task_id=row.get('task_id'), last_reply_request_func=row.get('request_func', d.get('request_func')))
             if e in ('work_cycle','detection','capture','scan_plan','tray_end'): d['picking'].update({k:v for k,v in row.items() if k not in ('event','pid','mono')})
             if e == 'camcal_start': d['camcal'] = {}

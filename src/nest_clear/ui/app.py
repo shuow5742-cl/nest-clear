@@ -1,6 +1,9 @@
-"""只读取共享文件的 Tk 显示界面；图片解码与缩放在后台线程完成。"""
+"""基于共享文件的 Tk 界面；预览命令写入文件，图片解码与缩放在后台线程完成。"""
 import json
 import logging
+import os
+import time
+from datetime import datetime
 import queue
 import subprocess
 import threading
@@ -11,9 +14,9 @@ from tkinter import font as tkfont, ttk
 
 from PIL import Image, ImageGrab, ImageTk
 
-from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file
+from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file, ui_command_file
 from .model import (EventTail, camcal_progress, decode_status, display_time, duration,
-                    read_json, status_indicators, tooltip_progress)
+                    read_json, status_indicators, tooltip_progress, preview_controls)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -144,22 +147,23 @@ class Picture(tk.Label):
         size = (max(1, self.winfo_width()), max(1, self.winfo_height()))
         if stamp is not None and (stamp != self.mtime or size != self.size) and not self.busy and min(size) > 1:
             self.busy = True
+            path = self.path
             def load():
                 try:
-                    with Image.open(self.path) as source:
+                    with Image.open(path) as source:
                         original = source.copy()
                     preview = original.copy()
                     preview.thumbnail(size, Image.Resampling.LANCZOS)
-                    self.results.put((stamp, size, original, preview))
+                    self.results.put((path, stamp, size, original, preview))
                 except Exception:
-                    self.results.put((None, size, None, None))
+                    self.results.put((path, None, size, None, None))
             threading.Thread(target=load, daemon=True).start()
         try:
-            stamp, size, original, preview = self.results.get_nowait()
+            path, stamp, size, original, preview = self.results.get_nowait()
         except queue.Empty:
             return
         self.busy = False
-        if original is not None:
+        if original is not None and path == self.path:
             self.image, self.mtime, self.size = original, stamp, size
             self.photo = ImageTk.PhotoImage(preview)
             self.configure(image=self.photo, text='')
@@ -339,23 +343,30 @@ class App:
     def build_cam(self):
         self.cam.columnconfigure(0, weight=65, uniform='camcols'); self.cam.columnconfigure(1, weight=35, uniform='camcols')
         self.cam.rowconfigure(0, weight=1)
-        self.picture(self.card(self.cam, '主相机实时标注 · 点击放大', 0, 0), 'camcal_latest')
+        self.cam_picture = self.picture(self.card(self.cam, '主相机实时标注 · 点击放大', 0, 0), 'camcal_latest')
         right = tk.Frame(self.cam, bg=BG); right.grid(row=0, column=1, sticky='nsew')
         right.columnconfigure(0, weight=1)
-        for row, weight in enumerate((2, 5, 3, 3)): right.rowconfigure(row, weight=weight)
+        for row, weight in enumerate((3, 3, 3, 5, 2)): right.rowconfigure(row, weight=weight)
         progress = self.card(right, '标定进度', 0, 0)
         progress.rowconfigure(0, weight=1); progress.rowconfigure(1, weight=1)
         self.progress_text = self.label(progress, '无数据', font=self.theme.large)
         self.progress_text.grid(row=0, column=0, sticky='w')
         self.progress = ttk.Progressbar(progress, maximum=1)
         self.progress.grid(row=1, column=0, sticky='ew', pady=4)
+        self.preview_button = ttk.Button(progress, text='打开相机预览', command=self.toggle_preview)
+        self.preview_button.grid(row=2, column=0, sticky='w')
+        self.preview_status = self.label(progress, '已关闭')
+        self.preview_status.grid(row=3, column=0, sticky='w')
         plan = self.card(right, '计划点 · XY 平面', 1, 0)
         self.plan = tk.Canvas(plan, bg=WHITE, highlightthickness=0)
         self.plan.grid(row=0, column=0, sticky='nsew')
         step = self.card(right, '当前步', 2, 0)
         self.cam_step = KeyValueGrid(step, ('步骤', '检出角点', '饱和比例', '亮斑'), self.theme)
         self.cam_step.grid(row=0, column=0, sticky='new')
-        result = self.card(right, '结果', 3, 0)
+        preview = self.card(right, '预览读数', 3, 0)
+        self.preview_values = KeyValueGrid(preview, ('模组 XYZ', '清晰度', '检出角点', '板中心偏移 mm', '提示'), self.theme)
+        self.preview_values.grid(row=0, column=0, sticky='new')
+        result = self.card(right, '结果', 4, 0)
         self.cam_result = tk.Label(result, text='标定进行中', bg='#ecfdf3', fg=COLORS['green'],
                                    font=self.theme.body, justify='left', anchor='nw', wraplength=460, padx=6, pady=4)
         self.cam_result.grid(row=0, column=0, sticky='nsew')
@@ -449,6 +460,7 @@ class App:
         rows = self.tail.poll()
         self.update_reply(main, rows)
         self.update_cam(camcal_progress(main))
+        self.update_preview(main)
         self.update_tip(tooltip_progress(main))
         key = (date.today(), json.dumps(rows, ensure_ascii=False, default=str))
         if key != self.cache.get('events'):
@@ -489,6 +501,7 @@ class App:
         step = {'move': '移动拍照', 'done': '完成', 'fail': '失败'}.get(kind, kind)
         code = data.get('code')
         self.cam_step.set({'步骤': f'{step}  {code}' if code else step, '检出角点': f"{detail.get('detected_corners', '—')}/{detail.get('predicted_corners', '—')}", '饱和比例': saturation, '亮斑': glare})
+
         failed = data.get('event') in ('camcal_failed', 'camcal_aborted') or data.get('kind') == 'fail'
         done = data.get('event') == 'camcal_done' or data.get('kind') == 'done'
         if failed:
@@ -508,6 +521,43 @@ class App:
         start = data.get('start_xyz')
         origin_z = start[2] if isinstance(start, (list, tuple)) and len(start) == 3 else None
         self.draw_plan(points, count, origin_z)
+
+    def toggle_preview(self):
+        path = ui_command_file(self.directory)
+        try:
+            old = read_json(path)
+            seq = max(time.time_ns(), int(old.get('seq', 0)) + 1, int(self.preview_data.get('seq', 0)) + 1)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix('.tmp')
+            tmp.write_text(json.dumps({'preview': not self.preview_data.get('on', False), 'seq': seq,
+                                       'time': datetime.now().astimezone().isoformat()}), encoding='utf-8')
+            os.replace(tmp, path)
+        except (OSError, ValueError, TypeError):
+            logger.exception('写预览命令失败')
+
+    def update_preview(self, main):
+        try:
+            age = max(0, time.time() - main_status_file(self.directory).stat().st_mtime)
+        except OSError:
+            age = None
+        controls = preview_controls(main, age)
+        self.preview_data = main.get('preview') if isinstance(main.get('preview'), dict) else {}
+        self.preview_button.config(text='关闭相机预览' if controls['on'] else '打开相机预览',
+                                   state='normal' if controls['enabled'] else 'disabled')
+        text = ('不可用：' + controls['reason'] if controls['reason'] else
+                f"预览中 {self.preview_data.get('fps', 0)} fps" if controls['on'] else
+                '不可用：' + str(self.preview_data['error']) if self.preview_data.get('error') else '已关闭')
+        self.preview_status.config(text=text)
+        path = live_image_file(self.directory, 'preview_latest' if controls['on'] else 'camcal_latest')
+        if getattr(self.cam_picture, 'path', None) != path:
+            self.cam_picture.path = path
+            self.cam_picture.mtime = None
+            self.cam_picture.image = self.cam_picture.photo = None
+            self.cam_picture.config(image='', text='暂无图片')
+        p = self.preview_data
+        self.preview_values.set({'模组 XYZ': p.get('actual_xyz'), '清晰度': p.get('sharpness'),
+                           '检出角点': p.get('corners'), '板中心偏移 mm': p.get('board_offset_mm'),
+                           '提示': '偏移接近 0 且清晰度最大处即为推荐起始位'})
 
     def update_tip(self, data):
         key = json.dumps(data, ensure_ascii=False, default=str)

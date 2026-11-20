@@ -1,4 +1,4 @@
-"""生成有代表性的演示数据并启动只读界面。"""
+"""生成有代表性的演示数据并启动界面。"""
 import argparse
 import json
 import os
@@ -19,7 +19,7 @@ def atomic(path, value):
     os.replace(tmp, path)
 
 
-def write_demo(root, step=0, *, initial=False):
+def write_demo(root, step=0, *, initial=False, preview_state="on"):
     root = Path(root)
     now = datetime.now().astimezone(); stamp = now.isoformat()
     start = (now - timedelta(hours=2, minutes=18)).isoformat()
@@ -40,16 +40,20 @@ def write_demo(root, step=0, *, initial=False):
     atomic(main_status_file(root), {'mode': '相机标定中', 'picking': {
         'tray':1,'view_index':10,'total_views':24,'coarse_shots':3,'removable_count':5,'red_count':1,'sent_count':7},
         'last_reply_time':stamp,'last_reply_task_id':103,'last_reply_request_func':80,'last_reply_func':82,
-        'camcal':{'sequence':sequence,'plan':points,'start_xyz':[0,0,0],'kind':'move','detail':{
+        'preview': {'on': preview_state == 'on', 'seq': 1, 'fps': 2.0, 'frames': 36, 'actual_xyz': [125.2, 73.4, 110.0], 'sharpness': 568.3, 'corners': 124, 'board_offset_mm': [0.3, -0.2]},
+        'camcal':{'event': 'camcal_step' if preview_state == 'blocked' else 'camcal_done', 'sequence':sequence,'plan':points,'start_xyz':[0,0,0],'kind':'move','detail':{
             'detected_corners':35,'predicted_corners':40,'saturated_fraction':0.01,'bbox':[510,120,560,170]}},
         'tooltip':{'tool':1,'iterations':2,'event':'tooltip_aligned','history':history,'new':[0.02,-0.01,0.01]}})
-    for name in ('latest', 'camcal_latest', 'calib_front_latest', 'calib_side_latest'):
+    for name in ('latest', 'camcal_latest', 'preview_latest', 'calib_front_latest', 'calib_side_latest'):
         path = live_image_file(root, name); path.parent.mkdir(parents=True, exist_ok=True)
         image = Image.new('RGB', (960, 600), '#253444'); draw = ImageDraw.Draw(image)
         draw.rectangle((100 + step % 20 * 3, 100, 600, 450), outline='#00ff88', width=4)
         for x in range(170, 590, 65):
             for y in range(150, 440, 60): draw.ellipse((x-4,y-4,x+4,y+4), fill='#46a7ff')
         draw.rectangle((510,120,560,170),outline='#ffdd55',width=3)
+        if name == 'preview_latest':
+            draw.line((480, 0, 480, 600), fill='#00ffff', width=2); draw.line((0, 300, 960, 300), fill='#00ffff', width=2)
+            draw.line((465, 300, 495, 300), fill='red', width=3); draw.line((480, 285, 480, 315), fill='red', width=3)
         draw.text((30, 30), f'{name}  frame {step}', fill='white')
         temp = path.with_suffix('.tmp'); image.save(temp, format='JPEG'); os.replace(temp, path)
     if initial:
@@ -78,14 +82,14 @@ def generate(root):
 
 def main():
     from .__main__ import add_view_arguments, validate_view_arguments
-    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); add_view_arguments(parser)
+    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); add_view_arguments(parser)
     args = parser.parse_args(); validate_view_arguments(parser, args)
     # 先同步生成第一帧，让短延迟截图也有完整内容。
-    write_demo(args.root, initial=True)
+    write_demo(args.root, initial=True, preview_state=args.preview_state)
     def update():
         step = 1
         while True:
-            time.sleep(1); write_demo(args.root, step); step += 1
+            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state); step += 1
     threading.Thread(target=update, daemon=True).start()
     command = [sys.executable, '-m', 'nest_clear.ui', '--root', args.root, '--page', args.page]
     if args.screenshot is not None:

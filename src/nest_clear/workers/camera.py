@@ -32,6 +32,8 @@ class CameraWorker(AsyncRequestWorker):
         self.principal = principal
         self.role = role
         self.needs_reopen = False
+        self.capture_lock = threading.Lock()
+        self.preview_image = None
         self.size = None
         self.expected_size = image_size
         try:
@@ -126,6 +128,14 @@ class CameraWorker(AsyncRequestWorker):
             raise GuardError("CAMERA-OPEN", f"打开或参数回读失败：{exc}", f"相机 SN={self.sn}", "检查供电、连接、SDK、序列号及相机参数。") from exc
 
     def execute(self, payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        with self.capture_lock:
+            image, meta = self._execute(payload)
+            if payload.get("stage") == "preview":
+                self.preview_image = image
+                return None, meta
+            return image, meta
+
+    def _execute(self, payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         stage = {"coarse": "粗拍", "fine": "精定位"}.get(payload.get("stage"), payload.get("stage", "未知阶段"))
         where = f"相机角色={self.role}，SN={self.sn}，阶段={stage}，Task_ID={payload.get('task_id')}"
         result: queue.Queue = queue.Queue(maxsize=1)
@@ -186,7 +196,7 @@ class CameraWorker(AsyncRequestWorker):
             for key, feature in (("exposure_us", "ExposureTime"), ("gain_db", "Gain")):
                 if metadata[key] is None:
                     metadata[key] = read(feature)
-            return image, {"capture_seq": next(_sequence), **metadata, "settings": self.settings}
+            return image, {"capture_seq": None if payload.get("stage") == "preview" else next(_sequence), **metadata, "settings": self.settings}
         except Exception as exc:
             raise GuardError("CAMERA-CAPTURE", f"采图失败：{exc}", where, "检查相机连接、触发、图像尺寸和标定；超时后重开相机。") from exc
 

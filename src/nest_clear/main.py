@@ -295,6 +295,8 @@ class Application:
                 self.clock.attach_worker(worker)
             if self.calib_camera is not None:
                 self.clock.attach_worker(self.calib_camera)
+            from nest_clear.preview.controller import PreviewController
+            self.preview = PreviewController(config.record_directory, self.board, self.events, config.camera_calibration, config.ui_preview.get("interval_s", .5), config.capture_timeout_s, self.camera)
             self.handle = None
             baseline = self.plc.initialize()
             self.events.emit("baseline", task_id=baseline, ignored=bool(baseline))
@@ -328,6 +330,11 @@ class Application:
         if gate is not None:
             gate.beat()
             if gate.paused():
+                if hasattr(self, "preview"):
+                    self.preview.poll_command()
+                    if self.events.status and time.monotonic() - self.preview.last_status >= .5:
+                        self.events.status.update_preview(self.preview.state)
+                        self.preview.last_status = time.monotonic()
                 return
         if self.handle is None or self.handle.result is not None:
             if self.handle is not None:
@@ -340,9 +347,13 @@ class Application:
                 build_batch(self.board, self.config, self.path, self.tracker, self.events, branches=self.branches, calibration=self.calibration, calibration_updated=self.update_calibration, calibration_path=self.calibration_path)
             )
         self.clock.tick_once()
+        if hasattr(self, "preview"):
+            self.preview.tick()
 
     def close(self) -> None:
         """释放时钟、相机和 PLC；当前流程没有设备动作收尾树。"""
+        if hasattr(self, "preview"):
+            self.preview.close()
         if self.clock is not None:
             self.clock.shutdown()
         abort_camcal = getattr(self.events, "abort_camcal", None)

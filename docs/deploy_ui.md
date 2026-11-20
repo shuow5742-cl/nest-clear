@@ -30,3 +30,5 @@ PYTHONPATH=src /usr/bin/python3 -m nest_clear.ui.demo --root /tmp/nest-clear-dem
 ```
 
 无人值守截图可增加 `--screenshot reports/ui/camcal.png --screenshot-after-ms 3000`；运行命令的环境需要可用的 `DISPLAY` 和访问权限。
+
+相机标定页可打开实时预览，用模组坐标、板中心偏移和清晰度确定起始位置；标定会话中按钮禁用。界面向 `<root>/state/ui_command.json` 原子写入 `preview`、递增 `seq` 和 ISO `time`；主程序在 `main_status.json` 的 `preview` 回显处理结果，并将图像写入 `live/preview_latest.jpg`。主程序状态超过 3 秒未刷新时按钮不可用。`ui_preview.interval_s` 可设置采图间隔，默认 0.5 秒；预览与业务共用相机，请求到达时最多等待正在进行的一帧。演示运行 `--page camcal --preview-state on`，会话禁用效果使用 `--preview-state blocked`。

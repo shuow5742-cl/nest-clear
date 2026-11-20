@@ -137,6 +137,7 @@ class Config:
     ui: UIConfig = field(default_factory=UIConfig)
     run_mode: str = "production"
     commtest: dict[str, Any] = field(default_factory=dict)
+    ui_preview: dict[str, Any] = field(default_factory=dict)
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -305,7 +306,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。"
         ) from exc
     if isinstance(data, dict):
-        data = {"camera_calibration": {}, "ui": {}, "run_mode": "production", "commtest": None, **data}
+        data = {"camera_calibration": {}, "ui": {}, "ui_preview": {}, "run_mode": "production", "commtest": None, **data}
     root = _mapping(
         data,
         "根",
@@ -318,6 +319,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "pick_depth_z",
             "tool_calibration",
             "camera_calibration",
+            "ui_preview",
             "travel",
             "camera",
             "record",
@@ -586,6 +588,10 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     _string(ui_data["python"], "ui.python")
     if type(ui_data["enabled"]) is not bool or type(ui_data["fullscreen"]) is not bool or type(ui_data["refresh_ms"]) is not int or ui_data["refresh_ms"] < 50:
         _fail("ui", "开关须为布尔值，刷新间隔须为不小于 50 的整数")
+    if not isinstance(root["ui_preview"], dict):
+        _fail("ui_preview", "应为映射")
+    preview_data = _mapping({"interval_s": .5, **root["ui_preview"]}, "ui_preview", ["interval_s"])
+    preview_data["interval_s"] = _number(preview_data["interval_s"], "ui_preview.interval_s", True)
     return Config(
         plc,
         scan,
@@ -608,5 +614,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _string(record["machine_id"], "record.machine_id"),
         _camera_calibration(root["camera_calibration"]),
         UIConfig(**ui_data),
-        mode, ct or {},
+        mode, ct or {}, preview_data,
     )
