@@ -115,7 +115,7 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     monkeypatch.setattr(app, 'Picture', FakePicture)
     monkeypatch.setattr(app, 'KeyValueGrid', FakeKeyValueGrid)
     for page in app.App.PAGE_NAMES:
-        ui = app.App(tmp_path, page=page)
+        ui = app.App(tmp_path, page=page, ignore_before_ns=0)
         left = ui.home.children[0]
         device_content = ui.bits[0].parent
         pick_content = ui.pick_values['盘号'].parent
@@ -166,6 +166,18 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert len(ui.pickacc_table.rows) == 1
         ui.update_pickacc({'pickacc':{'phase':'wait_tool','tool':2},'command_seq':0})
         assert ui.pickacc_calculate.options['state'] == 'disabled'
+        ui.update_baseline({'baseline':{'phase':'select'},'command_seq':0})
+        assert all(b.options['state'] == 'normal' for b in ui.baseline_tools)
+        ui.update_baseline({'baseline':{'phase':'live','tool':1,'live_delta':[0.01,-0.02],'live_inside':True,'existing':{'tool1':{'tool_offset_missing':True}}},'command_seq':0})
+        assert ui.baseline_measure.options['state'] == 'normal'
+        assert ui.baseline_save.options['state'] == 'disabled'
+        assert '尚无工具偏移标定结果' in ui.baseline_notice.options['text']
+        ui.update_baseline({'baseline':{'phase':'fail','tool':1,'message':'基准标定失败'},'command_seq':0})
+        assert ui.baseline_message.options['fg'] == app.COLORS['red']
+        ui.update_baseline({'baseline':{'phase':'success','tool':1,'candidate':{'p0':[1,2,3], 'pixels':{'front':[1,2], 'side':[3,4]}}},'command_seq':0})
+        assert ui.baseline_save.options['state'] == 'normal'
+        assert ui.baseline_tools[0].options['state'] == 'disabled'
+        assert ui.baseline_tools[0].options['style'] == 'OffsetSelected.TButton'
         assert len(ui.table.rows) == 3
         assert len(ui.tiptable.rows) == 2
         assert ui.process_table.options['height'] == 2
@@ -268,3 +280,139 @@ def test_offset_confirm_identifies_tool(tmp_path, monkeypatch, tool, color):
     expected = f'确认覆盖【工具{tool}】的偏移标定结果'
     assert ui.offset_dialog.window_title == expected
     assert any(child.options.get('text') == expected and child.options.get('bg') == color for child in ui.offset_dialog.children)
+
+
+@pytest.mark.parametrize('tool,color', [(1, '#2563eb'), (2, '#d56713')])
+def test_baseline_confirm_identifies_tool(monkeypatch, tool, color):
+    from nest_clear.ui import app
+    class Dialog(Widget):
+        def title(self, value): self.window_title = value
+        def pack(self, *args, **kwargs): pass
+    class PackWidget(Widget):
+        def pack(self, *args, **kwargs): pass
+    monkeypatch.setattr(app.tk, 'Toplevel', Dialog)
+    monkeypatch.setattr(app.tk, 'Label', PackWidget)
+    monkeypatch.setattr(app.tk, 'Frame', PackWidget)
+    monkeypatch.setattr(app.ttk, 'Button', PackWidget)
+    ui = object.__new__(app.App)
+    ui.root = Widget(); ui.theme = SimpleNamespace(title=('font',13), body=('font',12))
+    ui.baseline_dialog = None
+    ui.baseline_confirm({'tool':tool, 'candidate':{'p0':[1,2,3], 'pixels':{'front':[320,240], 'side':[321,240]}},
+                         'existing':{f'tool{tool}':{'time':'2026-11-21T01:00:00', 'p0':[1,2,2.9], 'pixels':{'front':[319,240], 'side':[320,240]}}}})
+    expected = f'确认覆盖【工具{tool}】的对刀基准'
+    assert ui.baseline_dialog.window_title == expected
+    assert any(child.options.get('text') == expected and child.options.get('bg') == color for child in ui.baseline_dialog.children)
+
+
+def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
+    import json
+    import os
+    import time
+    from datetime import datetime, timedelta
+    from PIL import Image
+    from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file
+    from nest_clear.ui import app
+
+    names = (
+        'latest', 'camcal_latest', 'preview_latest', 'tooloffset_latest', 'tooloffset_crop',
+        'pickacc_latest', 'pickacc_crop', 'baseline_front', 'baseline_side',
+        'calib_front_latest', 'calib_side_latest',
+    )
+    old_ns = time.time_ns() - 60_000_000_000
+    for name in names:
+        path = live_image_file(tmp_path, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new('RGB', (40, 30), 'blue').save(path, format='JPEG')
+        os.utime(path, ns=(old_ns, old_ns))
+
+    old_iso = (datetime.now().astimezone() - timedelta(minutes=5)).isoformat()
+    now_iso = datetime.now().astimezone().isoformat()
+    main_file = main_status_file(tmp_path)
+    main_file.parent.mkdir(parents=True, exist_ok=True)
+    main_file.write_text(json.dumps({
+        'mode': '挑毛中',
+        'picking': {'tray': 9, 'view_index': 2, 'total_views': 10, 'wall': old_iso},
+        'camcal': {'event': 'camcal_done', 'sequence': 5, 'plan': [[0, 0, 0]], 'detail': {'detected_corners': 35, 'predicted_corners': 40}, 'wall': old_iso},
+        'tooltip': {'tool': 1, 'iterations': 2, 'event': 'tooltip_aligned', 'wall': old_iso, 'history': [{'event': 'tooltip_detect', 'wall': old_iso}]},
+        'last_reply_time': old_iso,
+        'last_reply_task_id': 99,
+        'last_reply_func': 1,
+        'recent_replies': [{'time': old_iso, 'task_id': 99, 'request_func': 1, 'reply_func': 1}],
+    }), encoding='utf-8')
+    os.utime(main_file, ns=(old_ns, old_ns))
+    sup_file = supervisor_state_file(tmp_path)
+    sup_file.write_text(json.dumps({
+        'pid': 123,
+        'child_state': '运行',
+        'plc_connected': True,
+        'plc_last_read': now_iso,
+        'heartbeat_last_write': now_iso,
+        'algorithm_ready': 1,
+    }), encoding='utf-8')
+    os.utime(sup_file, ns=(old_ns, old_ns))
+
+    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text'):
+        monkeypatch.setattr(app.tk, name, Widget)
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button'):
+        monkeypatch.setattr(app.ttk, name, Widget)
+    monkeypatch.setattr(app.ttk, 'Style', Style)
+    monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
+
+    class FakeCard(Widget):
+        def __init__(self, parent, title, theme):
+            super().__init__(parent); self.body = Widget(self); self.title_label = Widget(self)
+
+    class FakeKeyValueGrid(Widget):
+        def __init__(self, parent, keys, theme):
+            super().__init__(parent); self.values_data = {}
+        def set(self, values):
+            self.values_data = values
+
+    class FakePhoto:
+        def __init__(self, img):
+            self.img = img
+
+    class FakePic(Widget):
+        def __init__(self, parent, path, theme):
+            super().__init__(parent, text='暂无图像')
+            self.path = path
+            self.min_mtime_ns = 0
+            self.mtime = None
+            self.image = None
+            self.photo = None
+            self.results = app.queue.Queue()
+            self.busy = False
+            self.size = None
+            self.aspect_changed = None
+        poll = app.Picture.poll
+
+    monkeypatch.setattr(app, 'Card', FakeCard)
+    monkeypatch.setattr(app, 'KeyValueGrid', FakeKeyValueGrid)
+    monkeypatch.setattr(app, 'Picture', FakePic)
+    monkeypatch.setattr(app.ImageTk, 'PhotoImage', FakePhoto)
+
+    ui = app.App(tmp_path)
+    ui.refresh()
+    # 状态照常显示（父程序、PLC、心跳、40932 及已有业务状态正常保留），仅图片窗口保持空占位。
+    assert ui.lights['父程序'][1].options['text'] == '123'
+    assert ui.lights['40932 就绪'][1].options['text'] == '1'
+    assert ui.pick_values['盘号'].options['text'] == '9'
+    assert len(ui.reply_table.rows) == 1
+    assert ui.cam_step.values_data['检出角点'] == '35/40'
+    for pic in ui.pictures:
+        pic.poll()
+        assert pic.image is None
+        assert pic.options.get('text') == '暂无图像'
+
+    # 写入启动后新图片，窗口应正常加载显示。
+    for name in names:
+        Image.new('RGB', (40, 30), 'green').save(live_image_file(tmp_path, name), format='JPEG')
+    for pic in ui.pictures:
+        pic.poll()
+        for _ in range(40):
+            pic.poll()
+            if pic.image is not None:
+                break
+            time.sleep(0.01)
+        assert pic.image is not None
+        assert pic.options.get('text') == ''

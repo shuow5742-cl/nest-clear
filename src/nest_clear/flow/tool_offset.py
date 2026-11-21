@@ -297,6 +297,8 @@ class ToolOffset(TreeNode):
                 object.__setattr__(ctx.config, 'tools', tuple(offsets))
                 from .pick_accuracy import refresh_existing
                 refresh_existing(ctx)
+                from nest_clear.baseline.session import refresh_existing as refresh_baseline_existing
+                refresh_baseline_existing(ctx)
                 self.publish('done', '保存成功', candidate=result)
                 finish(ctx, bb, 'done')
                 return self.set_reply(91)

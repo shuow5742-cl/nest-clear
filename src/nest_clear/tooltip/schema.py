@@ -58,7 +58,7 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
         _fields(
             raw,
             {"version", "tool_name", "p0", "offset_xyz", "views"},
-            {"timestamp", "note"},
+            {"timestamp", "note", "jacobian_pending"},
             "baseline",
         )
         if type(raw["version"]) is not int or raw["version"] != 1:
@@ -67,7 +67,7 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
             raise ToolCalSchemaError("views must be a list")
         views = []
         for i, v in enumerate(raw["views"]):
-            _fields(v, {"name", "target_uv", "jacobian"}, {"width_px", "click"}, f"views[{i}]")
+            _fields(v, {"name", "target_uv"}, {"jacobian", "width_px", "click"}, f"views[{i}]")
             try:
                 views.append(ViewCalib(**v))
             except (GuardError, TypeError) as exc:
@@ -79,6 +79,7 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
             raw["offset_xyz"],
             raw.get("timestamp", ""),
             raw.get("note", ""),
+            raw.get("jacobian_pending", False),
         )
     except (yaml.YAMLError, GuardError, ValueError, TypeError, OSError) as exc:
         raise ToolCalSchemaError(f"{path}: {exc}") from exc
@@ -94,11 +95,12 @@ def save_baseline(baseline: ToolTipBaseline, path: str | Path) -> None:
         "offset_xyz": list(baseline.offset_xyz),
         "timestamp": baseline.timestamp,
         "note": baseline.note,
+        **({"jacobian_pending": True} if baseline.jacobian_pending else {}),
         "views": [
             {
                 "name": v.name,
                 "target_uv": list(v.target_uv),
-                "jacobian": [list(row) for row in v.jacobian],
+                "jacobian": [list(row) for row in v.jacobian] if v.jacobian is not None else None,
                 **({"width_px": v.width_px} if v.width_px is not None else {}),
                 **({"click": v.click} if v.click is not None else {}),
             }

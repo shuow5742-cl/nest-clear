@@ -37,6 +37,7 @@ class CalibCameraWorker(AsyncRequestWorker):
         self.timeout_s = timeout_s
         self.events = events
         self.blocked = set()
+        self.opened = False
         for name in ("front", "side"):
             config = dict(cameras[name])
             if config.get("backend") == "mock":
@@ -49,15 +50,21 @@ class CalibCameraWorker(AsyncRequestWorker):
 
     def open(self) -> None:
         """预检时打开两台相机；任何失败都释放已打开的设备。"""
+        if self.opened:
+            return
+        if self.blocked:
+            raise RuntimeError('对刀相机采图超时，须重启主程序后重新打开')
         try:
             for camera in self.cameras.values():
                 camera.open()
+            self.opened = True
         except BaseException:
             self.on_stop()
             raise
 
     def execute(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
         """一次请求依次取得两视图，交给后续对刀算法。"""
+        self.open()
         result = CaptureImages()
         for name, camera in self.cameras.items():
             class Adapter:
@@ -67,7 +74,10 @@ class CalibCameraWorker(AsyncRequestWorker):
             worker = CameraWorker("mock", camera.config.get("sn", f"{camera.backend}:{camera.config.get('device', name)}"), Adapter(), timeout_s=self.timeout_s, role=f"对刀 {name}")
             worker.needs_reopen = name in self.blocked
             try:
-                result[name], meta = worker.execute({"stage": "对刀", "task_id": payload.get("task_id")})
+                stage = "preview" if payload.get("stage") == "baseline_preview" else "对刀"
+                result[name], meta = worker.execute({"stage": stage, "task_id": payload.get("task_id")})
+                if str(payload.get("stage", "")).startswith("baseline_"):
+                    continue
                 if self.events and self.events.run_directory is not None:
                     sequence, capture_id = self.events.next_capture()
                     archive = getattr(self.events, "archive", None)
@@ -104,3 +114,4 @@ class CalibCameraWorker(AsyncRequestWorker):
         for name, camera in self.cameras.items():
             if name not in self.blocked:
                 camera.close()
+        self.opened = False

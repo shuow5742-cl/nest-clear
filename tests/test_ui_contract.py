@@ -61,7 +61,7 @@ import sys, time
 from nest_clear.ui.app import App
 from nest_clear.ui.demo import write_demo
 write_demo(sys.argv[1], initial=True)
-app = App(sys.argv[1], 50, page='main')
+app = App(sys.argv[1], 50, page='main', ignore_before_ns=0)
 try:
     app.root.state('normal')
     app.root.attributes('-zoomed', False)
@@ -104,7 +104,7 @@ def test_home_tables_fit_window(tmp_path, geometry):
         pytest.skip('DISPLAY 不可连接')
     probe.destroy()
     write_demo(tmp_path, initial=True)
-    app = App(tmp_path, 50)
+    app = App(tmp_path, 50, ignore_before_ns=0)
     try:
         try:
             app.root.state('normal')
@@ -155,7 +155,7 @@ def test_ui_smoke(tmp_path, monkeypatch):
     probe.destroy()
     from nest_clear.ui.demo import write_demo
     write_demo(tmp_path, initial=True)
-    app = App(tmp_path, 50, page='camcal')
+    app = App(tmp_path, 50, page='camcal', ignore_before_ns=0)
     app.root.geometry('1366x768')
     try:
         for i in range(app.tabs.index('end')):
@@ -167,6 +167,44 @@ def test_ui_smoke(tmp_path, monkeypatch):
         target = tmp_path / 'screen.png'
         app.capture_and_exit(target)
         assert target.read_bytes() == b'png'
+    finally:
+        try: app.root.destroy()
+        except tkinter.TclError: pass
+
+
+@pytest.mark.skipif(not os.environ.get('DISPLAY'), reason='无 DISPLAY')
+def test_restart_ignores_old_pictures_until_updated(tmp_path):
+    import time
+    import tkinter
+    from PIL import Image
+    from nest_clear.ui.app import App
+    from nest_clear.ui.demo import write_demo
+    try:
+        probe = tkinter.Tk()
+    except tkinter.TclError:
+        pytest.skip('DISPLAY 不可连接')
+    probe.destroy()
+    write_demo(tmp_path, initial=True)
+    app = App(tmp_path, 50, page='main')
+    try:
+        app.refresh()
+        for _ in range(4):
+            app.poll_pictures()
+            app.root.update()
+            time.sleep(0.02)
+        assert all(pic.image is None and pic.cget('text') == '暂无图像' for pic in app.pictures)
+        assert len(app.reply_table.get_children()) == 5
+        assert app.pick_values['盘号'].cget('text') == '1'
+        path = live_image_file(tmp_path, 'latest')
+        Image.new('RGB', (32, 24), 'red').save(path, format='JPEG')
+        for _ in range(15):
+            app.poll_pictures()
+            app.root.update()
+            if app.pictures[0].image is not None:
+                break
+            time.sleep(0.02)
+        assert app.pictures[0].image is not None
+        assert app.pictures[0].cget('text') == ''
     finally:
         try: app.root.destroy()
         except tkinter.TclError: pass

@@ -84,7 +84,7 @@ def pickacc_demo(state, stamp):
                         'tool2':{'type':'table','time':stamp,'verification':[{}],'stale':True}}, 'candidate':candidate}
 
 
-def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None):
+def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None):
     root = Path(root)
     now = datetime.now().astimezone(); stamp = now.isoformat()
     start = (now - timedelta(hours=2, minutes=18)).isoformat()
@@ -145,6 +145,25 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
         if initial:
             project=Path(__file__).resolve().parents[3]; env=dict(os.environ,PYTHONPATH=str(project/'src'))
             subprocess.run([str(project/'.venv/bin/python'),'-m','nest_clear.tools.offset_demo_image',str(root),'pickacc'],cwd=project,env=env,check=True,timeout=30)
+    if baseline_state:
+        if initial:
+            project = Path(__file__).resolve().parents[3]; env = dict(os.environ, PYTHONPATH=str(project/'src'))
+            subprocess.run([str(project/'.venv/bin/python'), '-m', 'nest_clear.tools.baseline_demo_image', str(root), baseline_state], cwd=project, env=env, check=True, timeout=30)
+        path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
+        candidate = json.loads((root/'baseline_demo.json').read_text(encoding='utf-8'))
+        from nest_clear.baseline.session import format_outside_message
+        delta = candidate.get('delta_mm') or [0.0, 0.0]
+        fail_msg = format_outside_message(delta)
+        phases = {'select':('select','请选择工具'), 'live':('live','请点动针尖到主相机中心后按【对刀基准】'),
+                  'success':('success','基准建立成功（待保存）'), 'fail':('fail', fail_msg), 'confirm':('confirm','请确认覆盖保存')}
+        phase,message = phases[baseline_state]
+        data['mode']='对刀基准建立中'; data['baseline']={'phase':phase, 'message':message, 'tool':None if phase=='select' else 1,
+            'candidate':candidate if phase in ('success','fail','confirm') else None, 'offset_xyz':None if phase=='select' else [1.2,-.3,.05],
+            'notice':'提示：工具1 的工具偏移标定结果比现有对刀基准新（不阻止建基准）' if phase != 'select' else '',
+            'live_delta':candidate['delta_mm'] if phase != 'select' else None, 'live_inside':candidate['inside'],
+            'existing':{'tool1':{'time':stamp,'p0':[125,73,110],'offset_xyz':[1.2,-.3,.05],'pixels':{'front':[319,240],'side':[322,240]},'jacobian_pending':True,'stale':True,'offset_newer':True},
+                        'tool2':{'time':stamp,'p0':[126,73,110],'offset_xyz':[2.1,.4,.02],'pixels':{'front':[320,240],'side':[321,240]},'jacobian_pending':True}}}
+        atomic(path,data)
     names = ('latest', 'camcal_latest', 'preview_latest', 'calib_front_latest', 'calib_side_latest')
     if not offset_state: names += ('tooloffset_latest', 'tooloffset_crop')
     for name in names:
@@ -185,19 +204,19 @@ def generate(root):
 
 def main():
     from .__main__ import add_view_arguments, validate_view_arguments
-    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--geometry', help='窗口尺寸，例如 1366x768'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','table','confirm'));  add_view_arguments(parser)
+    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm')); add_view_arguments(parser)
     args = parser.parse_args(); validate_view_arguments(parser, args)
     if args.offset_state is None and args.page in ('offset', 'tool-offset', '工具偏移标定', '工具偏移标定页'):
         args.offset_state = 'wait_tool'
     # 先同步生成第一帧，让短延迟截图也有完整内容。
-    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state)
+    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state)
     def update():
         step = 1
         while True:
-            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state); step += 1
+            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state); step += 1
     threading.Thread(target=update, daemon=True).start()
     from .app import App
-    app = App(args.root, page=args.page, screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms)
+    app = App(args.root, page=args.page, screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms, ignore_before_ns=0)
     if args.screenshot:
         app.root.attributes('-topmost', True)
     if args.geometry:

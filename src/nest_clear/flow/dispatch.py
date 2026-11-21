@@ -60,7 +60,9 @@ class RejectMode(Instant):
             finish_pickaccuracy(self.ctx, bb, "aborted", reason=f"标定中收到非 150/155/156 功能码 {func}")
         if mode == Mode.CAMERA_CALIBRATING:
             finish(self.ctx, bb, "aborted", reason=f"标定中收到非 80 功能码 {func}")
-        if mode == Mode.PICKING and cycle is not None:
+        if mode == Mode.BASELINE:
+            reason = "对刀基准建立中，请先在界面结束"
+        elif mode == Mode.PICKING and cycle is not None:
             try:
                 cycle.expect(func)
             except ProtocolViolation as exc:
@@ -87,7 +89,7 @@ def build_dispatch(ctx: FlowContext, branches: Mapping[int, Branch] | None = Non
         business = Fallback([factory(ctx), PrepareError(ctx.events)], name=f"功能码 {code} 业务或 999")
         checked = Fallback(
             [
-                Sequence([Predicate("模式允许", lambda bb, allowed=allowed: bb.read("mode") in allowed), business], name="模式允许后执行"),
+                Sequence([Predicate("模式允许", lambda bb, allowed=allowed: bb.read("mode") != Mode.BASELINE and bb.read("mode") in allowed), business], name="模式允许后执行"),
                 Sequence([RejectMode(ctx), PrepareError(ctx.events)], name="模式拒绝并应答 999"),
             ],
             name="模式检查",

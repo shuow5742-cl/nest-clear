@@ -297,6 +297,34 @@ class Application:
             from nest_clear.flow.pick_accuracy import existing as accuracy_existing
             accuracy = accuracy_existing(SimpleNamespace(config=config), Path(config.tool_calibration.directory) / 'pick_compensation.yaml', metadata['calibration_sha256'])
             self.events.emit('pickacc_state', phase='idle', message='等待 PLC 请求', existing=accuracy)
+            from nest_clear.baseline.session import BaselineSession, existing_baselines, settings as baseline_settings
+            baseline_config = baseline_settings(ROOT / 'config/tooltip_baseline.yaml')
+            def start_baseline():
+                if self.calib_camera is None:
+                    self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras, timeout_s=config.capture_timeout_s, events=self.events)
+                    if self.clock is not None:
+                        self.clock.attach_worker(self.calib_camera)
+                return BaselineSession(config, self.calib_camera, self.plc, self.events, calibration_path, baseline_config)
+            self.events.start_baseline = start_baseline
+            self.events.baseline_session = None
+            self.events.emit(
+                'baseline_state',
+                phase='idle',
+                message='请开始对刀基准建立',
+                existing=existing_baselines(config, calibration_path),
+                config=baseline_config,
+            )
+            # 主程序未运行期间遗留的开始命令不能在 PLC 初始化后自动启动会话。
+            from nest_clear.tooloffset.commands import CommandReader, command_path
+            try:
+                prior_command = json.loads(command_path(self.events.directory).read_text(encoding='utf-8'))
+                if prior_command.get('command') == 'baseline_start' and type(prior_command.get('seq')) is int:
+                    seq = prior_command['seq']
+                    self.events.command_reader = CommandReader(self.events.directory, self.events, last_seq=seq)
+                    self.events.emit('tooloffset_command', seq=seq, command='baseline_start', params={}, accepted=False)
+                    self.events.emit('baseline_state', phase='idle', message='主程序未运行时的开始请求已忽略，请重新开始')
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
             for tool in (1, 2):
                 if not accuracy[f'tool{tool}'].get('type'):
                     self.events.emit('warning', reason=f'工具{tool}挑取补偿未标定', tool=tool)
@@ -354,8 +382,15 @@ class Application:
 
     def close(self) -> None:
         """释放时钟、相机和 PLC；当前流程没有设备动作收尾树。"""
+        baseline = getattr(self.events, 'baseline_session', None)
+        if baseline is not None:
+            baseline.end('主程序停止')
+            baseline.thread.join(timeout=self.config.capture_timeout_s + 2)
         if self.clock is not None:
             self.clock.shutdown()
+        calib_camera = getattr(self, "calib_camera", None)
+        if calib_camera is not None and calib_camera.opened:
+            calib_camera.on_stop()
         abort_camcal = getattr(self.events, "abort_camcal", None)
         if abort_camcal is not None:
             abort_camcal("主程序停止，PLC 初始化或急停时会话中断")

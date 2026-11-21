@@ -52,7 +52,30 @@ class WaitRequest(CallWorker):
         reader_ctx = type("CommandContext", (), {"events": self.events})()
         accuracy_session = self._blackboard.read("pickaccuracy_session", None)
         session = self._blackboard.read("tooloffset_session", None) or accuracy_session
-        command = reader(reader_ctx).poll({"abort"} if session else set())
+        baseline_commands = {'baseline_start', 'baseline_select', 'baseline_measure', 'baseline_manual',
+                             'baseline_aux', 'baseline_save', 'baseline_confirm', 'baseline_end'}
+        command = reader(reader_ctx).poll(baseline_commands | ({"abort"} if session else set()))
+        baseline = getattr(self.events, 'baseline_session', None)
+        if baseline and baseline.closed:
+            if self._blackboard.read('mode') == Mode.BASELINE:
+                self._blackboard.write('mode', transition(Mode.BASELINE, Mode.IDLE), self.name)
+                self.events.emit('mode_change', previous_mode=Mode.BASELINE.value, mode=Mode.IDLE.value)
+            self.events.baseline_session = baseline = None
+        if command and command[0].startswith('baseline_'):
+            name, params = command
+            if name == 'baseline_start':
+                if self._blackboard.read('mode') == Mode.IDLE and baseline is None:
+                    try:
+                        baseline = self.events.start_baseline()
+                        self.events.baseline_session = baseline
+                        self._blackboard.write('mode', transition(Mode.IDLE, Mode.BASELINE), self.name)
+                        self.events.emit('mode_change', previous_mode=Mode.IDLE.value, mode=Mode.BASELINE.value)
+                    except Exception as exc:
+                        self.events.emit('baseline_state', phase='idle', message=f'无法开始对刀基准建立：{exc}')
+                else:
+                    self.events.emit('baseline_state', message='当前正在挑毛或标定，忽略开始请求')
+            elif baseline:
+                baseline.submit(name, params, reader(reader_ctx).last_seq)
         if command and command[0] == "abort":
             session["commands"].append({"seq": reader(reader_ctx).last_seq, "command": "abort", "params": command[1]})
             callback = getattr(self.events, "abort_pickaccuracy" if accuracy_session else "abort_tooloffset", None)

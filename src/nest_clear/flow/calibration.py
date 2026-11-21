@@ -145,6 +145,8 @@ class StartCalibration(Instant):
         baseline = load_baseline(path)
         if baseline.tool_name != f"tool{tool}" or {v.name for v in baseline.views} != {"front", "side"}:
             fail(f"工具 {tool} 基准工具号或视图不匹配")
+        if any(v.jacobian is None for v in baseline.views):
+            fail("对刀基准缺少点动测量数据（雅可比），待换针对刀方案确定")
         bb.write("tooltip_baseline", baseline, self.name)
         session["last_position"] = baseline.p0
         bb.write("tooltip_session", session, self.name)

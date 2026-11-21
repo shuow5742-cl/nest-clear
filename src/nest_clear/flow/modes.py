@@ -13,12 +13,14 @@ class Mode(Enum):
     CAMERA_CALIBRATING = "相机标定中"
     TOOL_OFFSET = "工具偏移标定中"
     PICK_ACCURACY = "挑取精度标定中"
+    BASELINE = "对刀基准建立中"
     CALIBRATING_1 = "对刀中(工具1)"
     CALIBRATING_2 = "对刀中(工具2)"
 
 
 _ALLOWED = {
-    Mode.IDLE: frozenset((Mode.PICKING, Mode.CALIBRATING_1, Mode.CALIBRATING_2, Mode.CAMERA_CALIBRATING, Mode.TOOL_OFFSET, Mode.PICK_ACCURACY)),
+    Mode.IDLE: frozenset((Mode.PICKING, Mode.CALIBRATING_1, Mode.CALIBRATING_2, Mode.CAMERA_CALIBRATING, Mode.TOOL_OFFSET, Mode.PICK_ACCURACY, Mode.BASELINE)),
+    Mode.BASELINE: frozenset((Mode.IDLE,)),
     Mode.CAMERA_CALIBRATING: frozenset((Mode.IDLE,)),
     Mode.TOOL_OFFSET: frozenset((Mode.IDLE,)),
     Mode.PICK_ACCURACY: frozenset((Mode.IDLE,)),

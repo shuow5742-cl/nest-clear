@@ -129,9 +129,10 @@ class KeyValueGrid(tk.Frame):
 
 
 class Picture(tk.Label):
-    def __init__(self, parent, path, theme):
-        super().__init__(parent, text='暂无图片', anchor='center', bg='#eef1f5', fg=MUTED, font=theme.body)
+    def __init__(self, parent, path, theme, *, min_mtime_ns=0):
+        super().__init__(parent, text='暂无图像', anchor='center', bg='#eef1f5', fg=MUTED, font=theme.body)
         self.path = path
+        self.min_mtime_ns = min_mtime_ns
         self.mtime = None
         self.image = None
         self.photo = None
@@ -146,8 +147,14 @@ class Picture(tk.Label):
             stamp = self.path.stat().st_mtime_ns
         except OSError:
             stamp = None
+        if stamp is not None and self.min_mtime_ns and stamp < self.min_mtime_ns:
+            stamp = None
         size = (max(1, self.winfo_width()), max(1, self.winfo_height()))
-        if stamp is not None and (stamp != self.mtime or size != self.size) and not self.busy and min(size) > 1:
+        if stamp is None:
+            if self.image is not None or self.photo is not None or self.mtime is not None:
+                self.image = self.photo = self.mtime = self.size = None
+                self.configure(image='', text='暂无图像')
+        elif (stamp != self.mtime or size != self.size) and not self.busy and min(size) > 1:
             self.busy = True
             path = self.path
             def load():
@@ -165,7 +172,7 @@ class Picture(tk.Label):
         except queue.Empty:
             return
         self.busy = False
-        if original is not None and path == self.path:
+        if original is not None and path == self.path and (not self.min_mtime_ns or (stamp is not None and stamp >= self.min_mtime_ns)):
             old_size = self.image.size if self.image is not None else None
             self.image, self.mtime, self.size = original, stamp, size
             self.photo = ImageTk.PhotoImage(preview)
@@ -204,8 +211,9 @@ class App:
                     'pickacc': '挑取精度标定', 'pick-accuracy': '挑取精度标定',
                     'baseline': '对刀基准建立', 'toolcal': '换针对刀', 'tooltip': '换针对刀'}
 
-    def __init__(self, root, refresh_ms=300, fullscreen=False, page='主页', screenshot=None, screenshot_after_ms=None):
+    def __init__(self, root, refresh_ms=300, fullscreen=False, page='主页', screenshot=None, screenshot_after_ms=None, ignore_before_ns=None):
         self.directory = Path(root); self.interval = refresh_ms
+        self.started_at_ns = time.time_ns() if ignore_before_ns is None else ignore_before_ns
         self.root = tk.Tk(); self.root.title('Nest Clear 算法状态')
         self.theme = Theme(self.root)
         self.root.minsize(1366, 768)
@@ -234,9 +242,7 @@ class App:
         self.cam = self.new_page('相机标定'); self.build_cam()
         self.offset = self.new_page('工具偏移标定'); self.build_offset()
         self.pickacc = self.new_page('挑取精度标定'); self.build_pickacc()
-        for title in ('对刀基准建立',):
-            placeholder = self.new_page(title)
-            self.build_placeholder(placeholder, title)
+        self.baseline = self.new_page('对刀基准建立'); self.build_baseline()
         self.tip = self.new_page('换针对刀'); self.build_tip()
         self.select_page(page)
         self.root.after(50, self.refresh)
@@ -281,6 +287,7 @@ class App:
 
     def picture(self, parent, name):
         widget = Picture(parent, live_image_file(self.directory, name), self.theme)
+        widget.min_mtime_ns = self.started_at_ns
         widget.grid(row=0, column=0, sticky='nsew')
         self.pictures.append(widget)
         return widget
@@ -494,6 +501,127 @@ class App:
         self.offset_edges.tag_configure('warning', foreground=COLORS['yellow'])
         scrollbar = ttk.Scrollbar(edge, orient='vertical', command=self.offset_edges.yview)
         scrollbar.grid(row=0, column=1, sticky='ns'); self.offset_edges.configure(yscrollcommand=scrollbar.set)
+
+    def build_baseline(self):
+        self.baseline_pending = 0; self.baseline_dialog = None
+        self.baseline.columnconfigure(0, weight=1, uniform='baseline'); self.baseline.columnconfigure(1, weight=1, uniform='baseline')
+        self.baseline.rowconfigure(1, weight=1)
+        head = self.card(self.baseline, '对刀基准建立', 0, 0, columnspan=2)
+        bar = tk.Frame(head, bg=WHITE); bar.grid(row=0, column=0, sticky='ew'); bar.columnconfigure(1, weight=1)
+        self.baseline_heading = tk.Label(bar, text='当前：未选择', bg='#667085', fg=WHITE, font=(self.theme.title[0], 19, 'bold'), padx=10)
+        self.baseline_heading.grid(row=0, column=0, padx=3)
+        self.baseline_message = tk.Label(bar, text='请开始对刀基准建立', bg=WHITE, fg=INK, font=(self.theme.title[0], 16), anchor='w', justify='left', wraplength=900)
+        self.baseline_message.grid(row=0, column=1, sticky='ew', padx=8)
+        bar.bind('<Configure>', lambda event: self.baseline_message.config(wraplength=max(240, event.width - self.baseline_heading.winfo_reqwidth() - 32)))
+        controls = tk.Frame(head, bg=WHITE); controls.grid(row=1, column=0, sticky='w', pady=4)
+        self.baseline_start = ttk.Button(controls, text='开始对刀基准建立', command=lambda:self.baseline_command('baseline_start'))
+        self.baseline_start.grid(row=0, column=0, padx=2)
+        self.baseline_tools = []
+        for i in (1, 2):
+            b = ttk.Button(controls, text=f'工具{i}', command=lambda i=i:self.baseline_command('baseline_select', {'tool':i}))
+            b.grid(row=0, column=i, padx=2); self.baseline_tools.append(b)
+        tk.Label(controls, text='｜', bg=WHITE, fg=MUTED).grid(row=0, column=3, padx=2)
+        self.baseline_measure = ttk.Button(controls, text='对刀基准', style='OffsetPlace.TButton', command=lambda:self.baseline_command('baseline_measure'))
+        self.baseline_measure.grid(row=0, column=4, padx=5)
+        self.baseline_manual = ttk.Button(controls, text='识别不准，手动确认', command=lambda:self.baseline_command('baseline_manual')); self.baseline_manual.grid(row=0, column=5, padx=2)
+        self.baseline_aux = ttk.Button(controls, text='辅助相机手动重设', command=lambda:self.baseline_command('baseline_aux')); self.baseline_aux.grid(row=0, column=6, padx=2)
+        self.baseline_save = ttk.Button(controls, text='保存基准', command=lambda:self.baseline_command('baseline_save')); self.baseline_save.grid(row=0, column=7, padx=2)
+        self.baseline_end = ttk.Button(controls, text='结束/放弃', command=lambda:self.baseline_command('baseline_end')); self.baseline_end.grid(row=0, column=8, padx=2)
+        self.baseline_live = tk.Label(head, text='实时辅助：等待针尖', bg=WHITE, fg=MUTED, anchor='w', font=self.theme.body)
+        self.baseline_live.grid(row=2, column=0, sticky='ew')
+        self.baseline_notice = tk.Label(head, text='', bg=WHITE, fg=COLORS['yellow'], anchor='w', font=self.theme.body)
+        self.baseline_notice.grid(row=3, column=0, sticky='ew')
+        self.picture(self.card(self.baseline, '主对刀相机 · 点击放大', 1, 0), 'baseline_front')
+        self.picture(self.card(self.baseline, '辅助对刀相机 · 点击放大', 1, 1), 'baseline_side')
+        results = self.card(self.baseline, '本次结果', 2, 0)
+        self.baseline_result = tk.Label(results, text='等待测量', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.body, width=1, wraplength=600)
+        self.baseline_result.grid(row=0, column=0, sticky='nsew')
+        results.bind('<Configure>', lambda event: self.baseline_result.config(wraplength=max(200, event.width - 12)))
+        old = self.card(self.baseline, '现有基准与工具补偿', 2, 1)
+        self.baseline_existing = tk.Label(old, text='—', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.body, width=1, wraplength=600)
+        self.baseline_existing.grid(row=0, column=0, sticky='nsew')
+        old.bind('<Configure>', lambda event: self.baseline_existing.config(wraplength=max(200, event.width - 12)))
+
+    def baseline_command(self, name, params=None):
+        from nest_clear.tooloffset.commands import send
+        if not self.baseline_pending:
+            try: self.baseline_pending = send(self.directory, name, params, acknowledged=getattr(self, 'baseline_ack', 0))
+            except OSError: logger.exception('写对刀基准命令失败')
+
+    def update_baseline(self, main):
+        data = main.get('baseline') or {}; phase = data.get('phase') or 'idle'
+        self.baseline_ack = main.get('command_seq', 0)
+        if self.baseline_pending and self.baseline_ack >= self.baseline_pending: self.baseline_pending = 0
+        tool = data.get('tool'); candidate = data.get('candidate') or {}; existing = data.get('existing') or {}
+        self.baseline_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else '#667085')
+        message = data.get('message') or '请开始对刀基准建立'
+        msg_color = COLORS['red'] if phase == 'fail' or (phase == 'done' and any(word in message for word in ('失败', '异常'))) else COLORS['green'] if phase in ('success', 'saved') else INK
+        self.baseline_message.config(text=message, fg=msg_color)
+        live = data.get('live_delta')
+        self.baseline_live.config(text=f'实时辅助：离中心 横向 {live[0]:+.3f} mm / 竖向 {live[1]:+.3f} mm' if isinstance(live, list) and len(live) == 2 else '实时辅助：等待针尖', fg=COLORS['green'] if data.get('live_inside') else COLORS['red'] if live else MUTED)
+        notice = data.get('notice') or ''
+        if not notice and tool in (1, 2):
+            selected_old = existing.get(f'tool{tool}') or {}
+            if selected_old.get('tool_offset_missing'): notice = f'提示：工具{tool} 尚无工具偏移标定结果（不阻止建基准）'
+            elif selected_old.get('offset_newer'): notice = f'提示：工具{tool} 的工具偏移标定结果比现有对刀基准新（不阻止建基准）'
+        self.baseline_notice.config(text=notice)
+        def enable(widget, condition): widget.config(state='normal' if condition and not self.baseline_pending else 'disabled')
+        enable(self.baseline_start, phase in ('idle', 'done'))
+        for i, button in enumerate(self.baseline_tools, 1):
+            enable(button, phase == 'select'); button.config(style='OffsetSelected.TButton' if i == tool else 'TButton')
+        for b in (self.baseline_measure, self.baseline_manual): enable(b, phase in ('live','fail','success','saved'))
+        enable(self.baseline_aux, phase in ('success','saved') and bool(candidate.get('p0')))
+        enable(self.baseline_save, phase == 'success')
+        enable(self.baseline_end, phase not in ('idle','done'))
+        pixels = candidate.get('pixels') or {}; focus = candidate.get('focus') or {}; click = candidate.get('click') or {}
+        def vector(value, digits=2):
+            return '(' + ', '.join(f'{x:.{digits}f}' for x in value) + ')' if isinstance(value, (list,tuple)) else '—'
+        lines = [f"主相机偏差 mm：{vector(candidate.get('delta_mm'), 3)}　{'在圈内' if candidate.get('inside') else '不在圈内' if candidate else '—'}",
+                 f"主/辅针尖：{vector(pixels.get('front'))} / {vector(pixels.get('side'))}　P0：{vector(candidate.get('p0'), 3)}"]
+        for key, title in (('front','主'), ('side','辅助')):
+            item = focus.get(key) or {}
+            conf = item.get('confidence'); conf = f'{conf:.2f}' if isinstance(conf, (int, float)) else '—'
+            focused = item.get('focused'); focused_text = ('清晰' if focused else '模糊') if isinstance(focused, bool) else '—'
+            edge = item.get('edge_width_px'); edge = f'{edge:.2f}' if isinstance(edge, (int,float)) else '—'
+            coarse = '（粗定位）' if item.get('coarse') else ''
+            lines.append(f"{title}相机：可靠度 {conf}　{focused_text}{coarse}　边缘 {edge}px　人工 {'是' if key in click else '否'}")
+        self.baseline_result.config(text='\n'.join(lines))
+        lines = []
+        for i in (1, 2):
+            old = existing.get(f'tool{i}') or {}
+            flags = ' '.join(x for x in ('雅可比待定' if old.get('jacobian_pending') else '', '基准过时' if old.get('stale') else '') if x)
+            offset_note = '工具偏移不存在' if old.get('tool_offset_missing') else '工具偏移比基准新' if old.get('offset_newer') else ''
+            comp = vector(old.get('offset_xyz'), 3)
+            lines.append(f"工具{i}：{display_time(old.get('time'))}　P0 {vector(old.get('p0'), 3)}　补偿 {comp}　{flags}".rstrip())
+            lines.append(f"　主/辅 {vector(old.get('pixels',{}).get('front'))} / {vector(old.get('pixels',{}).get('side'))}　{offset_note}".rstrip())
+        cfg = data.get('config') or {}; selected_comp = data.get('offset_xyz')
+        lines.append(f"当前所选补偿：{vector(selected_comp, 3)}　主/辅比例：{cfg.get('main_um_per_px',15.2)} / {cfg.get('aux_um_per_px',15.2)} μm/px（8mm 估算待实测）")
+        self.baseline_existing.config(text='\n'.join(lines))
+        if phase == 'confirm' and self.baseline_dialog is None: self.baseline_confirm(data)
+        elif phase != 'confirm' and self.baseline_dialog is not None: self.baseline_dialog.destroy(); self.baseline_dialog = None
+
+    def baseline_confirm(self, data):
+        tool = data.get('tool'); candidate = data.get('candidate') or {}; old = (data.get('existing') or {}).get(f'tool{tool}') or {}
+        top = tk.Toplevel(self.root); self.baseline_dialog = top; top.title(f'确认覆盖【工具{tool}】的对刀基准')
+        if hasattr(top, 'transient'): top.transient(self.root)
+        if hasattr(top, 'grab_set'): top.grab_set()
+        tk.Label(top, text=f'确认覆盖【工具{tool}】的对刀基准', bg='#2563eb' if tool == 1 else '#d56713', fg=WHITE, font=(self.theme.title[0], 20, 'bold'), padx=20, pady=8).pack(fill='x')
+        def difference(a, b):
+            return [round(x-y, 4) for x,y in zip(a,b)] if isinstance(a, (tuple,list)) and isinstance(b, (tuple,list)) and len(a)==len(b) else '—'
+        def vec(a):
+            return '(' + ', '.join(f'{v:.3f}' for v in a) + ')' if isinstance(a, (tuple,list)) else '—'
+        op = old.get('pixels') or {}; npix = candidate.get('pixels') or {}
+        text = f"旧：{old.get('time','无')}  P0 {vec(old.get('p0'))}  主 {vec(op.get('front'))}  辅 {vec(op.get('side'))}\n新：待保存  P0 {vec(candidate.get('p0'))}  主 {vec(npix.get('front'))}  辅 {vec(npix.get('side'))}\n差值：P0 {vec(difference(candidate.get('p0'),old.get('p0')))}  主 {vec(difference(npix.get('front'),op.get('front')))}  辅 {vec(difference(npix.get('side'),op.get('side')))}"
+        tk.Label(top, text=text, justify='left', font=self.theme.body, padx=20, pady=16).pack()
+        row=tk.Frame(top); row.pack()
+        ttk.Button(row, text='覆盖保存', command=lambda:self.baseline_command('baseline_confirm', {'accept':True})).pack(side='left', padx=15, pady=10)
+        ttk.Button(row, text='不保存', command=lambda:self.baseline_command('baseline_confirm', {'accept':False})).pack(side='left', padx=15, pady=10)
+        if hasattr(top, 'protocol'): top.protocol('WM_DELETE_WINDOW', lambda:self.baseline_command('baseline_confirm', {'accept':False}))
+        if hasattr(top, 'winfo_reqwidth'):
+            top.update_idletasks()
+            x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - top.winfo_reqwidth()) // 2)
+            y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - top.winfo_reqheight()) // 2)
+            top.geometry(f'+{x}+{y}')
 
     def build_pickacc(self):
         self.pickacc_tool = None; self.pickacc_pending = 0; self.pickacc_dialog = None; self.pickacc_last_phase = None
@@ -847,6 +975,7 @@ class App:
         self.update_tip(tooltip_progress(main))
         self.update_offset(main)
         self.update_pickacc(main)
+        self.update_baseline(main)
         key = (date.today(), json.dumps(rows, ensure_ascii=False, default=str))
         if key != self.cache.get('events'):
             self.events = list(rows); self.table.delete(*self.table.get_children())
@@ -952,7 +1081,7 @@ class App:
             self.cam_picture.path = path
             self.cam_picture.mtime = None
             self.cam_picture.image = self.cam_picture.photo = None
-            self.cam_picture.config(image='', text='暂无图片')
+            self.cam_picture.config(image='', text='暂无图像')
         p = self.preview_data
         self.preview_values.set({'模组 XYZ': p.get('actual_xyz') if p.get('actual_xyz') is not None else '--', '清晰度': p.get('sharpness'),
                            '检出角点': p.get('corners'), '板中心偏移 mm': p.get('board_offset_mm'),

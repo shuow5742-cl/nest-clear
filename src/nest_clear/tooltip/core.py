@@ -45,10 +45,10 @@ class ViewCalib:
 
     name: str  # camera identifier
     target_uv: tuple[float, float]  # image coordinates, pixels
-    jacobian: tuple[tuple[float, float, float], tuple[float, float, float]]  # pixels/mm
+    jacobian: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None  # pixels/mm
 
     width_px: float | None = None
-    click: dict | None = None
+    click: dict | bool | None = None
 
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""
@@ -57,7 +57,8 @@ class ViewCalib:
         if not isinstance(self.name, str) or not self.name.strip():
             raise _error("view name must be a non-empty string", locals())
         object.__setattr__(self, "target_uv", _tuple(self.target_uv, (2,), "target_uv"))
-        object.__setattr__(self, "jacobian", _tuple(self.jacobian, (2, 3), "jacobian"))
+        if self.jacobian is not None:
+            object.__setattr__(self, "jacobian", _tuple(self.jacobian, (2, 3), "jacobian"))
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class ToolTipBaseline:
     offset_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)  # platform-frame mm
     timestamp: str = ""  # caller-defined timestamp
     note: str = ""  # caller-defined note
+    jacobian_pending: bool = False
 
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""
@@ -88,6 +90,8 @@ class ToolTipBaseline:
         object.__setattr__(self, "views", views)
         if not isinstance(self.timestamp, str) or not isinstance(self.note, str):
             raise _error("timestamp and note must be strings", locals())
+        if type(self.jacobian_pending) is not bool:
+            raise _error("jacobian_pending must be a boolean", locals())
 
 
 @dataclass(frozen=True)
@@ -178,6 +182,8 @@ def solve_correction(
         raise _error("unknown primary_view", locals())
     matrices, targets, scales = [], [], []
     for v in views:
+        if v.jacobian is None:
+            raise _error("对刀基准缺少点动测量数据（雅可比），待换针对刀方案确定", locals())
         try:
             w = float((weights or {}).get(v.name, 1.0))
         except (TypeError, ValueError) as exc:

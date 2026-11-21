@@ -52,4 +52,6 @@ class CommandReader:
         self.last_seq = seq
         accepted = name in allowed
         self.events.emit('tooloffset_command', seq=seq, command=name, params=params, accepted=accepted)
+        if name == 'baseline_start' and not accepted:
+            self.events.emit('baseline_state', message='当前正在挑毛或标定，忽略开始请求')
         return (name, params) if accepted else None

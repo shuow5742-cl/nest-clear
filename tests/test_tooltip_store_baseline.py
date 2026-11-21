@@ -27,6 +27,56 @@ def baseline() -> ToolTipBaseline:
     return ToolTipBaseline("tool1", [1, 2, 3], [view], [4, 5, 6])
 
 
+def test_pending_jacobian_roundtrip(tmp_path):
+    """待测基准及人工点选信息通过两种保存接口完整往返。"""
+    from nest_clear.tooltip import schema
+
+    baseline = ToolTipBaseline(
+        "tool1", [1, 2, 3],
+        [ViewCalib("front", [10, 20], None, click={"source": "manual"}),
+         ViewCalib("side", [30, 40], None)],
+        jacobian_pending=True,
+    )
+    for name in ("schema", "store"):
+        path = tmp_path / (name + ".yaml")
+        if name == "schema":
+            schema.save_baseline(baseline, path)
+        else:
+            store.save_baseline(baseline, path, tool=1, source="test")
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert raw["jacobian_pending"] is True
+        assert all(view["jacobian"] is None for view in raw["views"])
+        assert store.load_baseline(path) == baseline
+
+
+def test_pending_jacobian_rejected_before_calibration(tmp_path, monkeypatch):
+    from datetime import datetime
+    from types import SimpleNamespace
+    from nest_clear.flow.calibration import StartCalibration, CalibrationFailed
+    from nest_clear.flow.modes import Mode
+    from autoweaver.motion_policy.nodes.node import Status
+
+    baseline = ToolTipBaseline("tool1", [1, 2, 3],
+        [ViewCalib("front", [10, 20], None), ViewCalib("side", [30, 40], None)],
+        jacobian_pending=True)
+    store.save_baseline(baseline, tmp_path / "tool1_baseline.yaml", tool=1, source="test")
+    class Blackboard:
+        data = {"request_func": 100, "task_id": 1, "mode": Mode.IDLE}
+        def read(self, key, default=None): return self.data.get(key, default)
+        def write(self, key, value, _): self.data[key] = value
+    events = SimpleNamespace(emit=lambda *args, **kwargs: None, clock=datetime.now)
+    config = SimpleNamespace(tools=((0, 0, 0), (0, 0, 0)),
+                             tool_calibration=SimpleNamespace(enabled=True, directory=tmp_path))
+    node = StartCalibration(SimpleNamespace(events=events, config=config))
+    node._blackboard = Blackboard()
+    assert node.on_start() == Status.FAILURE
+    monkeypatch.setattr('nest_clear.flow.calibration.write_tooltip_summary', lambda *args: None)
+    failed = CalibrationFailed(SimpleNamespace(events=events)); failed._blackboard = node._blackboard
+    failed.perform()
+    assert node._blackboard.read('reply_func') == 131
+    assert '对刀基准缺少点动测量数据（雅可比），待换针对刀方案确定' in node._blackboard.read('error')
+
+
 @pytest.mark.parametrize("kind", ["baseline", "tools"])
 def test_atomic_replace_failure_preserves_original(calibration, baseline, monkeypatch, kind) -> None:
     """替换前注入文件系统故障，原文件仍应完整且无成功历史。"""

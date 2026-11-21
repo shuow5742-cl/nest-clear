@@ -135,11 +135,14 @@ def save_baseline(
         "offset_xyz": list(baseline.offset_xyz),
         "timestamp": baseline.timestamp,
         "note": baseline.note,
+        **({"jacobian_pending": True} if baseline.jacobian_pending else {}),
         "views": [
             {
                 "name": view.name,
                 "target_uv": list(view.target_uv),
-                "jacobian": [list(row) for row in view.jacobian],
+                "jacobian": [list(row) for row in view.jacobian] if view.jacobian is not None else None,
+                **({"width_px": view.width_px} if view.width_px is not None else {}),
+                **({"click": view.click} if view.click is not None else {}),
             }
             for view in baseline.views
         ],
