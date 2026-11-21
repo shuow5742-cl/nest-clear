@@ -70,6 +70,7 @@ def build_batch(
     ctx = FlowContext(board, config, path, tracker, events, calibration, camcal_factory, camcal_save, calibration_updated, calibration_path)
     params = {
         "work_cycle": None,
+        "tooloffset_session": None,
         "mode": Mode.IDLE,
         "next_index": 0,
         "scan": None,

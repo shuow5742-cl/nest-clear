@@ -198,3 +198,19 @@ commtest:
     x: [80, 180]
     y: [-10, 150]
     z: [-15.0, 0.0]
+
+# 工具偏移标定
+tool_offset:
+  center_tol_mm: 1.0
+  outlier_mm: 0.1
+  min_points: 5
+  max_points: 12
+  se_tol_mm: 0.02
+  edge_warn_mm: 0.05
+  card_thickness_mm: 0.10
+  ring_cross_tol_mm: 0.08
+  settle_window_s: 0.5
+  settle_samples: 6
+  jitter_tol_mm: 0.02
+  point_order: [T02, T05, T26, T29, T12, T19, T03, T28, T10, T21]
+  edge_targets: [T12]

@@ -31,6 +31,7 @@ from nest_clear.supervisor.gate import SupervisorGate
 from nest_clear.vision.detector import PixelTarget, StubDetector
 from nest_clear.vision.geometry import load_calibration
 from nest_clear.workers.camcal import CamcalWorker
+from nest_clear.workers.tooloffset import ToolOffsetWorker
 from nest_clear.workers.camera import CameraWorker
 from nest_clear.workers.calib_camera import CalibCameraWorker
 from nest_clear.workers.plc import PlcWorker
@@ -289,9 +290,13 @@ class Application:
             vision = assembly.vision(vision, config, self.path, self.events)
             self.vision = vision
             self.calibration_path = calibration_path
+            from nest_clear.flow.tool_offset import _existing
+            from types import SimpleNamespace
+            self.events.emit('tooloffset_state', phase='idle', message='等待 PLC 请求',
+                             existing=_existing(SimpleNamespace(config=config), calibration_path.parent / 'tool_offset.yaml', metadata['calibration_sha256']))
             self.board = WorldBoard()
             self.clock = BTClock(self.board)
-            for worker in (self.plc, self.camera, vision, CamcalWorker()):
+            for worker in (self.plc, self.camera, vision, CamcalWorker(), ToolOffsetWorker()):
                 self.clock.attach_worker(worker)
             if self.calib_camera is not None:
                 self.clock.attach_worker(self.calib_camera)
@@ -348,6 +353,9 @@ class Application:
         abort_camcal = getattr(self.events, "abort_camcal", None)
         if abort_camcal is not None:
             abort_camcal("主程序停止，PLC 初始化或急停时会话中断")
+        abort_offset = getattr(self.events, "abort_tooloffset", None)
+        if abort_offset is not None:
+            abort_offset("主程序停止，PLC 初始化或急停时会话中断")
         cycle = getattr(self.events, "active_cycle", None)
         if cycle is not None:
             cycle.pending()

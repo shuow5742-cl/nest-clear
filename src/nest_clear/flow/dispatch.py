@@ -8,6 +8,7 @@ from autoweaver.motion_policy.nodes.control.sequence import Sequence
 from autoweaver.motion_policy.nodes.node import TreeNode
 
 from .camera_calibration import camera_branch, finish
+from .tool_offset import ToolOffset, finish as finish_tooloffset
 from .calibration import finish_branch, start_branch, continue_branch
 from .context import FlowContext
 from .leaves import Instant, Predicate, PrepareError
@@ -24,6 +25,8 @@ BRANCHES: dict[int, Branch] = {
     20: (frozenset((Mode.IDLE, Mode.PICKING)), scan_branch),
     60: (frozenset((Mode.IDLE, Mode.PICKING)), next_branch),
     80: (frozenset((Mode.IDLE, Mode.CAMERA_CALIBRATING)), camera_branch),
+    90: (frozenset((Mode.IDLE, Mode.TOOL_OFFSET)), ToolOffset),
+    95: (frozenset((Mode.IDLE, Mode.TOOL_OFFSET)), ToolOffset),
     100: (frozenset((Mode.IDLE,)), start_branch),
     101: (frozenset((Mode.IDLE,)), start_branch),
     110: (frozenset((Mode.CALIBRATING_1,)), continue_branch),
@@ -47,6 +50,8 @@ class RejectMode(Instant):
         mode = bb.read("mode")
         func = bb.read("request_func")
         cycle = bb.read("work_cycle", None)
+        if mode == Mode.TOOL_OFFSET:
+            finish_tooloffset(self.ctx, bb, "aborted", reason=f"标定中收到非 90/95 功能码 {func}")
         if mode == Mode.CAMERA_CALIBRATING:
             finish(self.ctx, bb, "aborted", reason=f"标定中收到非 80 功能码 {func}")
         if mode == Mode.PICKING and cycle is not None:

@@ -138,6 +138,7 @@ class Config:
     run_mode: str = "production"
     commtest: dict[str, Any] = field(default_factory=dict)
     ui_preview: dict[str, Any] = field(default_factory=dict)
+    tool_offset: dict[str, Any] = field(default_factory=dict)
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -309,7 +310,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。"
         ) from exc
     if isinstance(data, dict):
-        data = {"camera_calibration": {}, "ui": {}, "ui_preview": {}, "run_mode": "production", "commtest": None, **data}
+        data = {"tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, "run_mode": "production", "commtest": None, **data}
     root = _mapping(
         data,
         "根",
@@ -322,6 +323,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "pick_depth_z",
             "tool_calibration",
             "camera_calibration",
+            "tool_offset",
             "ui_preview",
             "travel",
             "camera",
@@ -350,6 +352,20 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             _fail("commtest", "场景或随机种子无效")
     elif ct is not None:
         _fail("commtest", "仅联调模式可配置 commtest")
+    from nest_clear.tooloffset.session import DEFAULTS as offset_defaults
+    if not isinstance(root["tool_offset"], dict):
+        _fail("tool_offset", "应为映射")
+    offset = _mapping({**offset_defaults, **root["tool_offset"]}, "tool_offset", list(offset_defaults))
+    for key in ("center_tol_mm", "outlier_mm", "se_tol_mm", "edge_warn_mm", "card_thickness_mm", "ring_cross_tol_mm", "settle_window_s", "jitter_tol_mm"):
+        offset[key] = _number(offset[key], "tool_offset." + key, True)
+    for key in ("min_points", "max_points", "settle_samples"):
+        if type(offset[key]) is not int or offset[key] < 2:
+            _fail("tool_offset." + key, "须为不小于 2 的整数")
+    if offset["max_points"] < offset["min_points"]:
+        _fail("tool_offset.max_points", "不能小于 min_points")
+    for key in ("point_order", "edge_targets"):
+        if not isinstance(offset[key], list) or not offset[key] or any(not isinstance(v, str) or len(v) != 3 or v[0] != "T" or not v[1:].isdigit() or int(v[1:]) > 31 for v in offset[key]):
+            _fail("tool_offset." + key, "须为 T00–T31 列表")
     camcal = _camera_calibration(root["camera_calibration"])
     start = camcal.get("start_xyz")
     if mode == "commtest" and start is not None and any(
@@ -626,5 +642,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _string(record["machine_id"], "record.machine_id"),
         camcal,
         UIConfig(**ui_data),
-        mode, ct or {}, preview_data,
+        mode, ct or {}, preview_data, offset,
     )

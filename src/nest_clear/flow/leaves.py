@@ -47,6 +47,17 @@ class WaitRequest(CallWorker):
         self.failures = 0
 
     def on_running(self) -> Status:
+        from .tool_offset import reader
+        # 没有挂起的标定请求时，也消费并记录不合时宜的界面命令。
+        reader_ctx = type("CommandContext", (), {"events": self.events})()
+        session = self._blackboard.read("tooloffset_session", None)
+        command = reader(reader_ctx).poll({"abort"} if session else set())
+        if command and command[0] == "abort":
+            session["commands"].append({"seq": reader(reader_ctx).last_seq, "command": "abort", "params": command[1]})
+            callback = getattr(self.events, "abort_tooloffset", None)
+            if callback:
+                callback("用户放弃")
+            self.events.emit("tooloffset_state", phase="failed", message="用户放弃")
         status = super().on_running()
         if status == Status.RUNNING:
             return status
@@ -279,6 +290,9 @@ class CommitReply(Instant):
         if func is None:
             func = bb.read("reply_func")
         if func != bb.read("reply_func"):
+            if bb.read("mode") == Mode.TOOL_OFFSET:
+                from .tool_offset import finish as finish_tooloffset
+                finish_tooloffset(self.ctx, bb, "aborted", reason="标定应答未提交")
             if bb.read("mode") == Mode.CAMERA_CALIBRATING:
                 from .camera_calibration import finish
                 finish(self.ctx, bb, "aborted", reason="标定应答未提交")
@@ -302,7 +316,7 @@ class CommitReply(Instant):
         elif cycle is not None and bb.read("reply_func") == 3:
             cycle.fine_not_sent("挑取应答未提交")
         details = {}
-        if func in (999, 131, 82):
+        if func in (999, 131, 82, 92):
             actual = getattr(self.events, "reply_diagnostics", {}).pop(bb.read("task_id"), None)
             details = actual or bb.read("reply_diagnostic", None) or diagnostic(bb.read("error"), code="REPLY-ERROR", where="应答提交")
         self.events.emit(

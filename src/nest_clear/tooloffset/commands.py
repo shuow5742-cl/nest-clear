@@ -1,0 +1,55 @@
+"""跨进程单槽命令通道；发送端等待状态中的确认序号后再发送。"""
+from datetime import datetime
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+
+
+def command_path(root):
+    return Path(root) / 'live' / 'command.json'
+
+
+def send(root, name, params=None, *, acknowledged=0):
+    path = command_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        old = json.loads(path.read_text(encoding='utf-8'))
+        previous = old.get('seq', 0)
+        previous = previous if type(previous) is int else 0
+    except (OSError, ValueError, AttributeError):
+        previous = 0
+    seq = max(time.time_ns(), previous + 1, acknowledged + 1)
+    item = {'seq': seq, 'command': name, 'params': params or {},
+            'time': datetime.now().astimezone().isoformat()}
+    name_tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, prefix='.command_', delete=False) as f:
+            name_tmp = f.name
+            json.dump(item, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name_tmp, path)
+    finally:
+        if name_tmp:
+            Path(name_tmp).unlink(missing_ok=True)
+    return seq
+
+
+class CommandReader:
+    def __init__(self, root, events, *, last_seq=0):
+        self.path, self.events, self.last_seq = command_path(root), events, last_seq
+
+    def poll(self, allowed):
+        try:
+            cmd = json.loads(self.path.read_text(encoding='utf-8'))
+            seq, name, params = cmd['seq'], cmd['command'], cmd['params']
+            if type(seq) is not int or seq <= self.last_seq or not isinstance(name, str) or not isinstance(params, dict):
+                return None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        self.last_seq = seq
+        accepted = name in allowed
+        self.events.emit('tooloffset_command', seq=seq, command=name, params=params, accepted=accepted)
+        return (name, params) if accepted else None

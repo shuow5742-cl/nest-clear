@@ -148,6 +148,14 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
             ui.select_page(name + '页' if name != '主页' else name)
             assert ui.tabs.selected == index
         ui.refresh()
+        assert all(b.options['state'] == 'disabled' for b in ui.offset_tool_buttons + ui.offset_mode_buttons)
+        assert ui.offset_start.options['state'] == 'disabled'
+        assert ui.offset_tool_buttons[0].options['style'] == 'OffsetSelected.TButton'
+        ui.update_offset({'tooloffset': {'phase':'select'}, 'command_seq':0})
+        assert all(b.options['state'] == 'normal' for b in ui.offset_tool_buttons + ui.offset_mode_buttons)
+        ui.update_offset({'tooloffset': {'phase':'edge', 'tool':2, 'mode':'center_edge', 'edges':[{'target':'T12','corner':2,'delta_xy_mm':[0,0], 'distance_mm':0}]}, 'command_seq':0})
+        assert all(b.options['state'] == 'disabled' for b in ui.offset_tool_buttons + ui.offset_mode_buttons)
+        assert ui.offset_edges.rows['0']['values'][1] == '左下'
         assert len(ui.table.rows) == 3
         assert len(ui.tiptable.rows) == 2
         assert ui.process_table.options['height'] == 2
@@ -233,3 +241,20 @@ def test_key_value_wrap_tracks_card_width():
     fake=SimpleNamespace(grid_slaves=lambda column: [Key()], values={'原因':value})
     KeyValueGrid._rewrap(fake, SimpleNamespace(width=320))
     assert value.options['wraplength']==228
+
+
+@pytest.mark.parametrize('tool,color', [(1, '#2563eb'), (2, '#d56713')])
+def test_offset_confirm_identifies_tool(tmp_path, monkeypatch, tool, color):
+    from nest_clear.ui import app
+    class Dialog(Widget):
+        def title(self, value): self.window_title = value
+    monkeypatch.setattr(app.tk, 'Toplevel', Dialog)
+    monkeypatch.setattr(app.tk, 'Label', Widget)
+    monkeypatch.setattr(app.ttk, 'Button', Widget)
+    ui = object.__new__(app.App)
+    ui.root = Widget(); ui.theme = SimpleNamespace(title=('font',13), body=('font',12))
+    ui.offset_dialog = None
+    ui.offset_confirm({'tool':tool, 'candidate':{}}, {})
+    expected = f'确认覆盖【工具{tool}】的偏移标定结果'
+    assert ui.offset_dialog.window_title == expected
+    assert any(child.options.get('text') == expected and child.options.get('bg') == color for child in ui.offset_dialog.children)

@@ -58,3 +58,8 @@ def test_font_selection_does_not_synthesize_bold(monkeypatch):
     assert select_font()==('WenQuanYi Micro Hei',False)
     monkeypatch.setattr('nest_clear.ui.app.subprocess.run',lambda *a,**k: SimpleNamespace(stdout='Noto Sans CJK SC\tRegular\nNoto Sans CJK SC\tBold\n'))
     assert select_font()==('Noto Sans CJK SC',True)
+
+
+def test_edge_corner_labels_match_camera_order():
+    from nest_clear.ui.model import edge_corner_label
+    assert [edge_corner_label(i) for i in range(4)] == ['左上', '右上', '左下', '右下']

@@ -62,17 +62,17 @@ def status_indicators(s, m, now=None):
     if s.get('heartbeat_interrupted'): hb_color = 'red'
     return {'父程序': ('green' if s.get('pid') else 'gray', str(s.get('pid') or '无数据')), '主程序': ('green' if s.get('child_state') in ('运行','就绪') else 'yellow' if s.get('child_state') == '启动中' else 'gray', str(m.get('mode') or s.get('child_state') or '无数据')), 'PLC 连接': (plc_color, plc_text), '心跳': (hb_color, hb_text), '40932 就绪': ('green' if s.get('algorithm_ready') == 1 else 'gray', str(s.get('algorithm_ready') if s.get('algorithm_ready') is not None else '无数据'))}
 
-EVENTS = {'error','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
+EVENTS = {'error','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
 def classify_event(row):
     event = str(row.get('event','')).lower()
     text = ' '.join(str(row.get(k,'')) for k in ('reason_code','code','reason','what','operation','event')).lower()
     reply = row.get('reply_func', row.get('func_code'))
     if reply is None and event == 'reply': reply = row.get('func')
     if reply is None and event == 'supervisor_reply_999': reply = 999
-    if event not in EVENTS and reply not in (999,131,82) and not any(x in text for x in ('readback','回读不一致','采图失败','capture_failed')):
+    if event not in EVENTS and reply not in (999,131,82,92) and not any(x in text for x in ('readback','回读不一致','采图失败','capture_failed')):
         return None
-    category = '父程序' if row.get('process') == 'supervisor' else '标定' if any(x in text for x in ('camcal','tooltip','calib')) or reply in (82,131) else '通信' if any(x in text for x in ('plc','heartbeat','readback','回读')) else '相机' if any(x in text for x in ('camera','capture','image','采图')) else '配置' if 'config' in text else '算法'
-    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('warning','request_abandoned','image_dropped') else 'red'
+    category = '父程序' if row.get('process') == 'supervisor' else '标定' if any(x in text for x in ('camcal','tooltip','tooloffset','calib')) or reply in (82,92,131) else '通信' if any(x in text for x in ('plc','heartbeat','readback','回读')) else '相机' if any(x in text for x in ('camera','capture','image','采图')) else '配置' if 'config' in text else '算法'
+    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
     reason = str(row.get('reason',row.get('message',event)))
     fields = {}
     for line in reason.splitlines():
@@ -120,3 +120,8 @@ def preview_controls(status, age_s):
     running = bool(status.get('child_pid')) or status.get('child_state') in ('启动中', '运行', '就绪')
     reason = '父程序未运行' if not live else '挑毛主流程运行中，预览不可用' if running else None
     return {'enabled': live and not running, 'on': bool(preview.get('on')), 'reason': reason}
+
+
+def edge_corner_label(corner):
+    # session 中 2 是左下，3 是右下；不能按顺时针序号直接索引。
+    return {0: '左上', 1: '右上', 2: '左下', 3: '右下'}.get(corner, str(corner))

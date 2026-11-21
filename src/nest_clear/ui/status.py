@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 class MainStatus:
     def __init__(self, root):
         self.path = main_status_file(root); self.lock = threading.Lock(); self.last = 0; self.timer = None
-        self.data = {'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'recent_replies':[], 'picking':{}, 'camcal':{}, 'tooltip':{}}
+        self.data = {'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'recent_replies':[], 'picking':{}, 'camcal':{}, 'tooltip':{}, 'tooloffset':{}, 'command_seq':0}
         self.write()
     def write(self):
         try:
@@ -48,6 +48,8 @@ class MainStatus:
                     count = max(0, int(row.get('sequence', 1)) - 1)
                     d['camcal']['completed_indices'] = list(range(min(count, len(row.get('plan') or []))))
                     d['camcal']['current_index'] = count if count < len(row.get('plan') or []) else None
+            if e == 'tooloffset_command': d['command_seq'] = row.get('seq', d['command_seq'])
+            if e == 'tooloffset_state': d['tooloffset'].update(row)
             if e == 'tooltip_start': d['tooltip'] = {}
             if e.startswith('tooltip_'):
                 d['tooltip'].update(row)
