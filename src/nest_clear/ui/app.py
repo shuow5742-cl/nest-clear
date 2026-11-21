@@ -16,7 +16,8 @@ from PIL import Image, ImageGrab, ImageTk
 
 from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file, ui_command_file
 from .model import (EventTail, camcal_progress, decode_status, display_time, duration,
-                    read_json, status_indicators, tooltip_progress, preview_controls, edge_corner_label)
+                    read_json, status_indicators, tooltip_progress, preview_controls, edge_corner_label,
+                    pickacc_tray_geometry, pickacc_type, pickacc_stage, pickacc_note, pickacc_infield)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -232,7 +233,8 @@ class App:
         self.home = self.new_page('主页'); self.build_home()
         self.cam = self.new_page('相机标定'); self.build_cam()
         self.offset = self.new_page('工具偏移标定'); self.build_offset()
-        for title in ('挑取精度标定', '对刀基准建立'):
+        self.pickacc = self.new_page('挑取精度标定'); self.build_pickacc()
+        for title in ('对刀基准建立',):
             placeholder = self.new_page(title)
             self.build_placeholder(placeholder, title)
         self.tip = self.new_page('换针对刀'); self.build_tip()
@@ -493,6 +495,163 @@ class App:
         scrollbar = ttk.Scrollbar(edge, orient='vertical', command=self.offset_edges.yview)
         scrollbar.grid(row=0, column=1, sticky='ns'); self.offset_edges.configure(yscrollcommand=scrollbar.set)
 
+    def build_pickacc(self):
+        self.pickacc_tool = None; self.pickacc_pending = 0; self.pickacc_dialog = None; self.pickacc_last_phase = None
+        self.pickacc.columnconfigure(0, weight=1); self.pickacc.columnconfigure(1, weight=1)
+        self.pickacc.rowconfigure(1, weight=3, uniform='pickacc'); self.pickacc.rowconfigure(2, weight=2, uniform='pickacc')
+        head = self.card(self.pickacc, '挑取精度标定', 0, 0, columnspan=2)
+        bar = tk.Frame(head, bg=WHITE); bar.grid(row=0, column=0, sticky='ew'); bar.columnconfigure(2, weight=1)
+        self.pickacc_heading = tk.Label(bar, text='当前：未选择', bg='#667085', fg=WHITE, font=(self.theme.title[0],20,'bold'), padx=12)
+        self.pickacc_heading.grid(row=0,column=0,padx=4)
+        self.pickacc_message = tk.Label(bar, text='等待 PLC 请求', bg=WHITE, fg=INK, font=(self.theme.title[0],16), anchor='w')
+        self.pickacc_message.grid(row=0,column=1,columnspan=2,sticky='ew',padx=8)
+        controls=tk.Frame(head,bg=WHITE); controls.grid(row=1,column=0,sticky='ew'); controls.columnconfigure(4,weight=1)
+        self.pickacc_buttons=[]
+        for n in (1,2):
+            b=ttk.Button(controls,text=f'工具{n}',command=lambda n=n:self.choose_pickacc_tool(n)); b.grid(row=0,column=n-1,padx=3); self.pickacc_buttons.append(b)
+        self.pickacc_start=ttk.Button(controls,text='开始',command=lambda:self.pickacc_command('pickacc_start',{'tool':self.pickacc_tool})); self.pickacc_start.grid(row=0,column=2,padx=4)
+        self.pickacc_calculate=ttk.Button(controls,text='计算补偿',style='OffsetPlace.TButton',command=lambda:self.pickacc_command('pickacc_calculate')); self.pickacc_calculate.grid(row=0,column=5,padx=4)
+        self.pickacc_discard=ttk.Button(controls,text='本点作废重测',command=lambda:self.pickacc_command('pickacc_discard')); self.pickacc_discard.grid(row=0,column=6,padx=4)
+        self.pickacc_abort=ttk.Button(controls,text='放弃本次标定',command=lambda:self.pickacc_command('abort')); self.pickacc_abort.grid(row=0,column=7,padx=4)
+        self.pickacc_existing=tk.Label(head,text='',bg=WHITE,fg=COLORS['yellow'],font=self.theme.body,anchor='w',justify='left'); self.pickacc_existing.grid(row=2,column=0,sticky='ew')
+        images=tk.Frame(self.pickacc,bg=BG); images.grid(row=1,column=0,sticky='nsew'); images.columnconfigure(0,weight=3); images.columnconfigure(1,weight=2); images.rowconfigure(0,weight=1)
+        self.picture(self.card(images,'相机画面 · 点击放大',0,0),'pickacc_latest')
+        self.picture(self.card(images,'当前目标放大图',0,1),'pickacc_crop')
+        tray=self.card(self.pickacc,'料盘示意',1,1)
+        self.pickacc_tray_title=tray.master.title_label
+        self.pickacc_tray=tk.Canvas(tray,bg=WHITE,highlightthickness=0); self.pickacc_tray.grid(row=0,column=0,sticky='nsew')
+        table=self.card(self.pickacc,'测点记录',2,0,columnspan=2)
+        columns=('序号','目标','阶段','下发 XY','实到 XY','dx','dy','|r|','备注')
+        self.pickacc_table=self.table_widget(table,columns,(55,60,95,165,165,75,75,75,190))
+        scroll=ttk.Scrollbar(table,orient='vertical',command=self.pickacc_table.yview); scroll.grid(row=0,column=1,sticky='ns'); self.pickacc_table.configure(yscrollcommand=scroll.set,style='Offset.Treeview')
+        self.pickacc_stats=tk.Label(table,text='',bg=WHITE,fg=INK,font=self.theme.body,anchor='w'); self.pickacc_stats.grid(row=1,column=0,sticky='ew')
+
+    def choose_pickacc_tool(self, tool):
+        self.pickacc_tool=tool
+
+    def pickacc_command(self,name,params=None):
+        from nest_clear.tooloffset.commands import send
+        if not self.pickacc_pending:
+            self.pickacc_pending=send(self.directory,name,params,acknowledged=getattr(self,'pickacc_ack',0))
+
+    def update_pickacc(self,main):
+        data=main.get('pickacc') or {}; phase=data.get('phase'); self.pickacc_ack=main.get('command_seq',0)
+        if phase=='select' and self.pickacc_last_phase!='select': self.pickacc_tool=None
+        self.pickacc_last_phase=phase
+        if self.pickacc_pending and self.pickacc_ack>=self.pickacc_pending: self.pickacc_pending=0
+        tool=data.get('tool') or self.pickacc_tool
+        self.pickacc_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择',bg='#2563eb' if tool==1 else '#d56713' if tool==2 else '#667085')
+        self.pickacc_message.config(text=data.get('message') or '等待 PLC 请求')
+        for i,b in enumerate(self.pickacc_buttons,1): b.config(state='normal' if phase=='select' and not self.pickacc_pending else 'disabled',style='OffsetSelected.TButton' if i==tool else 'TButton')
+        self.pickacc_start.config(state='normal' if phase=='select' and self.pickacc_tool and not self.pickacc_pending else 'disabled')
+        for b in (self.pickacc_calculate,self.pickacc_discard): b.config(state='normal' if phase=='tool_in_place' and not self.pickacc_pending else 'disabled')
+        self.pickacc_abort.config(state='normal' if phase not in (None,'idle','done','failed') and not self.pickacc_pending else 'disabled')
+        summaries=[]
+        for i in (1,2):
+            old=(data.get('existing') or {}).get(f'tool{i}') or {}
+            summaries.append(f"工具{i}：{pickacc_type(old.get('type'))} {display_time(old.get('time'))} 验证 {len(old.get('verification',[]))}点" + (f'　工具{i} 偏移/相机标定已变更，挑取补偿需重新验证' if old.get('stale') else ''))
+        self.pickacc_existing.config(text='　｜　'.join(summaries))
+        self.pickacc_table.delete(*self.pickacc_table.get_children())
+        import math
+        for i,s in enumerate(data.get('samples') or [],1):
+            r=s.get('residual_xy_mm'); sent=s.get('sent_xyz_mm'); actual=s.get('actual_xyz_mm')
+            xy=lambda v: f'{v[0]:.3f}, {v[1]:.3f}' if v and len(v)>=2 else '—'
+            self.pickacc_table.insert('','end',values=(i,s.get('target'),pickacc_stage(s.get('stage')),xy(sent),xy(actual),f'{r[0]:.3f}' if r else '—',f'{r[1]:.3f}' if r else '—',f'{math.hypot(*r):.3f}' if r else '—',pickacc_note(s)))
+        decision=data.get('decision') or {}; candidate=data.get('candidate') or {}
+        mode=pickacc_type(candidate['type']) if candidate.get('type') else '待判定'
+        validation=[math.hypot(*s['residual_xy_mm']) for s in data.get('samples',[]) if s.get('verification') and s.get('residual_xy_mm') and not s.get('superseded')]
+        validation_text=f'验证：{len(validation)} 点，最大 {max(validation):.3f} mm' if validation else '验证：未开始'
+        self.pickacc_stats.config(text=f"判定：{mode}  最大偏差 {decision.get('max_dev_mm','—')} / 标准差 {decision.get('std_mm','—')}　{pickacc_infield(data.get('infield') or [])}　{validation_text}")
+        self.draw_pickacc_tray(data)
+        if phase=='confirm' and self.pickacc_dialog is None: self.pickacc_confirm(data)
+        elif phase!='confirm' and self.pickacc_dialog is not None: self.pickacc_dialog.destroy(); self.pickacc_dialog=None
+
+    def draw_pickacc_tray(self,data):
+        import math
+        c=self.pickacc_tray; c.delete('all'); w=max(c.winfo_width(),200); h=max(c.winfo_height(),120)
+        left,bottom,scale,multiplier=pickacc_tray_geometry(w,h)
+        self.pickacc_tray_title.config(text=f'料盘示意 · 残差箭头 ×{multiplier}  绿≤0.03 黄≤0.05 红>0.05 mm')
+        def pos(x,y): return (left+(x-80)*scale, bottom-(y+10)*scale)
+        a=pos(80,-10); b=pos(180,150); c.create_rectangle(a[0],b[1],b[0],a[1],outline='#667085')
+        samples=[s for s in data.get('samples') or [] if s.get('target_xy_mm') and s.get('residual_xy_mm') and not s.get('verification')]
+        candidate=data.get('candidate') or {}; nodes=candidate.get('nodes') or []
+        if candidate.get('type')=='table' and len(nodes)>=3:
+            cells=[(80+(gx+.5)*5,-10+(gy+.5)*8) for gx in range(20) for gy in range(20)]
+            try:
+                import numpy as np
+                from scipy.interpolate import LinearNDInterpolator
+                points=np.asarray([[n['x'],n['y']] for n in nodes]); values=np.asarray([[n['dx'],n['dy']] for n in nodes]); grid=np.asarray(cells)
+                vectors=LinearNDInterpolator(points,values)(grid)
+                missing=~np.isfinite(vectors).all(axis=1)
+                if missing.any(): vectors[missing]=values[np.linalg.norm(grid[missing,None,:]-points[None,:,:],axis=2).argmin(axis=1)]
+                magnitudes=np.linalg.norm(vectors,axis=1).tolist()
+            except Exception:
+                magnitudes=[]
+                for px,py in cells:
+                    nearest=min(nodes,key=lambda n:(n['x']-px)**2+(n['y']-py)**2)
+                    magnitudes.append(math.hypot(nearest['dx'],nearest['dy']))
+            for gx in range(20):
+                for gy in range(20):
+                    value=magnitudes[gx*20+gy]
+                    color='#f1f9f3' if value<=.03 else '#fffae9' if value<=.05 else '#fdf1ef'
+                    x0,y0=pos(80+gx*5,-10+gy*8); x1,y1=pos(85+gx*5,-2+gy*8)
+                    c.create_rectangle(x0,y1,x1,y0,fill=color,outline=color)
+            c.create_rectangle(a[0],b[1],b[0],a[1],outline='#667085')
+        planned=set()
+        planned.update(x.get('target') for x in data.get('queue',[]))
+        planned.update(x.get('target') for x in data.get('samples',[]))
+        planned.add(data.get('target'))
+        verification={x.get('target') for x in data.get('queue',[]) if x.get('stage')=='verify'}
+        skipped={x.get('target') for x in data.get('skipped',[])}
+        for label,xy in (data.get('predicted') or {}).items():
+            if label not in planned or not (80<=xy[0]<=180 and -10<=xy[1]<=150): continue
+            x,y=pos(*xy)
+            if label in skipped:
+                c.create_line(x-4,y-4,x+4,y+4,fill='#b42318',width=2); c.create_line(x-4,y+4,x+4,y-4,fill='#b42318',width=2)
+            elif label in verification: c.create_polygon(x,y-5,x+5,y,x,y+5,x-5,y,fill=WHITE,outline='#667085')
+            else: c.create_oval(x-3,y-3,x+3,y+3,outline='#98a2b3')
+            c.create_text(x+5,y-5,text=label,anchor='sw',fill='#667085',font=(self.theme.body[0],8))
+        for s in data.get('samples') or []:
+            xy=s.get('target_xy_mm'); r=s.get('residual_xy_mm')
+            if not xy: continue
+            if s.get('discarded') and not r:
+                x,y=pos(*xy); c.create_line(x-5,y-5,x+5,y+5,fill='#b42318',width=2); c.create_line(x-5,y+5,x+5,y-5,fill='#b42318',width=2); continue
+            if not r: continue
+            x,y=pos(*xy); d=math.hypot(*r); color='#168448' if d<=.03 else '#d69e00' if d<=.05 else '#b42318'
+            if s.get('verification'): c.create_polygon(x,y-5,x+5,y,x,y+5,x-5,y,fill=color)
+            else: c.create_oval(x-4,y-4,x+4,y+4,fill=color,outline=color)
+            c.create_line(x,y,x+r[0]*multiplier*scale,y-r[1]*multiplier*scale,fill=color,width=2,arrow='last',arrowshape=(8,10,4))
+        for xval in range(80,181,20):
+            x,y=pos(xval,-10); c.create_line(x,y,x,y+4,fill=INK); c.create_text(x,y+6,text=str(xval),anchor='n',fill=INK,font=(self.theme.body[0],8))
+        for yval in range(-10,151,20):
+            x,y=pos(80,yval); c.create_line(x-4,y,x,y,fill=INK); c.create_text(x-7,y,text=str(yval),anchor='e',fill=INK,font=(self.theme.body[0],8))
+        c.create_text(b[0]+20,a[1]+6,text='X mm',anchor='nw',fill=INK,font=(self.theme.body[0],8))
+        c.create_text(a[0]-8,b[1]-2,text='Y mm',anchor='se',fill=INK,font=(self.theme.body[0],8))
+        target=(data.get('predicted') or {}).get(data.get('target'))
+        if target:
+            x,y=pos(*target); c.create_oval(x-8,y-8,x+8,y+8,outline='#2563eb',width=2)
+
+    def pickacc_confirm(self,data):
+        tool=data.get('tool'); candidate=data.get('candidate') or {}; old=(data.get('existing') or {}).get(f'tool{tool}') or {}
+        top=tk.Toplevel(self.root); self.pickacc_dialog=top; top.title(f'确认覆盖【工具{tool}】挑取补偿'); top.transient(self.root); top.grab_set()
+        tk.Label(top,text=f'确认覆盖【工具{tool}】挑取补偿',bg='#2563eb' if tool==1 else '#d56713',fg=WHITE,font=self.theme.large,padx=16).pack(fill='x')
+        prior=old.get('constant_xy'); current=candidate.get('constant_xy')
+        def mean_value(value,nodes):
+            if isinstance(value,list) and len(value)==2: return value
+            if nodes: return [sum(n[k] for n in nodes)/len(nodes) for k in ('dx','dy')]
+            return None
+        old_mean=mean_value(prior,old.get('nodes',[])); new_mean=mean_value(current,candidate.get('nodes',[]))
+        delta=[round(new_mean[i]-old_mean[i],4) for i in range(2)] if old_mean is not None and new_mean is not None else '无旧结果'
+        import math
+        valid=[math.hypot(*s['residual_xy_mm']) for s in candidate.get('verification',[]) if s.get('residual_xy_mm')]
+        tk.Label(top,text=f"旧：{pickacc_type(old.get('type'))} {prior or str(len(old.get('nodes',[])))+' 节点'}\n新：{pickacc_type(candidate.get('type'))} {current or str(len(candidate.get('nodes',[])))+' 节点'}\n均值差：{delta}\n验证：{len(candidate.get('verification',[]))} 点通过，最大 {max(valid,default=0):.3f} mm",justify='left',font=self.theme.body,padx=25,pady=15).pack()
+        row=tk.Frame(top); row.pack(); ttk.Button(row,text='覆盖保存',command=lambda:self.pickacc_command('pickacc_confirm',{'accept':True})).pack(side='left',padx=15,pady=10); ttk.Button(row,text='不保存',command=lambda:self.pickacc_command('pickacc_confirm',{'accept':False})).pack(side='left',padx=15,pady=10)
+        top.protocol('WM_DELETE_WINDOW',lambda:self.pickacc_command('pickacc_confirm',{'accept':False}))
+        top.update_idletasks()
+        x=self.root.winfo_rootx()+max(0,(self.root.winfo_width()-top.winfo_reqwidth())//2)
+        y=self.root.winfo_rooty()+max(0,(self.root.winfo_height()-top.winfo_reqheight())//2)
+        top.geometry(f'+{x}+{y}')
+
     def choose_offset_tool(self, tool):
         self.offset_tool = tool
         self.offset_heading.config(text=f"当前：工具{tool}", bg='#2563eb' if tool == 1 else '#d56713')
@@ -687,6 +846,7 @@ class App:
         self.update_preview(supervisor)
         self.update_tip(tooltip_progress(main))
         self.update_offset(main)
+        self.update_pickacc(main)
         key = (date.today(), json.dumps(rows, ensure_ascii=False, default=str))
         if key != self.cache.get('events'):
             self.events = list(rows); self.table.delete(*self.table.get_children())

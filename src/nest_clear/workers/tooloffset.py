@@ -93,17 +93,29 @@ class ToolOffsetWorker(AsyncRequestWorker):
         session['shots'] += 1
         raw = None
         if ctx.events.run_directory is not None:
-            path = ctx.events.run_directory / 'tooloffset' / session['directory'] / f"s{session['shots']:03d}_raw.png"
+            path = ctx.events.run_directory / session.get('kind', 'tooloffset') / session['directory'] / f"s{session['shots']:03d}_raw.png"
             path.parent.mkdir(parents=True, exist_ok=True)
             if not cv2.imwrite(str(path), image): raise OSError(f'保存工具偏移原图失败：{path}')
             raw = str(path.relative_to(ctx.events.directory))
         targets = detect(image)
         principal = (float(ctx.calibration.K[0,2]), float(ctx.calibration.K[1,2]))
-        write_live(ctx.events.directory, 'tooloffset_latest', render_annotations(image, targets, session['engine'].current, principal))
+        prefix = session.get('kind', 'tooloffset')
+        annotated = render_annotations(image, targets, session['engine'].current, principal)
+        if prefix == 'pickacc' and payload.get('pose') is not None:
+            from nest_clear.vision.geometry import pixel_to_module
+            cal = session['engine'].cal
+            pose = np.asarray(payload['pose'])
+            center = np.asarray(pixel_to_module(*principal, pose, cal))
+            half = session['engine'].fine_half
+            corners = np.asarray([center + [x, y, 0] for x, y in ((-half,-half),(half,-half),(half,half),(-half,half))])
+            camera = (corners - (pose + cal.translation)) @ cal.rotation
+            uv, _ = cv2.projectPoints(camera, np.zeros(3), np.zeros(3), cal.K, cal.distortion)
+            cv2.polylines(annotated, [np.rint(uv.reshape(-1,2)).astype(np.int32)], True, (255,150,0), 4, cv2.LINE_AA)
+        write_live(ctx.events.directory, prefix + '_latest', annotated)
         current = next((t for t in targets if t.index == session['engine'].current), None)
         if current is not None:
-            write_live(ctx.events.directory, 'tooloffset_crop', render_crop(image, current, principal))
+            write_live(ctx.events.directory, prefix + '_crop', render_crop(image, current, principal))
         details = [{'target': t.label, 'ring_uv': t.ring_uv, 'cross_uv': t.cross_uv,
                     'cross_error_mm': t.cross_error_mm, 'marker': t.marker} for t in targets]
-        ctx.events.emit('tooloffset_detection', task_id=payload['task_id'], raw_path=raw, targets=details)
+        ctx.events.emit(prefix + '_detection', task_id=payload['task_id'], raw_path=raw, targets=details)
         return {'targets': targets, 'size': (image.shape[1], image.shape[0]), 'raw_path': raw}

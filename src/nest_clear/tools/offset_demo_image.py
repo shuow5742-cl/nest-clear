@@ -11,7 +11,7 @@ from nest_clear.tooloffset.session import nominal_targets
 from nest_clear.workers.tooloffset import ToolOffsetWorker
 
 
-def main(root):
+def main(root, pickacc=False):
     pose = np.array([145.,85.]); origin = np.array([130.,70.]); angle = .02
     matrix = 1.005 * np.array([[math.cos(angle),-math.sin(angle)],[math.sin(angle),math.cos(angle)]])
     def pixel(p):
@@ -37,7 +37,13 @@ def main(root):
         def emit(self, *args, **kwargs): pass
     ctx = SimpleNamespace(events=Events(), calibration=SimpleNamespace(K=np.array([[2000.,0,2000],[0,2000.,1500],[0,0,1.]])))
     session = {'shots':0, 'engine':SimpleNamespace(current=12)}
-    ToolOffsetWorker().execute({'captured':(image,{}), 'context':ctx, 'session':session, 'task_id':1})
+    payload={'captured':(image,{}), 'context':ctx, 'session':session, 'task_id':1}
+    if pickacc:
+        from nest_clear.vision.geometry import Calibration
+        cal=Calibration(ctx.calibration.K, np.zeros(5), np.diag([1.,-1.,-1.]), np.zeros(3), -105.)
+        session.update(kind='pickacc',engine=SimpleNamespace(current=12,cal=cal,fine_half=4.))
+        payload['pose']=(145.,85.,-5.)
+    ToolOffsetWorker().execute(payload)
 
 
-if __name__ == '__main__': main(sys.argv[1])
+if __name__ == '__main__': main(sys.argv[1], len(sys.argv)>2 and sys.argv[2]=='pickacc')

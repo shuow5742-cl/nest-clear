@@ -55,6 +55,12 @@ def save_result(path, tool, result):
     path = Path(path)
     data = _read(path)
     data[key] = result
+    return save_mapping(path, data, 'tool_offset')
+
+
+def save_mapping(path, data, prefix):
+    """备份并原子替换 YAML 映射；供需要人工确认的标定结果共用。"""
+    path = Path(path)
     # 序列化在备份及替换之前完成，避免无效数据影响现有文件。
     serialized = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,7 +68,7 @@ def save_result(path, tool, result):
     if path.exists():
         history = path.parent / "history"
         history.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(prefix=datetime.now(timezone.utc).strftime("tool_offset_%Y%m%dT%H%M%S_%fZ_"), suffix=".yaml", dir=history, delete=False) as f:
+        with tempfile.NamedTemporaryFile(prefix=datetime.now(timezone.utc).strftime(prefix + "_%Y%m%dT%H%M%S_%fZ_"), suffix=".yaml", dir=history, delete=False) as f:
             backup = Path(f.name)
         try:
             shutil.copy2(path, backup)
@@ -71,7 +77,7 @@ def save_result(path, tool, result):
             raise
     temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=".tool_offset_", suffix=".tmp", delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix="." + prefix + "_", suffix=".tmp", delete=False) as f:
             temp_path = Path(f.name)
             f.write(serialized)
             f.flush()

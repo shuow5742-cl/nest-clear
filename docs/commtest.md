@@ -54,3 +54,5 @@ PYTHONPATH=src .venv/bin/python -m nest_clear.tools.camera_calib_solve runs_comm
 联调支持 90/95，使用真实主相机图像及 `commtest.camcal_travel`，不是挑毛的假点。PLC 发 90 后，在界面选择工具和模式并开始；PC 写起始 XYZ 并回 90。到位后发 95，PC 拍总览回 95；此后交替发 90（PC 写相机目标并回 90）、95（拍照并回 95，或等待人工到位及最终确认）。成功回 91，业务失败或放弃回 92，错序和到位故障回 999。边缘验证不需要移动工具。
 
 现场逐项核对起始位、三轴行程和卡片厚度；本模式的标定运动使用 `commtest.camcal_travel`，与挑毛测试的 Z=0 行程不同。结果、`tools.yaml` 及备份只写 `config/commtest_calibration/`，原图和会话记录写 `runs_commtest/.../tooloffset/`。保存会更新联调工具补偿 XY 并保留 Z；生产文件不受影响。保存后界面提示需重建相应对刀基准。
+
+挑取精度标定支持 150/155/156，与生产协议相同；结果和历史保存到联调标定目录，不覆盖生产标定。按界面选择工具、手动对准并确认覆盖，PLC 负责移动与超时。相机/工具坐标均受联调行程限制。

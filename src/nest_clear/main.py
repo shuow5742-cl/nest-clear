@@ -294,6 +294,12 @@ class Application:
             from types import SimpleNamespace
             self.events.emit('tooloffset_state', phase='idle', message='等待 PLC 请求',
                              existing=_existing(SimpleNamespace(config=config), calibration_path.parent / 'tool_offset.yaml', metadata['calibration_sha256']))
+            from nest_clear.flow.pick_accuracy import existing as accuracy_existing
+            accuracy = accuracy_existing(SimpleNamespace(config=config), Path(config.tool_calibration.directory) / 'pick_compensation.yaml', metadata['calibration_sha256'])
+            self.events.emit('pickacc_state', phase='idle', message='等待 PLC 请求', existing=accuracy)
+            for tool in (1, 2):
+                if not accuracy[f'tool{tool}'].get('type'):
+                    self.events.emit('warning', reason=f'工具{tool}挑取补偿未标定', tool=tool)
             self.board = WorldBoard()
             self.clock = BTClock(self.board)
             for worker in (self.plc, self.camera, vision, CamcalWorker(), ToolOffsetWorker()):
@@ -356,6 +362,9 @@ class Application:
         abort_offset = getattr(self.events, "abort_tooloffset", None)
         if abort_offset is not None:
             abort_offset("主程序停止，PLC 初始化或急停时会话中断")
+        abort_accuracy = getattr(self.events, "abort_pickaccuracy", None)
+        if abort_accuracy is not None:
+            abort_accuracy("主程序停止，PLC 初始化或急停时会话中断")
         cycle = getattr(self.events, "active_cycle", None)
         if cycle is not None:
             cycle.pending()

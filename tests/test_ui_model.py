@@ -1,4 +1,5 @@
 import json
+import math
 from datetime import date
 from nest_clear.ui.model import decode_status, status_indicators, classify_event, EventTail, read_json, camcal_progress, tooltip_progress
 
@@ -63,3 +64,41 @@ def test_font_selection_does_not_synthesize_bold(monkeypatch):
 def test_edge_corner_labels_match_camera_order():
     from nest_clear.ui.model import edge_corner_label
     assert [edge_corner_label(i) for i in range(4)] == ['左上', '右上', '左下', '右下']
+
+
+def test_pickacc_geometry_is_equal_scale_and_arrows_are_readable():
+    from nest_clear.ui.model import pickacc_tray_geometry
+    for width,height in ((600,350),(500,220),(300,500)):
+        left,bottom,scale,multiplier=pickacc_tray_geometry(width,height)
+        assert 100*scale <= width-90 and 160*scale <= height-45
+        assert 0 <= left and bottom <= height
+        assert 20 <= .05*scale*multiplier <= 40
+        assert multiplier % 100 == 0
+
+
+def test_pickacc_text_and_notes():
+    from nest_clear.ui.model import pickacc_infield, pickacc_note, pickacc_stage, pickacc_type
+    assert pickacc_type('constant')=='固定补偿' and pickacc_type('table')=='补偿表'
+    assert [pickacc_stage(x) for x in ('A','B','repeat','verify','infield','simple')]==['第一轮','补点','重复性','验证','视野内','工具2简化']
+    assert pickacc_note({'stage':'infield','corner':[-1,1]})=='视野内-左上'
+    assert pickacc_note({'outlier':True,'retest':True})=='离群、重测'
+    assert pickacc_note({'verification':True})=='验证'
+    assert pickacc_infield([])=='视野内：未开始'
+    assert '0.070 mm ⚠' in pickacc_infield([{'distance_mm':.07,'warning':True}])
+    assert pickacc_infield([{'distance_mm':.02}]*4).endswith('正常')
+
+
+def test_pickacc_demo_uses_real_plans_and_geometry():
+    from nest_clear.ui.demo import pickacc_demo
+    first=['T02','T03','T05','T10','T12','T21','T26','T28','T29']
+    sixteen={'T02','T03','T04','T05','T10','T11','T12','T13','T18','T19','T20','T21','T26','T27','T28','T29'}
+    select=pickacc_demo('select','2026-01-01')
+    assert [q['target'] for q in select['queue']]==first
+    table=pickacc_demo('table','2026-01-01')
+    assert [s['target'] for s in table['samples'] if s['stage']=='A']==first
+    assert {s['target'] for s in table['samples'] if s['stage'] in ('A','B')}==sixteen
+    simple=pickacc_demo('tool_in_place','2026-01-01')
+    assert [s['target'] for s in simple['samples']]+[q['target'] for q in simple['queue']]==['T02','T05','T26','T29','T12']
+    p=table['predicted']
+    assert abs(math.dist(p['T02'],p['T03'])-30.15)<1e-6
+    assert abs(math.dist(p['T02'],p['T10'])-30.15)<1e-6

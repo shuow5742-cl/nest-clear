@@ -176,3 +176,14 @@ tool_offset:
   jitter_tol_mm: 0.02
   point_order: [T02, T05, T26, T29, T12, T19, T03, T28, T10, T21]
   edge_targets: [T12]
+
+pick_accuracy:
+  center_tol_mm: 0.5
+  infield_warn_mm: 0.05
+  const_max_dev_mm: 0.05
+  const_std_mm: 0.025
+  repeat_tol_mm: 0.03
+  verify_tol_mm: 0.05
+  outlier_mm: 0.1
+  max_points: 40
+  calib_tool_z_mm: -10.0

@@ -71,6 +71,7 @@ def build_batch(
     params = {
         "work_cycle": None,
         "tooloffset_session": None,
+        "pickaccuracy_session": None,
         "mode": Mode.IDLE,
         "next_index": 0,
         "scan": None,

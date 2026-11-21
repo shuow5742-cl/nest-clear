@@ -56,6 +56,7 @@ class Widget:
     def create_text(self, *args, **kwargs): self.text_calls.append(kwargs.get('text'))
     def create_oval(self, *args, **kwargs): pass
     def create_rectangle(self, *args, **kwargs): pass
+    def create_line(self, *args, **kwargs): pass
     def create_polygon(self, *args, **kwargs): pass
     def create_image(self, *args, **kwargs): pass
     def scan_mark(self, *args): pass
@@ -156,6 +157,15 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         ui.update_offset({'tooloffset': {'phase':'edge', 'tool':2, 'mode':'center_edge', 'edges':[{'target':'T12','corner':2,'delta_xy_mm':[0,0], 'distance_mm':0}]}, 'command_seq':0})
         assert all(b.options['state'] == 'disabled' for b in ui.offset_tool_buttons + ui.offset_mode_buttons)
         assert ui.offset_edges.rows['0']['values'][1] == '左下'
+        ui.update_pickacc({'pickacc':{'phase':'select'},'command_seq':0})
+        ui.choose_pickacc_tool(2)
+        ui.update_pickacc({'pickacc':{'phase':'select'},'command_seq':0})
+        assert ui.pickacc_start.options['state'] == 'normal'
+        ui.update_pickacc({'pickacc':{'phase':'tool_in_place','tool':2,'target':'T12','predicted':{'T12':[100,50]},'samples':[{'target':'T12','target_xy_mm':[100,50],'residual_xy_mm':[.02,.01]}]},'command_seq':0})
+        assert ui.pickacc_calculate.options['state'] == 'normal'
+        assert len(ui.pickacc_table.rows) == 1
+        ui.update_pickacc({'pickacc':{'phase':'wait_tool','tool':2},'command_seq':0})
+        assert ui.pickacc_calculate.options['state'] == 'disabled'
         assert len(ui.table.rows) == 3
         assert len(ui.tiptable.rows) == 2
         assert ui.process_table.options['height'] == 2

@@ -295,6 +295,8 @@ class ToolOffset(TreeNode):
                 _, _, xyz = save_confirmed(s['path'], Path(ctx.config.tool_calibration.directory) / 'tools.yaml', s['tool'], result, task_id=bb.read('task_id'))
                 offsets = list(ctx.config.tools); offsets[s['tool']-1] = xyz
                 object.__setattr__(ctx.config, 'tools', tuple(offsets))
+                from .pick_accuracy import refresh_existing
+                refresh_existing(ctx)
                 self.publish('done', '保存成功', candidate=result)
                 finish(ctx, bb, 'done')
                 return self.set_reply(91)

@@ -1,9 +1,52 @@
 """文件和事件到显示数据的转换，不依赖 tkinter。"""
 import json
+import math
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 BITS = ('手动模式','自动模式','循环启动','循环暂停','循环停止','上电完成','急停中','初始化中','初始化完成','信息提示','一般报警','严重故障')
+
+
+def pickacc_tray_geometry(width, height):
+    """行程框等比例居中；箭头按 0.05 mm 约 30 像素选择常用倍率。"""
+    scale = max(.01, min((width - 90) / 100, (height - 45) / 160))
+    left = (width - 100 * scale) / 2
+    bottom = (height + 160 * scale) / 2 - 5
+    target = 600 / scale
+    decade = 10 ** math.floor(math.log10(target))
+    multiplier = min((v * decade for v in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)), key=lambda v: abs(v-target))
+    return left, bottom, scale, int(multiplier)
+
+
+def pickacc_type(value):
+    return {'constant':'固定补偿', 'table':'补偿表'}.get(value, '未标定' if not value else value)
+
+
+def pickacc_stage(value):
+    return {'A':'第一轮', 'B':'补点', 'repeat':'重复性', 'verify':'验证',
+            'infield':'视野内', 'simple':'工具2简化', 'outlier_retest':'离群重测',
+            'discard':'作废'}.get(value, value or '—')
+
+
+def pickacc_note(sample):
+    parts = []
+    if sample.get('outlier'): parts.append('离群')
+    if sample.get('retest'): parts.append('重测')
+    if sample.get('verification'): parts.append('验证')
+    if sample.get('stage') == 'infield':
+        corner = sample.get('corner')
+        labels = {(-1,1):'左上', (1,1):'右上', (-1,-1):'左下', (1,-1):'右下'}
+        label = labels.get(tuple(corner)) if isinstance(corner, (tuple, list)) else None
+        parts.append('视野内' + ('-' + label if label else ''))
+    if sample.get('discarded'): parts.append('作废')
+    return '、'.join(parts) or '拟合'
+
+
+def pickacc_infield(edges):
+    if not edges: return '视野内：未开始'
+    maximum = max(float(edge.get('distance_mm', 0)) for edge in edges)
+    state = '⚠ 框内误差不均，相机标定需复核' if any(edge.get('warning') for edge in edges) else ('正常' if len(edges) >= 4 else '检查中')
+    return f'视野内：四角最大差 {maximum:.3f} mm {state}'
 
 def decode_status(word):
     if not isinstance(word, int):
@@ -62,7 +105,7 @@ def status_indicators(s, m, now=None):
     if s.get('heartbeat_interrupted'): hb_color = 'red'
     return {'父程序': ('green' if s.get('pid') else 'gray', str(s.get('pid') or '无数据')), '主程序': ('green' if s.get('child_state') in ('运行','就绪') else 'yellow' if s.get('child_state') == '启动中' else 'gray', str(m.get('mode') or s.get('child_state') or '无数据')), 'PLC 连接': (plc_color, plc_text), '心跳': (hb_color, hb_text), '40932 就绪': ('green' if s.get('algorithm_ready') == 1 else 'gray', str(s.get('algorithm_ready') if s.get('algorithm_ready') is not None else '无数据'))}
 
-EVENTS = {'error','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
+EVENTS = {'error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
 def classify_event(row):
     event = str(row.get('event','')).lower()
     text = ' '.join(str(row.get(k,'')) for k in ('reason_code','code','reason','what','operation','event')).lower()
@@ -71,7 +114,7 @@ def classify_event(row):
     if reply is None and event == 'supervisor_reply_999': reply = 999
     if event not in EVENTS and reply not in (999,131,82,92) and not any(x in text for x in ('readback','回读不一致','采图失败','capture_failed')):
         return None
-    category = '父程序' if row.get('process') == 'supervisor' else '标定' if any(x in text for x in ('camcal','tooltip','tooloffset','calib')) or reply in (82,92,131) else '通信' if any(x in text for x in ('plc','heartbeat','readback','回读')) else '相机' if any(x in text for x in ('camera','capture','image','采图')) else '配置' if 'config' in text else '算法'
+    category = '父程序' if row.get('process') == 'supervisor' else '标定' if any(x in text for x in ('camcal','tooltip','tooloffset','pickacc','calib')) or reply in (82,92,131,152) else '通信' if any(x in text for x in ('plc','heartbeat','readback','回读')) else '相机' if any(x in text for x in ('camera','capture','image','采图')) else '配置' if 'config' in text else '算法'
     color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
     reason = str(row.get('reason',row.get('message',event)))
     fields = {}

@@ -22,6 +22,22 @@ logger = logging.getLogger("nest_clear.flow.picking")
 REASONS = {"short": "过短", "small": "面积过小", "thin": "过细", "pale": "颜色过浅"}
 
 
+def calculate_pick_coords(target, offsets, pick_depth_z, travel, *, task_id=None, tool=None, compensation=None):
+    """计算并校验两把工具的生产挑取坐标。"""
+    selected = tool
+    result = []
+    for tool, offset in enumerate(offsets, 1):
+        if selected is not None and tool != selected:
+            continue
+        delta = compensation(tool, target[:2]) if compensation else (0., 0.)
+        xyz = (target[0] + offset[0] + delta[0], target[1] + offset[1] + delta[1], pick_depth_z + offset[2])
+        for axis, value, bounds in zip("XYZ", xyz, travel):
+            if not math.isfinite(value) or not bounds[0] <= value <= bounds[1]:
+                raise GuardError("POSITION-TRAVEL", f"工具 {tool} 的 {axis} 轴目标值 {value} 超出行程范围 {bounds}", f"挑取坐标 Task_ID={task_id}", "检查工具补偿、目标和设备行程。")
+        result.append(xyz)
+    return result[0] if selected is not None else (result[0], result[1])
+
+
 def record_detection(ctx: FlowContext, bb: Any, cycle: WorkCycle, detection: dict,
                      stage: str, view: int, coarse_target: Any = None) -> None:
     """记录可复核的候选信息；日志失败不会改变状态转移。"""
@@ -93,14 +109,18 @@ class WorkRequest(Instant):
                 """分别补偿两把工具并守卫行程。"""
                 if getattr(self.ctx.events, "calibration_placeholder", False) and not self.ctx.config.vision.allow_placeholder_calibration:
                     raise GuardError("CALIBRATION-PLACEHOLDER", "相机标定为占位值，拒绝下发挑取坐标", "挑取坐标守卫", "完成相机标定。")
-                result = []
-                for tool, offset in enumerate(self.ctx.config.tools, 1):
-                    xyz = (target[0] + offset[0], target[1] + offset[1], self.ctx.config.pick_depth_z + offset[2])
-                    for axis, value, bounds in zip("XYZ", xyz, self.ctx.config.travel):
-                        if not __import__("math").isfinite(value) or not bounds[0] <= value <= bounds[1]:
-                            raise GuardError("POSITION-TRAVEL", f"工具 {tool} 的 {axis} 轴目标值 {value} 超出行程范围 {bounds}", f"挑取坐标 Task_ID={bb.read('task_id')}", "检查工具补偿、目标和设备行程。")
-                    result.append(xyz)
-                return result[0], result[1]
+                from pathlib import Path
+                from nest_clear.pickaccuracy.store import evaluate, read
+                data = read(Path(self.ctx.config.tool_calibration.directory) / 'pick_compensation.yaml')
+                used = {}
+                def compensation(tool, xy):
+                    delta = evaluate(data.get(f'tool{tool}'), xy)
+                    used[f'tool{tool}'] = delta
+                    return delta
+                result = calculate_pick_coords(target, self.ctx.config.tools, self.ctx.config.pick_depth_z,
+                                               self.ctx.config.travel, task_id=bb.read('task_id'), compensation=compensation)
+                self.ctx.events.emit('pick_compensation_used', task_id=bb.read('task_id'), target_xy=target[:2], compensation=used)
+                return result
             def record(event: str, **fields: Any) -> None:
                 fields.setdefault("task_id", bb.read("task_id"))
                 fields.setdefault("request_func", bb.read("request_func"))

@@ -115,6 +115,8 @@ class Process(Instant):
                 ctx.calibration_updated(step.result.calibration)
             ctx.calibration = step.result.calibration
             ctx.events.calibration_placeholder = False
+            from .pick_accuracy import refresh_existing
+            refresh_existing(ctx)
             ctx.events.meta_update(task_id=bb.read("task_id"), request_func=80, calibration=str(path), backup=str(backup) if backup else None, report=step.result.report)
             report = dict(step.result.report)
             calibration = step.result.calibration

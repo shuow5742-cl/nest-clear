@@ -139,6 +139,7 @@ class Config:
     commtest: dict[str, Any] = field(default_factory=dict)
     ui_preview: dict[str, Any] = field(default_factory=dict)
     tool_offset: dict[str, Any] = field(default_factory=dict)
+    pick_accuracy: dict[str, Any] = field(default_factory=dict)
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -310,7 +311,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。"
         ) from exc
     if isinstance(data, dict):
-        data = {"tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, "run_mode": "production", "commtest": None, **data}
+        data = {"pick_accuracy": {}, "tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, "run_mode": "production", "commtest": None, **data}
     root = _mapping(
         data,
         "根",
@@ -324,6 +325,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "tool_calibration",
             "camera_calibration",
             "tool_offset",
+            "pick_accuracy",
             "ui_preview",
             "travel",
             "camera",
@@ -517,6 +519,17 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         if type(v[key]) is not int or v[key] < 1:
             _fail(f"vision.{key}", "应为正整数")
     fine_half = _number(v["fine_box_half_mm"], "vision.fine_box_half_mm", True)
+    from nest_clear.pickaccuracy.session import DEFAULTS as accuracy_defaults
+    if not isinstance(root['pick_accuracy'], dict):
+        _fail('pick_accuracy', '应为映射')
+    accuracy = _mapping({**accuracy_defaults, **root['pick_accuracy']}, 'pick_accuracy', list(accuracy_defaults))
+    for key in accuracy_defaults:
+        if key == 'max_points':
+            if type(accuracy[key]) is not int or accuracy[key] < 1: _fail('pick_accuracy.max_points', '须为正整数')
+        else:
+            accuracy[key] = _number(accuracy[key], 'pick_accuracy.' + key, key != 'calib_tool_z_mm')
+    if accuracy['center_tol_mm'] > fine_half / 2:
+        _fail('pick_accuracy.center_tol_mm', '不能超过精定位框半宽的一半')
     cap_ratio = _number(v["cap_ratio"], "vision.cap_ratio", True)
     tool_ratio = _number(v["tool_check_ratio"], "vision.tool_check_ratio")
     if not 0 <= tool_ratio <= 1:
@@ -642,5 +655,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _string(record["machine_id"], "record.machine_id"),
         camcal,
         UIConfig(**ui_data),
-        mode, ct or {}, preview_data, offset,
+        mode, ct or {}, preview_data, offset, accuracy,
     )

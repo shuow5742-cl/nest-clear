@@ -1,6 +1,7 @@
 """生成有代表性的演示数据并启动界面。"""
 import argparse
 import json
+import math
 import os
 import subprocess
 import threading
@@ -18,7 +19,72 @@ def atomic(path, value):
     os.replace(tmp, path)
 
 
-def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None):
+def pickacc_demo(state, stamp):
+    """演示数据按菲林目标、实际点序和各测量阶段生成。"""
+    import csv
+    path = Path(__file__).resolve().parents[3] / 'docs/pick_test_film/targets.csv'
+    with path.open(encoding='utf-8', newline='') as stream:
+        nominal = {int(row['index']): (float(row['x_mm']), float(row['y_mm'])) for row in csv.DictReader(stream)}
+    angle = .02
+    def position(index):
+        x,y = nominal[index]
+        return [130 + 1.005*(math.cos(angle)*x-math.sin(angle)*y),
+                70 + 1.005*(math.sin(angle)*x+math.cos(angle)*y)]
+    first = (2,3,5,10,12,21,26,28,29)
+    table = (2,3,4,5,10,11,12,13,18,19,20,21,26,27,28,29)
+    simple = (2,5,26,29,12)
+    tool = 2 if state == 'tool_in_place' else 1
+    samples=[]
+    def add(index, stage, *, corner=None, retest=False, verification=False):
+        xy=position(index); number=len(samples)
+        residual=[.012,.008] if verification else [.02+(number % 3)*.02, -.02]
+        sent=[xy[0]+1,xy[1]-1,-10]
+        actual=[sent[0]+residual[0],sent[1]+residual[1],-10]
+        samples.append({'target':f'T{index:02d}', 'target_xy_mm':xy, 'sent_xyz_mm':sent,
+                        'actual_xyz_mm':actual, 'residual_xy_mm':residual, 'stage':stage,
+                        'corner':corner, 'retest':retest, 'verification':verification})
+    if state == 'wait_tool':
+        for index in first[:4]: add(index,'A')
+        pending=first[4:]; current=12
+    elif state == 'tool_in_place':
+        for index in simple[:4]: add(index,'simple')
+        pending=simple[4:]; current=12
+    elif state in ('table','confirm'):
+        for index in first: add(index,'A')
+        for corner in ((-1,-1),(-1,1),(1,-1),(1,1)): add(12,'infield',corner=corner)
+        if state == 'table':
+            for index in table:
+                if index not in first: add(index,'B')
+            for index in (2,29,12): add(index,'repeat',retest=True)
+        for index in (19,11): add(index,'verify',verification=True)
+        pending=(); current=12
+    else:
+        pending=first; current=None
+    phases={'select':('select','请选择工具并开始'), 'wait_tool':('wait_tool','请等待工具前往'),
+            'tool_in_place':('tool_in_place','工具已到位，调整好后按【计算补偿】'),
+            'table':('wait150','等待下一相机位置'), 'confirm':('confirm','等待确认覆盖')}
+    phase,message=phases[state]
+    infield=[{'corner':corner,'distance_mm':distance,'warning':distance>.05} for corner,distance in zip(((-1,-1),(-1,1),(1,-1),(1,1)),(.021,.028,.070,.032))] if state in ('table','confirm') else []
+    candidate={}
+    if state=='table':
+        nodes=[]
+        for index in table:
+            sample=next(s for s in samples if s['target']==f'T{index:02d}' and s['stage'] in ('A','B'))
+            xy=sample['target_xy_mm']; r=sample['residual_xy_mm']
+            nodes.append({'x':xy[0],'y':xy[1],'dx':r[0],'dy':r[1]})
+        candidate={'type':'table','nodes':nodes}
+    elif state=='confirm':
+        candidate={'type':'constant','constant_xy':[.081,-.048], 'verification':[s for s in samples if s['verification']]}
+    return {'phase':phase, 'tool':None if state=='select' else tool, 'message':message,
+            'target':f'T{current:02d}' if current is not None else None,
+            'predicted':{f'T{i:02d}':position(i) for i in set(table) | set(simple)},
+            'queue':[{'target':f'T{i:02d}','stage':'simple' if tool==2 else 'A'} for i in pending],
+            'samples':samples, 'infield':infield, 'decision':({'max_dev_mm':.071,'std_mm':.027} if state=='table' else {'max_dev_mm':.022,'std_mm':.010}) if candidate else {},
+            'existing':{'tool1':{'type':'constant','constant_xy':[.08,-.05],'time':stamp,'verification':[{},{}]},
+                        'tool2':{'type':'table','time':stamp,'verification':[{}],'stale':True}}, 'candidate':candidate}
+
+
+def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None):
     root = Path(root)
     now = datetime.now().astimezone(); stamp = now.isoformat()
     start = (now - timedelta(hours=2, minutes=18)).isoformat()
@@ -72,6 +138,13 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
             project = Path(__file__).resolve().parents[3]
             env = dict(os.environ, PYTHONPATH=str(project / 'src'))
             subprocess.run([str(project / '.venv/bin/python'), '-m', 'nest_clear.tools.offset_demo_image', str(root)], cwd=project, env=env, check=True, timeout=30)
+    if pickacc_state:
+        path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
+        data['mode']='挑取精度标定中'; data['pickacc']=pickacc_demo(pickacc_state,stamp)
+        atomic(path,data)
+        if initial:
+            project=Path(__file__).resolve().parents[3]; env=dict(os.environ,PYTHONPATH=str(project/'src'))
+            subprocess.run([str(project/'.venv/bin/python'),'-m','nest_clear.tools.offset_demo_image',str(root),'pickacc'],cwd=project,env=env,check=True,timeout=30)
     names = ('latest', 'camcal_latest', 'preview_latest', 'calib_front_latest', 'calib_side_latest')
     if not offset_state: names += ('tooloffset_latest', 'tooloffset_crop')
     for name in names:
@@ -112,19 +185,21 @@ def generate(root):
 
 def main():
     from .__main__ import add_view_arguments, validate_view_arguments
-    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--geometry', help='窗口尺寸，例如 1366x768'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm'));  add_view_arguments(parser)
+    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--geometry', help='窗口尺寸，例如 1366x768'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','table','confirm'));  add_view_arguments(parser)
     args = parser.parse_args(); validate_view_arguments(parser, args)
     if args.offset_state is None and args.page in ('offset', 'tool-offset', '工具偏移标定', '工具偏移标定页'):
         args.offset_state = 'wait_tool'
     # 先同步生成第一帧，让短延迟截图也有完整内容。
-    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state)
+    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state)
     def update():
         step = 1
         while True:
-            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state); step += 1
+            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state); step += 1
     threading.Thread(target=update, daemon=True).start()
     from .app import App
     app = App(args.root, page=args.page, screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms)
+    if args.screenshot:
+        app.root.attributes('-topmost', True)
     if args.geometry:
         try:
             app.root.state('normal')
