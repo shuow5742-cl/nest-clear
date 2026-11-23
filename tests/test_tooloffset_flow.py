@@ -64,10 +64,9 @@ class Camera(AsyncRequestWorker):
         return image, {}
 
 
-@pytest.mark.parametrize('commtest', [False, True])
-def test_normal_real_tree(commtest, tmp_path):
-    cfg = load_config('config/commtest.yaml' if commtest else 'config/nest_clear.yaml')
-    directory = tmp_path / ('commtest_calibration' if commtest else 'calibration'); directory.mkdir()
+def test_normal_real_tree(tmp_path):
+    cfg = load_config('config/nest_clear.yaml')
+    directory = tmp_path / 'calibration'; directory.mkdir()
     initialize_tools(directory / 'tools.yaml')
     from nest_clear.tooltip.store import save_tools
     from nest_clear.tooloffset.store import save_result
@@ -123,6 +122,7 @@ def test_normal_real_tree(commtest, tmp_path):
             until(lambda: task in plc.replies)
             assert plc.replies[task][0] == 90
             plc.actual = plc.replies[task][1]['camcal_xyz']
+        assert list(events.run_directory.glob('tooloffset/*/*_raw.png'))
         result = load_tools(directory / 'tools.yaml')['tools']['tool1']['offset_xyz']
         assert result[:2] == pytest.approx([2.2,-1.3], abs=.01)
         import yaml

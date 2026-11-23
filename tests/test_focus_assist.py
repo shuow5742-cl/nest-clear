@@ -159,6 +159,7 @@ def test_exposure_override_backup_and_config(tmp_path):
     config_path = tmp_path / 'settings.yaml'
     config_path.write_text(open('config/nest_clear.yaml', encoding='utf-8').read(), encoding='utf-8')
     path = tmp_path / 'calibration' / 'camera_exposure.yaml'
+    original_config = config_path.read_text()
     assert load_config(config_path, require_tools=False).exposure_source == '配置'
     row = {'exposure_us': 5000., 'p99': 200, 'corners': 40, 'saturated_fraction': 0., 'dark_fraction': 0., 'sharpness': 1.}
     result = {'state': 'done', 'recommendation': row, 'mode': 'calibration', 'original_us': 10000., 'rows': [row]}
@@ -170,7 +171,7 @@ def test_exposure_override_backup_and_config(tmp_path):
     assert yaml.safe_load(backup.read_text())['exposure_us'] == 5000
     assert yaml.safe_load(path.read_text())['exposure_us'] == 6000
     assert load_config(config_path, require_tools=False).exposure_us == 6000
-    assert yaml.safe_load(config_path.read_text())['camera'].get('exposure_us') is None
+    assert config_path.read_text() == original_config
 
 
 def test_preview_process_sweep_cancel(tmp_path):

@@ -42,11 +42,12 @@ def rig(tmp_path: Path, monkeypatch):
         elif phase == 'limit':
             send(node.ctx.events.directory, 'tooltip_abort')
     monkeypatch.setattr(ConfirmCalibration, 'publish', auto_confirm)
+    (tmp_path / 'camera.yaml').write_bytes((ROOT / 'config/calibration/camera.yaml').read_bytes())
     with FakePLC() as plc:
         config = load_config(ROOT / "config/nest_clear.yaml")
         tc = replace(config.tool_calibration, directory=str(tmp_path), cameras={"front": {"backend": "mock"}, "side": {"backend": "mock"}})
-        config = replace(config, tools=((1.0, 2.0, 3.0), (0.0, 0.0, 0.0)), plc=replace(config.plc, ip=plc.host, port=plc.port),
-                         vision=replace(config.vision, camera_backend="mock", allow_placeholder_calibration=True,
+        config = replace(config, travel=((-500., 500.),)*3, tools=((1.0, 2.0, 3.0), (0.0, 0.0, 0.0)), plc=replace(config.plc, ip=plc.host, port=plc.port),
+                         vision=replace(config.vision, calibration=str(tmp_path / "camera.yaml"), camera_backend="mock", allow_placeholder_calibration=True,
                                         responsibility_zone=False),
                          record_directory=str(tmp_path / "runs"), tool_calibration=tc)
         config = replace(config, scan=Scan(((1.0, 0.0), (0.0, 0.0), (1.0, 0.0)), 1.0, 1.0, 0.0))

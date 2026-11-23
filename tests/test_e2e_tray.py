@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from dataclasses import replace
 import json
+import shutil
 from pathlib import Path
 import threading
 import time
@@ -37,17 +38,20 @@ class SequenceDetector:
 @pytest.fixture
 def running(tmp_path: Path) -> Iterator[tuple[FakePLC, Application, SequenceDetector, Path]]:
     """启动模拟 PLC、Mock 相机和后台主循环。"""
+    calibration_dir = tmp_path / 'calibration'
+    shutil.copytree(ROOT / 'config/calibration', calibration_dir)
     with FakePLC(wrap=3) as plc:
         config = load_config(ROOT / "config/nest_clear.yaml")
         config = replace(
             config,
+            travel=((-500., 500.),)*3,
             plc=replace(config.plc, ip=plc.host, port=plc.port),
             scan=Scan(((1.0, 0.0), (0.0, 0.0), (1.0, 0.0)), 1.0, 1.0, 0.0),
             record_directory=str(tmp_path),
             tools=((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)),
-            vision=replace(config.vision, camera_backend="mock", detector="stub", allow_placeholder_calibration=True,
+            vision=replace(config.vision, calibration=str(calibration_dir / "camera.yaml"), camera_backend="mock", detector="stub", allow_placeholder_calibration=True,
                            responsibility_zone=False),
-            tool_calibration=replace(config.tool_calibration, enabled=False),
+            tool_calibration=replace(config.tool_calibration, enabled=False, directory=str(calibration_dir)),
         )
         detector = SequenceDetector()
         app = Application(config, ROOT / "config/nest_clear.yaml", detector=detector)
@@ -139,6 +143,8 @@ def test_unknown_and_arrival_error(running: tuple[FakePLC, Application, Sequence
 
 def test_nonzero_baseline_ignored(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """启动时清应答并忽略已有编号，只处理后续变化。"""
+    calibration_dir = tmp_path / 'calibration'
+    shutil.copytree(ROOT / 'config/calibration', calibration_dir)
     with FakePLC(wrap=3) as plc:
         plc.task_id = 2
         plc.io.write("request_func", 1)
@@ -148,10 +154,11 @@ def test_nonzero_baseline_ignored(tmp_path: Path, caplog: pytest.LogCaptureFixtu
         config = load_config(ROOT / "config/nest_clear.yaml")
         config = replace(
             config,
+            travel=((-500., 500.),)*3,
             plc=replace(config.plc, ip=plc.host, port=plc.port),
             record_directory=str(tmp_path),
-            vision=replace(config.vision, camera_backend="mock", detector="stub", allow_placeholder_calibration=True),
-            tool_calibration=replace(config.tool_calibration, enabled=False),
+            vision=replace(config.vision, calibration=str(calibration_dir / "camera.yaml"), camera_backend="mock", detector="stub", allow_placeholder_calibration=True),
+            tool_calibration=replace(config.tool_calibration, enabled=False, directory=str(calibration_dir)),
         )
         app = Application(config, ROOT / "config/nest_clear.yaml")
         try:

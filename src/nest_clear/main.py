@@ -108,6 +108,9 @@ class ProductionAssembly:
         return detector
 
     def camera_sn(self, config):
+        if config.camera_sn == "auto" and config.vision.camera_backend == "daheng":
+            from nest_clear.devices.camera_select import resolve_camera
+            return resolve_camera()
         return config.camera_sn
 
     def vision(self, real, config, path, events):
@@ -168,7 +171,6 @@ def write_meta(events: EventRecorder, config_path: Path, calibration_path: Path,
                 calibration_cameras[name] = info
         metadata = {
             "run_id": events.run_id, "machine_id": config.machine_id,
-            "run_mode": config.run_mode, "scenario": config.commtest.get("scenario"), "seed": config.commtest.get("seed"),
             "code": {"sha": repository_commit(ROOT), "dirty": repository_dirty(ROOT)},
             "auto_weaver": {"version": framework_version, "sha": framework_commit()},
             "config": file_snapshot(config_path),
@@ -221,7 +223,6 @@ class Application:
                         "请重新建立对应工具的基准。",
                     )
         self.events = events or EventRecorder(config.record_directory, machine_id=config.machine_id, run=True)
-        self.events.run_mode = config.run_mode
         config_bytes = Path(config_path).read_bytes()
         calibration_path = Path(config.vision.calibration)
         if not calibration_path.is_absolute():
@@ -229,7 +230,6 @@ class Application:
         calibration_info = yaml.safe_load(calibration_path.read_text(encoding="utf-8"))
         commit = repository_commit(ROOT)
         metadata = {
-            "run_mode": config.run_mode,
             "nest_commit": commit,
             "framework_commit": framework_commit(),
             "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
@@ -254,9 +254,6 @@ class Application:
         self.events.archive = self.archive
         self.path = build_scan_path(config.scan, config.travel)
         assembly = ProductionAssembly()
-        if config.run_mode == "commtest":
-            from nest_clear.commtest import assembly_factory
-            assembly = assembly_factory()
         assembly.prepare(config, self.path)
         details = scan_details(config.scan, self.path)
         logger.info("扫描规划：%s", details)

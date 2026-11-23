@@ -27,8 +27,8 @@ def run_preview(config, mode="preview"):
     status_path = root / 'state' / 'preview_status.json'
     settings = config.ui_preview
     sn = config.camera_sn
-    if sn == 'auto':
-        from nest_clear.commtest import resolve_camera
+    if sn == 'auto' and config.vision.camera_backend == 'daheng':
+        from nest_clear.devices.camera_select import resolve_camera
         sn = resolve_camera()
     worker = CameraWorker(config.vision.camera_backend, sn, timeout_s=config.capture_timeout_s,
                           exposure_us=config.exposure_us, gain_db=config.gain_db,

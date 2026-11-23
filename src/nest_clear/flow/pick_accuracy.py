@@ -104,7 +104,7 @@ class PickAccuracy(ToolOffset):
                 start=ctx.config.camera_calibration.get('start_xyz'); path=Path(ctx.calibration_path or ctx.config.vision.calibration)
                 if start is None: raise ValueError('未配置相机标定起始坐标')
                 if ctx.calibration is None or getattr(ctx.calibration,'placeholder',False) or not path.is_file(): raise ValueError('相机标定文件不存在或未完成标定')
-                configured=ctx.config.commtest['camcal_travel'] if ctx.config.run_mode=='commtest' else ctx.config.travel
+                configured=ctx.config.travel
                 travel=tuple((max(lo,safe_lo),min(hi,safe_hi)) for (lo,hi),(safe_lo,safe_hi) in zip(configured,((80,180),(-10,150),(-15,0))))
                 if any(lo>hi for lo,hi in travel): raise ValueError('配置行程与挑取精度标定安全行程不相交')
                 if any(not lo<=v<=hi for v,(lo,hi) in zip(start,travel)): raise ValueError('起始坐标超出行程')

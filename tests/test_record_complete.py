@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import os
 import signal
+import shutil
 import threading
 from pathlib import Path
 import sys
@@ -94,24 +95,71 @@ def test_gate_pause_and_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert "盘数：1" in text and "暂停开始" in text and "净耗时 5.0 秒" in text
 
 
+def record_test_config(tmp_path: Path):
+    """为使用原点附近模拟坐标的记录测试准备独立配置和标定。"""
+    calibration = tmp_path / "calibration"
+    shutil.copytree(ROOT / "config/calibration", calibration)
+    config = yaml.safe_load((ROOT / "config/nest_clear.yaml").read_text())
+    config["record"]["directory"] = str(tmp_path / "runs")
+    config["tool_calibration"].update(enabled=False, directory=str(calibration))
+    config["vision"].update(
+        camera_backend="mock", detector="stub", responsibility_zone=False,
+        allow_placeholder_calibration=True,
+        calibration=str(calibration / "camera.yaml"),
+        pixels=[[640, 480, 0.9], [660, 480, 0.8]],
+    )
+    config["travel"] = {axis: [-500, 500] for axis in "xyz"}
+    config["scan"].update(mode="corners", corners=[[1, 0], [0, 0], [1, 0]], step_x=1, step_y=1, z=0)
+    return config
+
+
+def test_record_fixture_loads_without_tcp(tmp_path: Path) -> None:
+    from nest_clear.config import load_config
+    config = record_test_config(tmp_path)
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    loaded = load_config(path)
+    assert loaded.travel == ((-500., 500.),) * 3
+    assert loaded.scan.corners[0] == (1., 0.)
+    assert Path(loaded.vision.calibration).is_file()
+
+
+
+def test_record_fixture_starts_application_without_tcp(tmp_path: Path, monkeypatch) -> None:
+    from nest_clear.config import load_config
+    from nest_clear.main import Application
+
+    class MemoryIO:
+        def __init__(self, *args):
+            self.registers = {}
+        def read_u16(self, address):
+            return self.registers.get(address, 0)
+        def write_u16(self, address, value):
+            self.registers[address] = value
+        def write(self, name, value):
+            self.registers[name] = value
+        def close(self):
+            pass
+
+    config = record_test_config(tmp_path)
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr("nest_clear.main.PLCClient", MemoryIO)
+    app = Application(load_config(path), path)
+    try:
+        assert app.path[0] == (1., 0., 0.)
+        assert app.events.calibration_placeholder
+    finally:
+        app.close()
+
+
 def test_real_supervisor_child_tray(tmp_path: Path) -> None:
     """模拟 PLC 驱动真实父子进程完成一盘，并验证日报。"""
     import subprocess
 
-    config = yaml.safe_load((ROOT / "config/nest_clear.yaml").read_text())
+    config = record_test_config(tmp_path)
     with FakePLC() as plc:
         config["plc"].update(ip=plc.host, port=plc.port, timeout_s=1)
-        config["record"]["directory"] = str(tmp_path / "runs")
-        config["tool_calibration"]["enabled"] = False
-        config["vision"].update(
-            camera_backend="mock",
-            detector="stub",
-            responsibility_zone=False,  # 本测试验证记录，不测试视野分配。
-            allow_placeholder_calibration=True,
-            calibration=str(ROOT / "config/calibration/camera.yaml"),
-            pixels=[[640, 480, 0.9], [660, 480, 0.8]],
-        )
-        config["scan"].update(mode="corners", corners=[[1, 0], [0, 0], [1, 0]], step_x=1, step_y=1, z=0)
         config["supervisor"].update(
             poll_s=0.02,
             watchdog_s=3,
@@ -127,20 +175,22 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
         )
         config_path = tmp_path / "config.yaml"
         config_path.write_text(yaml.safe_dump(config))
+        stderr_path = tmp_path / "supervisor-stderr.log"
+        stderr_file = stderr_path.open("w+")
         process = subprocess.Popen(
             [sys.executable, "-m", "nest_clear.supervisor", "--config", str(config_path)],
             cwd=ROOT,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_file,
         )
         try:
             plc.set_status(128)
             alive = tmp_path / "runs/main.alive"
             deadline = time.monotonic() + 15
             while not alive.exists() and time.monotonic() < deadline:
-                assert process.poll() is None
+                assert process.poll() is None, stderr_path.read_text()
                 time.sleep(0.05)
-            assert alive.exists()
+            assert alive.exists(), stderr_path.read_text()
             assert plc.drive_tray(timeout_s=8)[-1]["func_code"] == 9
             deadline = time.monotonic() + 5
             while not list((tmp_path / "runs").glob("*/*/summary.jsonl")) and time.monotonic() < deadline:
@@ -161,7 +211,7 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
             plc.set_status(128)
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
-                assert process.poll() is None
+                assert process.poll() is None, stderr_path.read_text()
                 events = [json.loads(line) for line in events_path.read_text().splitlines()]
                 starts = [row["child_pid"] for row in events if row["event"] == "child_start"]
                 if len(starts) >= 2 and plc.io.read("algorithm_ready") == 1:
@@ -206,6 +256,7 @@ def test_real_supervisor_child_tray(tmp_path: Path) -> None:
         finally:
             process.send_signal(__import__("signal").SIGINT)
             process.wait(timeout=10)
+            stderr_file.close()
 
 
 def test_recover_interrupted_checkpoint(tmp_path: Path) -> None:

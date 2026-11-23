@@ -274,7 +274,6 @@ class App:
             logger.warning(FONT_WARNING)
             banner = tk.Label(self.root, text=FONT_WARNING, bg='#fef0c7', fg='#7a4b00', font=self.theme.status, anchor='w', padx=8, pady=4)
             banner.grid(row=0, column=0, sticky='ew', padx=6, pady=(4, 0))
-        self.commtest_banner = tk.Label(self.root, text='通信联调模式：下发坐标为假点', bg='#b00020', fg='white', font=self.theme.title, padx=8, pady=4)
         self.tail = EventTail(root); self.pictures = []; self.cache = {}; self.events = []; self.files = {}
         self.last_mode = read_json(main_status_file(self.directory)).get('mode') if page is not None else None
         self.build_status()
@@ -1147,8 +1146,6 @@ class App:
             self.last_mode = mode
             page = page_for_mode(main)
             if page is not None: self.select_page(page)
-        if main.get('run_mode') == 'commtest': self.commtest_banner.grid(row=0, column=0, sticky='ew')
-        elif hasattr(self.commtest_banner, 'grid_remove'): self.commtest_banner.grid_remove()
         for name, (color, value) in status_indicators(supervisor, main).items():
             dot, label = self.lights[name]; dot.config(fg=COLORS[color]); label.config(text=str(value))
         for label, item in zip(self.bits, decode_status(supervisor.get('word'))):

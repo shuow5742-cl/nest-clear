@@ -191,7 +191,7 @@ bit7 初始化中 bit8 初始化完成 bit9 信息提示 bit10 一般报警 bit1
 
 `config/tooltip_baseline.yaml` 的 `baseline_ui` 设置主相机目标（默认图像中心）、容许半径 0.05 mm 和两相机比例（默认 15.2 μm/px，8 mm 镜头估算值待实测）。主视图实时标记与偏差只作辅助。按对刀基准时，两视图均需识别及清晰度合格，主针尖在圆内；按工具偏移标定的稳定采样参数读取实时 XYZ，稳定后均值为 P0。人工点选可替换两视图针尖，辅助重设只修改辅助点。
 
-覆盖前显示新旧时间、P0、像素和差值；保存时绑定 `tools.yaml` 当时的补偿，备份到 `history/`，清除该工具 `tool_offset.yaml` 的 `baseline_stale`。生产与联调分别使用各自配置的标定目录；会话原图和记录保存在运行目录 `baseline/`。界面保存的雅可比为 null，`jacobian_pending: true`；首次换针对刀时自动探测并保存雅可比，已有雅可比直接对准。原有含雅可比的基准及命令行工具保留。
+覆盖前显示新旧时间、P0、像素和差值；保存时绑定 `tools.yaml` 当时的补偿，备份到 `history/`，清除该工具 `tool_offset.yaml` 的 `baseline_stale`。使用配置的标定目录；会话原图和记录保存在运行目录 `baseline/`。界面保存的雅可比为 null，`jacobian_pending: true`；首次换针对刀时自动探测并保存雅可比，已有雅可比直接对准。原有含雅可比的基准及命令行工具保留。
 
 ## 相机标定模式
 
@@ -213,7 +213,7 @@ PLC 在空闲发送 40904=80。算法读取 40911/40913/40915 实时 XYZ，与�
 
 95 到位检查和人工工具到位都在 `settle_window_s` 内采集 `settle_samples` 次实时 XYZ，逐轴极差不大于 `jitter_tol_mm` 才取均值；最多三轮。95 不稳或与目标逐轴差超过 `camera_calibration.position_tolerance_mm` 回 999；工具到位不稳时保持请求未应答并等待重新按键。无会话收到 95、会话中错序 90、其他工作模式收到 90/95、起始坐标未配置、相机标定不存在、到位超差均回 999 并结束会话。PLC 初始化或急停沿用 request_abandoned。
 
-确认窗口展示新旧结果、差值和 `tools.yaml` 当前 XY；不保存或放弃回 92。覆盖保存将旧文件备份到 `history/`，写入 `tool_offset.yaml` 的本工具结果并保留另一把，同时将 `tools.yaml` 的本工具 XY 替换为新补偿，保留 Z 并热更新。结果包括样本、标准差、标准误、边缘结果、相机文件 SHA-256、commit、时间及 `baseline_stale: true`。这把工具的对刀基准不会自动修改，换针对刀前需重建基准。生产使用 `config/calibration/`，联调使用 `config/commtest_calibration/`。
+确认窗口展示新旧结果、差值和 `tools.yaml` 当前 XY；不保存或放弃回 92。覆盖保存将旧文件备份到 `history/`，写入 `tool_offset.yaml` 的本工具结果并保留另一把，同时将 `tools.yaml` 的本工具 XY 替换为新补偿，保留 Z 并热更新。结果包括样本、标准差、标准误、边缘结果、相机文件 SHA-256、commit、时间及 `baseline_stale: true`。这把工具的对刀基准不会自动修改，换针对刀前需重建基准。标定文件使用 `config/calibration/`。
 
 界面命令文件为记录目录的 `live/command.json`，原子写入 `{seq, command, params, time}`；命令名为 `select_tool_and_start`（tool、mode）、`tool_in_place`、`confirm_overwrite`（accept）、`abort`。主程序按 seq 去重，在 `state/main_status.json` 的 `command_seq` 回执；非等待态命令忽略并记事件。行为树持续 tick，等待不阻塞心跳。原图、识别、阶段、请求、应答、命令和会话记录写入运行目录。
 

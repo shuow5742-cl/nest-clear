@@ -126,9 +126,6 @@ class WorkRequest(Instant):
                 fields.setdefault("request_func", bb.read("request_func"))
                 fields.setdefault("xid", getattr(self.ctx.events, "xid", 0))
                 self.ctx.events.emit(event, **fields)
-            if getattr(self.ctx.config, "run_mode", "production") == "commtest":
-                from nest_clear.commtest import coordinates
-                fine_coord, pick_coords = coordinates(self.ctx.config)
             cycle = WorkCycle(self.ctx.path, fine_coord, pick_coords, self.ctx.config.vision,
                               record=record, tray=getattr(self.ctx.events, "tray_id", None) or "0000")
             self.ctx.events.active_cycle = cycle

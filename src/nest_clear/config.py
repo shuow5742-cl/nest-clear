@@ -138,8 +138,6 @@ class Config:
     machine_id: str = "M01"
     camera_calibration: dict[str, Any] = field(default_factory=dict)
     ui: UIConfig = field(default_factory=UIConfig)
-    run_mode: str = "production"
-    commtest: dict[str, Any] = field(default_factory=dict)
     ui_preview: dict[str, Any] = field(default_factory=dict)
     tool_offset: dict[str, Any] = field(default_factory=dict)
     pick_accuracy: dict[str, Any] = field(default_factory=dict)
@@ -319,13 +317,15 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "CONFIG-LOAD", f"无法读取配置：{exc}", str(path), "检查文件路径和 YAML 格式。"
         ) from exc
     if isinstance(data, dict):
-        data = {"pick_accuracy": {}, "tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, "run_mode": "production", "commtest": None, **data}
+        if data.get("run_mode") == "commtest":
+            _fail("run_mode", "通信联调模式已删除，请改用 config/nest_clear.yaml")
+        if data.get("run_mode") == "production":
+            data.pop("run_mode")
+        data = {"pick_accuracy": {}, "tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, **data}
     root = _mapping(
         data,
         "根",
         [
-            "run_mode",
-            "commtest",
             "plc",
             "scan",
             "arrival_tolerance_mm",
@@ -343,25 +343,6 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "ui",
         ],
     )
-    mode = root["run_mode"]
-    if mode not in ("production", "commtest"):
-        _fail("run_mode", "应为 production 或 commtest")
-    ct = root["commtest"]
-    if mode == "commtest":
-        ct = _mapping(ct, "commtest", ["scenario", "seed", "camcal_travel"])
-        bounds = _mapping(ct["camcal_travel"], "commtest.camcal_travel", ["x", "y", "z"])
-        ct["camcal_travel"] = tuple(_vector(bounds[a], f"commtest.camcal_travel.{a}", 2) for a in "xyz")
-        for axis, (lo, hi) in zip("xyz", ct["camcal_travel"]):
-            if lo >= hi:
-                _fail(f"commtest.camcal_travel.{axis}", "最小值必须小于最大值")
-            if axis in "xy":
-                safe = (80, 180) if axis == "x" else (-10, 150)
-                if lo < safe[0] or hi > safe[1]:
-                    _fail(f"commtest.camcal_travel.{axis}", f"必须在安全范围 {safe} 内")
-        if ct["scenario"] not in ("normal", "tool_change", "fine_fail", "mixed") or type(ct["seed"]) is not int:
-            _fail("commtest", "场景或随机种子无效")
-    elif ct is not None:
-        _fail("commtest", "仅联调模式可配置 commtest")
     from nest_clear.tooloffset.session import DEFAULTS as offset_defaults
     if not isinstance(root["tool_offset"], dict):
         _fail("tool_offset", "应为映射")
@@ -378,10 +359,6 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             _fail("tool_offset." + key, "须为 T00–T31 列表")
     camcal = _camera_calibration(root["camera_calibration"])
     start = camcal.get("start_xyz")
-    if mode == "commtest" and start is not None and any(
-        not lo <= value <= hi for value, (lo, hi) in zip(start, ct["camcal_travel"])
-    ):
-        _fail("camera_calibration.start_xyz", "必须在 commtest.camcal_travel 范围内")
     plc_data = root["plc"]
     if isinstance(plc_data, dict):
         for key in ("stall_warn_s", "comm_fail_timeout_s"):
@@ -404,10 +381,10 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     t = _mapping(root["travel"], "travel", ["x", "y", "z"])
     travel = tuple(_vector(t[axis], f"travel.{axis}", 2) for axis in "xyz")
     for axis, bounds in zip("xyz", travel):
-        if bounds[0] > bounds[1] or (bounds[0] == bounds[1] and not (mode == "commtest" and axis == "z")):
+        if bounds[0] >= bounds[1]:
             _fail(f"travel.{axis}", "最小值必须小于最大值")
-    if mode == "commtest" and any(lo < safe[0] or hi > safe[1] for (lo, hi), safe in zip(travel, ((80,180),(-10,150),(0,0)))):
-        _fail("travel", "通信联调行程超出安全范围")
+    if start is not None and any(not lo <= value <= hi for value, (lo, hi) in zip(start, travel)):
+        _fail("camera_calibration.start_xyz", "必须在 travel 范围内")
     scan_data = {"mode": "corners", "tray": {"origin_xy": [0, 0], "size_mm": [182.7, 171.8], "x_direction": -1, "y_direction": 1}, "fov_mm": None, "min_overlap_mm": 20, **root["scan"]}
     s = _mapping(scan_data, "scan", ["corners", "step_x", "step_y", "z", "mode", "tray", "fov_mm", "min_overlap_mm"])
     if s["mode"] not in ("corners", "tray"):
@@ -436,8 +413,6 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _number(s["min_overlap_mm"], "scan.min_overlap_mm"), tray["x_direction"], tray["y_direction"]
     )
     camera = _mapping({"capture_timeout_s": 3.0, "exposure_us": None, "gain_db": None, "balance_ratio": None, "image_size": [4024, 3036], **root["camera"]}, "camera", ["sn", "capture_timeout_s", "exposure_us", "gain_db", "balance_ratio", "image_size"])
-    if camera["sn"] == "auto" and mode != "commtest":
-        _fail("camera.sn", "生产模式必须指定相机序列号，不能使用 auto")
     image_size = camera["image_size"]
     if not isinstance(image_size, (list, tuple)) or len(image_size) != 2 or any(type(n) is not int or n <= 0 for n in image_size):
         _fail("camera.image_size", "必须为 [宽, 高] 两个正整数")
@@ -690,5 +665,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _string(record["machine_id"], "record.machine_id"),
         camcal,
         UIConfig(**ui_data),
-        mode, ct or {}, preview_data, offset, accuracy, str(exposure_path), exposure_source,
+        preview_data, offset, accuracy, str(exposure_path), exposure_source,
     )

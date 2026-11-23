@@ -7,4 +7,4 @@
 5. 成功后按【保存基准】，检查新旧时间、P0 和两视图针尖以及差值，选择【覆盖保存】。选择【不保存】回到可重试状态。
 6. 保存成功后，请电气人员在 PLC 侧记录当前坐标为对应工具对刀基准位置。按【结束/放弃】关闭两台板卡相机。PLC 在会话中发出的功能码均回 999，须先在界面结束。
 
-本次建立的基准不含雅可比，换针对刀方案尚待确定，100/101 将回 131。保存路径由运行配置的 `tool_calibration.directory` 指定：生产为 `config/calibration/`，通信联调为 `config/commtest_calibration/`；旧文件备份到同目录 `history/`。原图、事件与 `session_record.json` 在本次运行的 `baseline/` 目录中。算法不向 PLC 写基准或运动地址。
+本次建立的基准不含雅可比，换针对刀方案尚待确定，100/101 将回 131。保存路径由运行配置的 `tool_calibration.directory` 指定：使用 `config/calibration/`；旧文件备份到同目录 `history/`。原图、事件与 `session_record.json` 在本次运行的 `baseline/` 目录中。算法不向 PLC 写基准或运动地址。

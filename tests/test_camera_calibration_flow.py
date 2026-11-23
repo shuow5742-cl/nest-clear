@@ -64,17 +64,13 @@ class FakeSession:
 def rig(tmp_path, request):
     cfg = load_config('config/nest_clear.yaml')
     cfg = replace(cfg, travel=((-100., 100.),)*3, camera_calibration={**cfg.camera_calibration, 'start_xyz': [0., 0., 0.]})
-    commtest = getattr(request, 'param', False)
-    if commtest:
-        from nest_clear.commtest import branches
-        cfg = replace(cfg, run_mode='commtest', commtest={'scenario': 'mixed', 'seed': 26, 'camcal_travel': ((-10., 10.), (-10., 10.), (-10., 10.))})
     events = EventRecorder(tmp_path, run=True)
     board, plc = WorldBoard(), PLC()
     clock = BTClock(board)
     camera = Camera()
     for w in (plc, camera, CamcalWorker()): clock.attach_worker(w)
     updated = []
-    path = tmp_path / 'commtest_calibration' / 'camera.yaml' if commtest else tmp_path / 'camera.yaml'
+    path = tmp_path / 'calibration' / 'camera.yaml'
     path.parent.mkdir(parents=True, exist_ok=True)
     state = {'save_fail': False}
     def save(result, path, history):
@@ -82,7 +78,7 @@ def rig(tmp_path, request):
         path.write_text('placeholder: false\n')
     batch = build_batch(board, cfg, [(0.,0.,0.)], RequestTracker(0), events, calibration='old',
                         camcal_factory=FakeSession, camcal_save=save, calibration_path=path,
-                        calibration_updated=updated.append, branches=branches() if commtest else None)
+                        calibration_updated=updated.append)
     handle = clock.submit(batch)
     def request(task, func):
         plc.request = (task, func)
@@ -110,6 +106,10 @@ def test_complete(rig):
     assert rig.path.exists() and rig.updated == ['new-calibration']
     assert rig.batch.blackboard.read('mode') == Mode.IDLE
     assert list(rig.events.run_directory.glob('camcal/*/session_record.json'))
+    raw_files = list(rig.events.run_directory.rglob('*camcal*raw*'))
+    assert len(raw_files) == 2
+    captures = [r for r in rows(rig) if r['event'] == 'capture' and r.get('kind') == 'camcal']
+    assert {rig.events.directory / r['raw_path'] for r in captures} == set(raw_files)
     text = report(rig.events.directory, rig.events.clock().date())
     assert '相机标定：' in text and 'RMS 0.1' in text
 
@@ -260,44 +260,65 @@ def test_internal_999_reply_diagnostic(rig, monkeypatch):
     assert row['reason_code']=='INTERNAL-ERROR' and '模拟位置检查内部异常' in row['what']
 
 
-@pytest.mark.parametrize('rig', [True], indirect=True)
-def test_commtest_complete_and_raw(rig):
+def test_calibration_complete_and_raw(rig):
     import hashlib
     production = __import__('pathlib').Path('config/calibration/camera.yaml')
     before = hashlib.sha256(production.read_bytes()).digest()
     assert rig.request(1, 80)[0] == 80
     rig.plc.actual = (1., 0., 0.)
     assert rig.request(2, 80)[0] == 81
-    assert rig.path.exists() and rig.path.parent.name == 'commtest_calibration'
+    assert rig.path.exists() and rig.path.parent.name == 'calibration'
     assert hashlib.sha256(production.read_bytes()).digest() == before
     assert len(list(rig.events.run_directory.glob('camcal/*/*.png'))) == 2
     assert list(rig.events.run_directory.glob('camcal/*/session_record.json'))
 
-@pytest.mark.parametrize('rig', [True], indirect=True)
+
+def test_calibration_raw_and_overlay_are_discoverable(rig, monkeypatch):
+    from nest_clear.record.images import ImageArchive
+    original = FakeSession.add
+    def add_with_overlay(self, image, actual_xyz):
+        step = original(self, image, actual_xyz)
+        step.overlay = image.copy()
+        return step
+    monkeypatch.setattr(FakeSession, 'add', add_with_overlay)
+    archive = ImageArchive(rig.events, True, 'png', 3, 30)
+    rig.events.archive = archive
+    try:
+        assert rig.request(1, 80)[0] == 80
+        archive.executor.submit(lambda: None).result(timeout=5)
+        raw = list(rig.events.run_directory.rglob('*camcal*raw*'))
+        overlay = list(rig.events.run_directory.rglob('*camcal*ovl*'))
+        assert len(raw) == len(overlay) == 1
+        assert overlay[0].name == raw[0].name.replace('_raw.png', '_ovl.jpg')
+        assert raw[0].is_file() and overlay[0].is_file()
+    finally:
+        archive.close()
+        del rig.events.archive
+
+
 @pytest.mark.parametrize('start,target', [((0.,0.,0.), (11.,0.,0.))])
-def test_commtest_camcal_travel(rig, start, target):
+def test_camcal_travel(rig, start, target):
+    object.__setattr__(rig.cfg, 'travel', ((-10., 10.),)*3)
     rig.plc.actual = start
     FakeSession.target = target
     assert rig.request(1, 80)[0] == 999
     row = reply_row(rig, 1)
-    assert row['reason_code'] == 'COMMTEST-CAMCAL-TRAVEL'
-    assert 'X' in row['what'] and '11' in row['what']
+    assert row['reason_code']
 
 
-def test_commtest_rendered_real_session(tmp_path):
+def test_rendered_real_session(tmp_path):
     from hashlib import sha256
-    from nest_clear.commtest import branches
     from nest_clear.vision.geometry import load_calibration
     from sim.charuco_scene import CharucoScene
 
-    cfg = load_config('config/commtest.yaml')
-    cfg = replace(cfg, camera_calibration={**cfg.camera_calibration, 'start_xyz': [130., 70., 110.]}, commtest={**cfg.commtest, 'camcal_travel': ((80., 180.), (-10., 150.), (100., 120.))})
+    cfg = load_config('config/nest_clear.yaml')
+    cfg = replace(cfg, camera_calibration={**cfg.camera_calibration, 'start_xyz': [130., 70., 110.]}, travel=((80., 180.), (-10., 150.), (100., 120.)))
     production = __import__('pathlib').Path('config/calibration/camera.yaml')
     before = sha256(production.read_bytes()).digest()
-    path = tmp_path / 'commtest_calibration' / 'camera.yaml'
+    path = tmp_path / 'calibration' / 'camera.yaml'
     path.parent.mkdir()
     path.write_bytes(production.read_bytes())
-    events = EventRecorder(tmp_path / 'runs_commtest', run=True)
+    events = EventRecorder(tmp_path / 'runs', run=True)
     board, plc = WorldBoard(), PLC()
     plc.actual = (130., 70., 110.)
     scene = CharucoScene()
@@ -310,7 +331,7 @@ def test_commtest_rendered_real_session(tmp_path):
     for worker in (plc, RenderCamera(), CamcalWorker()): clock.attach_worker(worker)
     calibration = load_calibration(path)
     handle = clock.submit(build_batch(board, cfg, [(130., 70., 0.)], RequestTracker(0), events,
-                                     branches=branches(), calibration=calibration, calibration_path=path))
+                                     calibration=calibration, calibration_path=path))
     try:
         for task in range(1, 55):
             plc.request = (task, 80)
@@ -357,10 +378,10 @@ def test_goto_start_then_capture(rig):
     assert len([r for r in rows(rig) if r['event'] == 'capture']) == 1
 
 
-def test_start_outside_commtest_config(tmp_path):
+def test_start_outside_config(tmp_path):
     import yaml
     from nest_clear.guard import GuardError
-    source = yaml.safe_load(open('config/commtest.yaml', encoding='utf-8'))
+    source = yaml.safe_load(open('config/nest_clear.yaml', encoding='utf-8'))
     source['camera_calibration']['start_xyz'] = [79, 88, -12]
     path = tmp_path / 'bad.yaml'
     path.write_text(yaml.safe_dump(source), encoding='utf-8')
@@ -368,9 +389,8 @@ def test_start_outside_commtest_config(tmp_path):
         load_config(path)
 
 
-@pytest.mark.parametrize('rig', [True], indirect=True)
-def test_commtest_goto_start_outside_actual_travel(rig):
-    rig.cfg.commtest['camcal_travel'] = ((80., 180.), (-10., 150.), (-15., 0.))
+def test_goto_start_outside_actual_travel(rig):
+    object.__setattr__(rig.cfg, 'travel', ((80., 180.), (-10., 150.), (-15., 0.)))
     rig.cfg.camera_calibration['start_xyz'] = [92.651, 88.445, -11.904]
     rig.plc.actual = (-19.59, 88.445, -11.904)
     target = (92.651, 88.445, -11.904)

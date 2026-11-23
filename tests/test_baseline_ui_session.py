@@ -218,10 +218,10 @@ def test_command_reader_rejects_baseline_start_during_calibration(tmp_path):
     assert any('忽略' in data.get('message', '') for event, data in events.rows if event == 'baseline_state')
 
 
-def test_existing_baselines_notice_and_commtest_paths(tmp_path):
+def test_existing_baselines_notice_and_calibration_paths(tmp_path):
     from nest_clear.baseline.session import existing_baselines
 
-    cal = tmp_path / 'commtest_calibration'
+    cal = tmp_path / 'calibration'
     cal.mkdir()
     initialize_tools(cal / 'tools.yaml')
     save_tools(cal / 'tools.yaml', 1, [1.5, -0.5, 2.0], source='test')

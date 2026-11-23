@@ -34,6 +34,7 @@ def test_tray_grid_and_single():
     from nest_clear.config import load_config
     from nest_clear.plan.scan_path import scan_details
     cfg = load_config("config/nest_clear.yaml")
+    cfg = replace(cfg, scan=replace(cfg.scan, mode="tray"), travel=((-500., 500.),)*3)
     path = build_scan_path(cfg.scan, cfg.travel)
     detail = scan_details(cfg.scan, path)
     assert (detail["nx"], detail["ny"]) == (3, 3)
@@ -50,4 +51,4 @@ def test_tray_guard(changes):
     from nest_clear.config import load_config
     cfg = load_config("config/nest_clear.yaml")
     with pytest.raises(GuardError):
-        build_scan_path(replace(cfg.scan, **changes), cfg.travel)
+        build_scan_path(replace(cfg.scan, mode="tray", **changes), ((-500., 500.),)*3)

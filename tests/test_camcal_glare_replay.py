@@ -11,23 +11,24 @@ from nest_clear.camcal import CameraCalibConfig, CameraCalibrationSession
 from nest_clear.vision.geometry import load_calibration
 from test_camcal_core import CFG, rendered_board
 
-FIELD = Path('/home/shuow/nest-clear-field/20261122/runs_commtest/2026-11-22/190532_4708')
-SESSION = FIELD / 'camcal/20261122_190601_235331'
 
 
 def test_field_tenth_frame():
-    if not (SESSION / 's10_raw.png').exists():
+    import os
+    field = Path(os.environ.get('CAMCAL_FIELD_RUN', '/nonexistent'))
+    session_dir = field / 'camcal/20261122_190601_235331'
+    if not (session_dir / 's10_raw.png').exists():
         pytest.skip('现场图像不可用')
-    record = json.loads((SESSION / 'session_record.json').read_text())
-    config = yaml.safe_load(Path('/home/shuow/nest-clear-field/20261122/config/commtest.yaml').read_text())
+    record = json.loads((session_dir / 'session_record.json').read_text())
+    config = yaml.safe_load(Path('config/nest_clear.yaml').read_text())
     cfg = CameraCalibConfig(**config['camera_calibration'])
-    nominal = load_calibration('config/commtest_calibration/camera.yaml')
+    nominal = load_calibration('config/calibration/camera.yaml')
     session = CameraCalibrationSession(cfg, nominal, record['image_size'], record['start_xyz'])
     session._obs = record['observations'][:9]
     session._plan = record['plan']
-    events = [json.loads(line) for line in (FIELD / 'events.jsonl').read_text().splitlines()]
+    events = [json.loads(line) for line in (field / 'events.jsonl').read_text().splitlines()]
     event = next(e for e in events if e.get('event') == 'camcal_step' and e.get('sequence') == 10)
-    step = session.add(cv2.imread(str(SESSION / 's10_raw.png')), event['actual_xyz'])
+    step = session.add(cv2.imread(str(session_dir / 's10_raw.png')), event['actual_xyz'])
     assert step.kind == 'move', (step.code, step.reason)
     assert step.detail['detected_corners'] == 202
     assert step.detail['predicted_corners'] == 250
@@ -77,7 +78,7 @@ def test_worker_emits_warning_for_accepted_glare(tmp_path):
         def add(self, image, actual):
             return Step('move', detail={'glare_blobs': [{'bbox': [1, 2, 3, 4]}], 'glare_excluded_corners': 2})
     events = Events()
-    ctx = SimpleNamespace(events=events, config=SimpleNamespace(run_mode='test'))
+    ctx = SimpleNamespace(events=events, config=SimpleNamespace())
     session = {'shots': 0, 'target': (0, 0, 0), 'engine': Engine()}
     CamcalWorker().execute({'context': ctx, 'session': session, 'captured': np.zeros((4, 4), np.uint8),
                             'actual': (0, 0, 0), 'task_id': 1})
