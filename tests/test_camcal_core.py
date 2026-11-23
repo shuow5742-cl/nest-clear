@@ -208,7 +208,7 @@ def test_repeat_drift_measurement():
         row=record['observations'][index]; row['repeat']=True
         row['pixels']=(np.asarray(row['pixels'])+[displacement,0]).tolist()
     result=solve_offline(record,CFG,N,(4024,3036))
-    assert result.report['repeat_px'] > CFG.max_repeat_px
+    assert result.report['repeat_px'] > 0.5
 
 
 def run_synthetic_session(*, x_scale=1., z_scale=1., repeat_drift=0.):
@@ -258,6 +258,6 @@ def test_session_x_scale_failure():
 
 
 def test_session_third_repeat_drift_failure():
-    _, step = run_synthetic_session(repeat_drift=1.)
+    _, step = run_synthetic_session(repeat_drift=4.)
     assert step.kind == 'fail' and step.code == 'CAMCAL-REPEAT'
-    assert step.detail['repeat_px'] > .9
+    assert step.detail['repeat_shift_mm'] > step.detail['repeat_limit_mm']

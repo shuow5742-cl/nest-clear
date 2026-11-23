@@ -16,6 +16,7 @@ class CamcalWorker(AsyncRequestWorker):
         actual, task_id = payload['actual'], payload['task_id']
         session['shots'] += 1
         shot = f"s{session['shots']:02d}"
+        probe = session.get('probes', [None])[-1]
         seq, capture_id = ctx.events.next_capture()
         archive = getattr(ctx.events, 'archive', None)
         raw = None
@@ -57,7 +58,7 @@ class CamcalWorker(AsyncRequestWorker):
         # 叠加图已交给归档器，勿在请求结果缓存中保留整幅大图。
         step.overlay = None
         ctx.events.emit('camcal_step', task_id=task_id, sequence=session['shots'], target_xyz=step.target_xyz,
-                        actual_xyz=actual, detail=step.detail, raw_path=raw, kind=step.kind, code=step.code, reason=step.reason, plan=getattr(session["engine"], "plan", []))
+                        actual_xyz=actual, plc_actual_probe=probe, detail=step.detail, raw_path=raw, kind=step.kind, code=step.code, reason=step.reason, plan=getattr(session["engine"], "plan", []))
         if step.kind in ('move', 'done') and step.detail.get('glare_blobs'):
             ctx.events.emit('camcal_glare_warning', task_id=task_id, sequence=session['shots'],
                             image_index=session['shots'], bboxes=[b['bbox'] for b in step.detail['glare_blobs']],

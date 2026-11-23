@@ -1242,6 +1242,7 @@ class App:
         elif done:
             report = data.get('report') if isinstance(data.get('report'), dict) else detail
             text = (f"标定成功  RMS：{report.get('rms_px', '—')} px\n"
+                    f"中心重拍：{report.get('repeat_shift_mm', '—')} mm / 上限 {report.get('repeat_limit_mm', '—')} mm\n"
                     f"主点尺度：{report.get('um_per_px_at_principal', '—')} µm/px  "
                     f"轴比例：{report.get('axis_scale', '—')}\n倾角：{report.get('camera_tilt_deg', '—')}°\n"
                     f"文件：{data.get('calibration_path') or '—'}  备份：{data.get('backup_path') or '—'}")

@@ -1,5 +1,6 @@
 """以握手原语执行 PLC 请求、实时坐标读取和应答。"""
 import logging
+import time
 from typing import Any
 
 from nest_clear.comm import Handshake
@@ -48,6 +49,13 @@ class PlcWorker(AsyncRequestWorker):
             return self.handshake.read_request()
         if operation == "actual":
             return self.handshake.io.read_real32_block(self.handshake.contract["actual_x"].address, 3)
+        if operation == "actual_probe":
+            samples = []
+            for index in range(payload.get("count", 1)):
+                if index: time.sleep(0.02)
+                xyz, words = self.handshake.io.read_real32_block_with_words(self.handshake.contract["actual_x"].address, 3)
+                samples.append({"xyz": xyz, "words": words})
+            return samples
         if operation == "calibration_final":
             name = f"calibration{payload['tool']}_feedback_x"
             return self.handshake.io.read_real32_block(self.handshake.contract[name].address, 3)

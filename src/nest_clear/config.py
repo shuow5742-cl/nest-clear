@@ -275,7 +275,7 @@ def _camera_calibration(data: Any) -> dict[str, Any]:
     fractions = {"min_corner_ratio", "max_saturated_fraction", "min_coverage", "max_axis_scale_error"}
     numbers = {"square_mm", "marker_mm", "board_thickness_mm", "xy_limit_mm", "z_limit_mm",
                "grid_half_mm", "z_outer_mm", "z_inner_mm", "position_tolerance_mm", "max_rms_px",
-               "max_image_rms_px", "max_repeat_px"} | fractions
+               "max_image_rms_px", "max_repeat_px", "module_repeatability_mm", "repeat_drift_margin_mm"} | fractions
     allowed = integers | numbers | {"dictionary", "start_xyz", "glare_corner_margin_px"}
     if not isinstance(data, dict):
         _fail("camera_calibration", "应为映射")
@@ -296,7 +296,7 @@ def _camera_calibration(data: Any) -> dict[str, Any]:
                 _fail(path, "整数超出允许范围")
         else:
             n = _number(value, path)
-            nonnegative = {"board_thickness_mm", "max_saturated_fraction", "max_axis_scale_error"}
+            nonnegative = {"board_thickness_mm", "max_saturated_fraction", "max_axis_scale_error", "module_repeatability_mm", "repeat_drift_margin_mm"}
             if n < 0 or (n == 0 and key not in nonnegative) or (key in fractions and n > 1):
                 _fail(path, "应为正数" + ("且不超过 1" if key in fractions else ""))
     defaults = {"square_mm": 5.0, "marker_mm": 3.75, "xy_limit_mm": 25.0,

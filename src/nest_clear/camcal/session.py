@@ -133,12 +133,30 @@ def solve_offline(session_record, cfg, nominal, image_size):
     cells = set()
     for u,v in pixels:
         if 0 <= u < image_size[0] and 0 <= v < image_size[1]: cells.add((min(7,int(u*8/image_size[0])),min(5,int(v*6/image_size[1]))))
-    repeats = [o for o in obs if o.get('repeat', False)]
+    repeats = [(i + 1, o) for i, o in enumerate(obs) if o.get('repeat', False)]
     shifts = []
-    for a,b in zip(repeats,repeats[1:]):
+    pairs = []
+    for (ia, a), (ib, b) in zip(repeats,repeats[1:]):
         aa = dict(zip(a['ids'],a['pixels'])); bb = dict(zip(b['ids'],b['pixels']))
         distances = [np.linalg.norm(np.asarray(aa[i])-bb[i]) for i in aa.keys() & bb.keys()]
-        if distances: shifts.append(float(np.mean(distances)))
+        if distances:
+            shift = float(np.mean(distances)); shifts.append(shift)
+            common = sorted(aa.keys() & bb.keys())
+            delta = np.asarray(b['actual_xyz']) - np.asarray(a['actual_xyz'])
+            pair = {'sequences': [ia, ib], 'repeat_px': shift,
+                    'repeat_plc_delta_mm': float(np.linalg.norm(delta[:2])), 'repeat_residual_px': None,
+                    'repeat_residual_reason': None}
+            try:
+                points = board_points[common] @ rb.T + t
+                def project(pose):
+                    pc = (points - np.asarray(pose)) @ r
+                    if np.any(pc[:, 2] <= 0): raise ValueError('角点位于相机后方')
+                    return cv2.projectPoints(pc, np.zeros(3), np.zeros(3), k, p[4:9])[0].reshape(-1, 2)
+                measured = np.asarray([bb[i] for i in common]) - np.asarray([aa[i] for i in common])
+                pair['repeat_residual_px'] = float(np.mean(np.linalg.norm(measured - (project(b['actual_xyz']) - project(a['actual_xyz'])), axis=1)))
+            except (ValueError, cv2.error, FloatingPointError) as exc:
+                pair['repeat_residual_reason'] = str(exc)
+            pairs.append(pair)
     repeat = max(shifts, default=0.)
     try:
         cov = np.linalg.pinv(fit.jac.T @ fit.jac, rcond=1e-15) * (np.dot(fit.fun, fit.fun) / max(1, len(fit.fun)-len(p)))
@@ -161,6 +179,13 @@ def solve_offline(session_record, cfg, nominal, image_size):
     center = np.asarray(pixel_to_module(p[2], p[3], tuple(origin), cal)); dx = np.asarray(pixel_to_module(p[2]+1,p[3],tuple(origin),cal)); dy = np.asarray(pixel_to_module(p[2],p[3]+1,tuple(origin),cal))
     tilt = lambda n: float(np.degrees(np.arccos(np.clip(abs(n[2])/np.linalg.norm(n),0,1))))
     report = {'rms_px':rms, 'per_image_rms':per, 'axis_scale':{'x':float(diag.x[18]), 'y':float(diag.x[19]), 'z':'不可观测（与焦距/距离耦合），未检查'}, 'axis_scale_note':'Z 比例误差影响相机高度和工作平面绝对 Z 的估计；在标定工作平面上不影响像素到毫米的 XY 换算。', 'param_std':param_std, 'coverage':len(cells)/48, 'repeat_px':repeat, 'um_per_px_at_principal':float(500*(np.linalg.norm(dx-center)+np.linalg.norm(dy-center))), 'focus_z':float(origin[2]), 'n_images':len(obs), 'board_tilt_deg':tilt(normal), 'camera_tilt_deg':tilt(r[:,2])}
+    scale = report['um_per_px_at_principal'] / 1000
+    for pair in pairs: pair['repeat_shift_mm'] = pair['repeat_px'] * scale
+    worst = max(pairs, key=lambda item: item['repeat_px'], default=None)
+    report.update(repeat_shift_mm=repeat * scale, repeat_limit_mm=2 * cfg.module_repeatability_mm + cfg.repeat_drift_margin_mm,
+                  repeat_plc_delta_mm=worst['repeat_plc_delta_mm'] if worst else None,
+                  repeat_residual_px=worst['repeat_residual_px'] if worst else None,
+                  repeat_residual_reason=worst['repeat_residual_reason'] if worst else '没有共同角点的重拍对', repeat_pairs=pairs)
     return CalibResult(cal, report)
 
 def save_calibration(result, path, history_dir):
@@ -317,9 +342,10 @@ class CameraCalibrationSession:
         try: result=solve_offline(self.session_record(),cfg,self.nominal,self.image_size)
         except (ValueError,cv2.error,np.linalg.LinAlgError) as exc: return self._fail('CAMCAL-SOLVE',f'标定求解失败：{exc}；请检查图像与运动。',detail,overlay)
         report=result.report
-        checks=[('CAMCAL-REPEAT',report['repeat_px'],cfg.max_repeat_px,'中心重拍位移')]
-        for code,value,limit,label in checks:
-            if value>limit: return self._fail(code,f'{label} {value:.4f}px 超过 {limit:.4f}px；请检查漂移、松动或图像质量。',report,overlay)
+        if report['repeat_shift_mm'] > report['repeat_limit_mm']:
+            delta = report.get('repeat_plc_delta_mm')
+            plc = f'{delta:.4f}' if delta is not None else '未知'
+            return self._fail('CAMCAL-REPEAT', f"中心重拍位移 {report['repeat_px']:.4f}px（{report['repeat_shift_mm']:.4f}mm）超过上限 {report['repeat_limit_mm']:.4f}mm（2 × {cfg.module_repeatability_mm:.4f} + {cfg.repeat_drift_margin_mm:.4f}mm）；PLC 返回坐标差 {plc}mm；请检查模组重复定位/松动/板或相机漂移。", report, overlay)
         if report['coverage']<cfg.min_coverage: return self._fail('CAMCAL-COVERAGE',f'画面覆盖率 {report["coverage"]:.1%} 低于 {cfg.min_coverage:.1%}；请检查视野。',report,overlay)
         for axis in ('x', 'y'):
             scale = report['axis_scale'][axis]

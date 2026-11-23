@@ -30,6 +30,7 @@ class PLC(AsyncRequestWorker):
         op = payload['operation']
         if op == 'request': return self.request
         if op == 'actual': return self.actual
+        if op == 'actual_probe': return [{'xyz': list(self.actual), 'words': [0]*6} for _ in range(payload.get('count', 1))]
         if op == 'reply': self.replies[payload['task_id']] = (payload['func'], payload['coordinates'])
 
 
@@ -175,6 +176,11 @@ def test_capture_failure(rig):
     assert rig.request(1, 80)[0] == 82
     assert rig.batch.blackboard.read('mode') == Mode.IDLE
     assert any(r['event'] == 'camcal_failed' and '采图失败' in r['reason'] for r in rows(rig))
+    record = next(rig.events.run_directory.glob('camcal/*/session_record.json'))
+    assert json.loads(record.read_text())['observations'] == []
+    summary = json.loads((record.parent / 'plc_actual_summary.json').read_text())
+    assert len(summary['shots']) == 1
+    assert len(json.loads((record.parent / 's01_plc_actual.json').read_text())['before']) == 5
 
 
 def test_save_failure(rig):

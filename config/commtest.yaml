@@ -191,7 +191,9 @@ camera_calibration:
   glare_blob_min_px: 2000
   max_rms_px: 0.25
   max_image_rms_px: 0.5
-  max_repeat_px: 0.5
+  module_repeatability_mm: 0.02  # 按模组规格填，待用户确认（单向 ± 值）
+  repeat_drift_margin_mm: 0.01  # 漂移及检测噪声余量
+  # max_repeat_px 为旧配置兼容字段，不再参与判定
   max_axis_scale_error: 0.002
   min_coverage: 0.9
 run_mode: commtest

@@ -107,8 +107,12 @@ class PLCClient(RegisterIO):
 
     def read_real32_block(self, start: int, count: int) -> list[float]:
         """读取连续 REAL32 并按 CDAB 解码，供实时坐标使用。"""
-        words = self._call(start, "read_holding_registers", count=count * 2).registers
-        return [decode_real32(words[index:index + 2]) for index in range(0, len(words), 2)]
+        return self.read_real32_block_with_words(start, count)[0]
+
+    def read_real32_block_with_words(self, start: int, count: int):
+        """一次只读事务同时返回解码值及对应的原始寄存器字。"""
+        words = list(self._call(start, "read_holding_registers", count=count * 2).registers)
+        return [decode_real32(words[index:index + 2]) for index in range(0, len(words), 2)], words
 
     def write_real32_block(self, start: int, values: Sequence[float]) -> None:
         """将连续坐标编码后一次写入，避免一组坐标拆散传输。"""

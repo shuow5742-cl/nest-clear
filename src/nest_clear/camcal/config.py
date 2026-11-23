@@ -23,6 +23,8 @@ class CameraCalibConfig:
     glare_min_lost_corners: int = 2
     max_rms_px: float = 0.25
     max_image_rms_px: float = 0.5
-    max_repeat_px: float = 0.5
+    max_repeat_px: float = 0.5  # 旧配置兼容，不参与判定
+    module_repeatability_mm: float = 0.02
+    repeat_drift_margin_mm: float = 0.01
     max_axis_scale_error: float = 0.002
     min_coverage: float = 0.9

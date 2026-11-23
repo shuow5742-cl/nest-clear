@@ -17,11 +17,13 @@ def finish(ctx, bb, outcome, **fields):
     session = bb.read("camcal_session", None)
     if session:
         engine = session.get("engine")
-        if engine is not None and ctx.events.run_directory is not None:
+        if ctx.events.run_directory is not None:
             try:
                 path = ctx.events.run_directory / "camcal" / session["directory"] / "session_record.json"
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(engine.session_record(), ensure_ascii=False, allow_nan=False, indent=2), encoding="utf-8")
+                path.write_text(json.dumps(engine.session_record() if engine is not None else {"version": 1, "observations": []}, ensure_ascii=False, allow_nan=False, indent=2), encoding="utf-8")
+                from nest_clear.camcal.probe import summarize
+                (path.parent / "plc_actual_summary.json").write_text(json.dumps(summarize(session.get("probes", [])), ensure_ascii=False, allow_nan=False, indent=2), encoding="utf-8")
             except Exception as exc:
                 ctx.events.emit("error", operation="camcal_record", reason=str(exc))
         ctx.events.emit("camcal_" + outcome, task_id=bb.read("task_id"), start_time=session["start_time"],
@@ -85,6 +87,29 @@ class Prepare(Instant):
                 raise ValueError(reason)
             if session["start"] is None:
                 session["start"] = tuple(actual)
+
+
+class RecordProbe(Instant):
+    def __init__(self, ctx, after=False):
+        super().__init__(name="记录拍照后坐标" if after else "记录拍照前坐标")
+        self.ctx, self.after = ctx, after
+
+    def perform(self):
+        from nest_clear.camcal.probe import make_probe
+        bb = self._blackboard
+        session = bb.read("camcal_session")
+        probes = session.setdefault("probes", [])
+        if self.after:
+            previous = probes[-1]
+            probe = make_probe(previous['sequence'], previous['target_xyz'], previous['before'], bb.read('camcal_probe_after'), previous['algorithm_actual_xyz'])
+            probes[-1] = probe
+        else:
+            probe = make_probe(session['shots'] + 1, session['target'] or session['start'], bb.read('camcal_probe_before'), [], bb.read('actual'))
+            probes.append(probe)
+        if self.ctx.events.run_directory is not None:
+            path = self.ctx.events.run_directory / 'camcal' / session['directory'] / f"s{probe['sequence']:02d}_plc_actual.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(probe, ensure_ascii=False, allow_nan=False, indent=2), encoding='utf-8')
 
 
 class Process(Instant):
@@ -178,8 +203,8 @@ class Failed(Instant):
 
 def camera_branch(ctx):
     # 位置检查失败由统一 999 出口处理；采图和业务失败返回 82。
-    sample = Fallback([Sequence([CallWorker(ctx.board, "camera", lambda bb: {"stage":"camcal", "task_id":bb.read("task_id")}, "image", name="采集相机标定图"), CallWorker(ctx.board, "camcal", lambda bb: {
+    sample = Fallback([Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual_probe", "count":5}, "camcal_probe_before", name="拍照前坐标诊断"), RecordProbe(ctx), CallWorker(ctx.board, "camera", lambda bb: {"stage":"camcal", "task_id":bb.read("task_id")}, "image", name="采集相机标定图"), CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual_probe", "count":1}, "camcal_probe_after", name="拍照后坐标诊断"), RecordProbe(ctx, after=True), CallWorker(ctx.board, "camcal", lambda bb: {
         "context": ctx, "session": bb.read("camcal_session"), "captured": bb.read("image"),
-        "actual": bb.read("actual"), "task_id": bb.read("task_id")}, "camcal_result", name="异步相机标定"),
+        "actual": bb.read("actual"), "probe_before": bb.read("camcal_probe_before"), "probe_after": bb.read("camcal_probe_after"), "task_id": bb.read("task_id")}, "camcal_result", name="异步相机标定"),
         Process(ctx)], name="采样及求解"), Failed(ctx)], name="相机标定或 82")
     return Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual"}, "actual", name="读取相机标定坐标"), Prepare(ctx), Fallback([Predicate("前往起始位", lambda bb: bb.read("camcal_goto_start")), sample]), CheckTarget(ctx)], name="相机标定")
