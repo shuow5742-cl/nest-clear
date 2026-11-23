@@ -359,11 +359,14 @@ class Application:
         self.events.emit(event, **fields)
 
     def step(self, gate: Gate | None = None) -> None:
-        """每拍维持活性；暂停时不提交或推进 Batch。"""
+        """每拍维持活性；暂停时只完成已接收的请求（必须应答），不接收下一请求。"""
         if gate is not None:
             gate.beat()
             if gate.paused():
-                return
+                # 用户裁决：PC 对每个 PLC 请求都必须应答。已接收的请求暂停期间照常完成并应答；暂停期间不接收下一请求。
+                events = getattr(self, "events", None)
+                if not (events and events.request_pending):
+                    return
         if self.handle is None or self.handle.result is not None:
             if self.handle is not None:
                 result = self.handle.result

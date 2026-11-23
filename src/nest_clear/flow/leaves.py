@@ -358,6 +358,7 @@ class CommitReply(Instant):
             elapsed_ms=round((time.monotonic() - bb.read("started")) * 1000, 3),
             **details,
         )
+        self.events.request_pending = False
         render_data = bb.read("fine_render_data")
         archive = getattr(self.events, "archive", None)
         if render_data and archive:

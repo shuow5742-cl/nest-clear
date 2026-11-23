@@ -1,6 +1,10 @@
 """主相机标定的单次请求行为树。"""
 import json
 import math
+import logging
+import time
+
+from autoweaver.motion_policy.nodes.node import Status
 from pathlib import Path
 
 from autoweaver.motion_policy.nodes.control.fallback import Fallback
@@ -13,11 +17,14 @@ from .leaves import CallWorker, Instant, Predicate
 from .modes import Mode
 
 
+logger = logging.getLogger(__name__)
+
+
 def finish(ctx, bb, outcome, **fields):
     session = bb.read("camcal_session", None)
     if session:
         engine = session.get("engine")
-        if ctx.events.run_directory is not None:
+        if ctx.events.run_directory is not None and not session.get("timed_out"):
             try:
                 path = ctx.events.run_directory / "camcal" / session["directory"] / "session_record.json"
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,6 +109,29 @@ class RecordProbe(Instant):
             path.write_text(json.dumps(probe, ensure_ascii=False, allow_nan=False, indent=2), encoding='utf-8')
 
 
+class TimedCamcal(CallWorker):
+    def __init__(self, ctx, payload):
+        super().__init__(ctx.board, "camcal", payload, "camcal_result", name="异步相机标定")
+        self.ctx = ctx
+
+    def on_start(self):
+        self.started = time.monotonic()
+        return super().on_start()
+
+    def on_running(self):
+        status = super().on_running()
+        if status == Status.RUNNING and time.monotonic() - self.started >= self.ctx.config.camera_calibration.get('solve_timeout_s', 60.0):
+            elapsed = time.monotonic() - self.started
+            reason = f"相机标定 worker 超时（{elapsed:.3f}s）"
+            self._blackboard.read('camcal_session')['timed_out'] = True
+            self._blackboard.write('error', reason, self.name)
+            self._blackboard.write('error_diagnostic', diagnostic(reason, code='CAMCAL-TIMEOUT', where='相机标定', hint='检查求解耗时和程序日志。'), self.name)
+            logger.error("%s Task_ID=%s", reason, self._blackboard.read('task_id'))
+            self.ctx.events.emit('camcal_timeout', task_id=self._blackboard.read('task_id'), code='CAMCAL-TIMEOUT', reason=reason, elapsed_s=elapsed)
+            return Status.FAILURE
+        return status
+
+
 class Process(Instant):
     def __init__(self, ctx):
         super().__init__(name="相机标定采样及求解")
@@ -179,7 +209,7 @@ class Failed(Instant):
         bb = self._blackboard
         reason = str(bb.read("error"))
         if bb.read("camcal_session", None):
-            finish(self.ctx, bb, "failed", code="CAMCAL-FLOW", reason=reason, detail={}, raw_path=bb.read("raw_path"))
+            finish(self.ctx, bb, "failed", code=(bb.read("error_diagnostic", None) or {}).get("reason_code", "CAMCAL-FLOW"), reason=reason, detail={}, raw_path=bb.read("raw_path"))
         bb.write("reply_diagnostic", bb.read("error_diagnostic", None) or diagnostic(reason, code="CAMCAL-FLOW", where="相机标定", hint="检查相机连接、标定板和光照。"), self.name)
         bb.write("reply_func", 82, self.name)
         bb.write("reply_coordinates", {}, self.name)
@@ -188,8 +218,8 @@ class Failed(Instant):
 
 def camera_branch(ctx):
     # 位置检查失败由统一 999 出口处理；采图和业务失败返回 82。
-    sample = Fallback([Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual_probe", "count":5}, "camcal_probe_before", name="拍照前坐标诊断"), RecordProbe(ctx), CallWorker(ctx.board, "camera", lambda bb: {"stage":"camcal", "task_id":bb.read("task_id")}, "image", name="采集相机标定图"), CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual_probe", "count":1}, "camcal_probe_after", name="拍照后坐标诊断"), RecordProbe(ctx, after=True), CallWorker(ctx.board, "camcal", lambda bb: {
+    sample = Fallback([Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual_probe", "count":5}, "camcal_probe_before", name="拍照前坐标诊断"), RecordProbe(ctx), CallWorker(ctx.board, "camera", lambda bb: {"stage":"camcal", "task_id":bb.read("task_id")}, "image", name="采集相机标定图"), CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual_probe", "count":1}, "camcal_probe_after", name="拍照后坐标诊断"), RecordProbe(ctx, after=True), TimedCamcal(ctx, lambda bb: {
         "context": ctx, "session": bb.read("camcal_session"), "captured": bb.read("image"),
-        "actual": bb.read("actual"), "probe_before": bb.read("camcal_probe_before"), "probe_after": bb.read("camcal_probe_after"), "task_id": bb.read("task_id")}, "camcal_result", name="异步相机标定"),
+        "actual": bb.read("actual"), "probe_before": bb.read("camcal_probe_before"), "probe_after": bb.read("camcal_probe_after"), "task_id": bb.read("task_id")}),
         Process(ctx)], name="采样及求解"), Failed(ctx)], name="相机标定或 82")
     return Sequence([CallWorker(ctx.board, "plc", lambda bb: {"operation":"actual"}, "actual", name="读取相机标定坐标"), Prepare(ctx), Fallback([Predicate("前往起始位", lambda bb: bb.read("camcal_goto_start")), sample]), CheckTarget(ctx)], name="相机标定")

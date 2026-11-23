@@ -91,6 +91,14 @@ def test_normal_and_offline(running, tmp_path, caplog):
         replies = plc.start_camera_calibration((0., 0., 110.), timeout_s=120)
     elapsed = time.monotonic() - start
     assert len(replies) == 53 and replies[-1]['func_code'] == 81
+    # result_id 已由 PLC worker 写入，但行为树可能尚未记录 reply。
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if any(r['event'] == 'reply' and r.get('task_id') == replies[-1]['task_id'] for r in events(app)):
+            break
+        time.sleep(.01)
+    else:
+        pytest.fail('最终 PLC 应答未记录')
     cal = load_calibration(path)
     assert not cal.placeholder
     assert np.max(np.abs(cal.K.diagonal()[:2] / K.diagonal()[:2] - 1)) < .001

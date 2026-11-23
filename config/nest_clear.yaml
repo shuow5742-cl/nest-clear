@@ -144,6 +144,7 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
 
 # 主相机标定，未列出的字段使用 CameraCalibConfig 缺省值
 camera_calibration:
+  solve_timeout_s: 60.0  # 异步采样或求解超过此时限回 82
   start_xyz: [92.651, 88.445, -3.0]  # 11-22 夜 用户定：工作距离 100mm 处 Z=-3（真实板 3.15mm 在位）；标定 Z 层 ±3/±1.5 → -6..0，上限恰为行程 Z 最大值 0
   cols: 21
   rows: 16
