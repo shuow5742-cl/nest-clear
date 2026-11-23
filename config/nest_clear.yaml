@@ -15,7 +15,7 @@ plc:  # PLC 网络参数，现场调试时与设备网络设置核对
   port: 502  # Modbus TCP 端口，按 PLC 实际配置填写
   timeout_s: 3.0  # 单次连接及读写超时，单位秒，按网络响应情况调整
 scan:  # 模组坐标系下的扫描范围与步距，单位 mm
-  mode: tray  # tray 按料盘覆盖区规划；corners 使用原有角点路径
+  mode: corners  # tray 按料盘覆盖区规划；corners 使用原有角点路径
   tray:  # 料盘覆盖区从指定角沿方向延伸
     origin_xy: [0.0, 0.0]  # 占位角点，现场测量后填写模组 XY
     size_mm: [182.7, 171.8]  # 一代中心范围 168.45×161.16 加视野 14.25×10.69，约为此尺寸
@@ -24,21 +24,24 @@ scan:  # 模组坐标系下的扫描范围与步距，单位 mm
   fov_mm: null  # 视野宽高，null 时由像素尺度和 4024×3036 推算
   min_overlap_mm: 20.0  # 最小重叠须 ≥ 最长目标毛长度 + 余量，保证至少一图完整出现
   corners:  # 三个 XY 角点，按现场测量结果填写；Z 在下方单独填写
-    - [100.0, 0.0]  # 起点：X 最大、Y 最小，首行从此处沿 Y 正方向扫描
-    - [0.0, 0.0]  # X 方向终点：与起点同 Y，确定换行沿 X 负方向的范围
-    - [100.0, 100.0]  # Y 方向终点：与起点同 X，确定行内沿 Y 正方向的范围
-  step_x: 10.0  # X 轴换行步距，单位 mm，取正数并按视野重叠确定
-  step_y: 10.0  # Y 轴行内步距，单位 mm，取正数并按视野重叠确定
+    - [160.0, 0.0]  # 起点：X 最大、Y 最小，首行从此处沿 Y 正方向扫描
+    - [100.0, 0.0]  # X 方向终点：与起点同 Y，确定换行沿 X 负方向的范围
+    - [160.0, 140.0]  # Y 方向终点：与起点同 X，确定行内沿 Y 正方向的范围
+  step_x: 60.0  # X 轴换行步距，单位 mm，取正数并按视野重叠确定
+  step_y: 70.0  # Y 轴行内步距，单位 mm，取正数并按视野重叠确定
   z: 0.0  # 扫描拍照高度，单位 mm，按现场模组坐标填写
 arrival_tolerance_mm: 0.1  # 各轴实时位置与下发扫描位置允许的最大绝对差，单位 mm
 pick_depth_z: 0.0  # 下针深度的模组 Z 坐标，单位 mm，按现场测量填写
 travel:  # 模组各轴允许的最小和最大坐标，单位 mm，按设备行程填写
-  x: [-500.0, 500.0]  # X 轴最小、最大坐标，单位 mm
-  y: [-500.0, 500.0]  # Y 轴最小、最大坐标，单位 mm
-  z: [-500.0, 500.0]  # Z 轴最小、最大坐标，单位 mm
+  x: [80.0, 180.0]  # X 轴最小、最大坐标，单位 mm
+  y: [-10.0, 150.0]  # Y 轴最小、最大坐标，单位 mm
+  z: [-15.0, 0.0]  # Z 轴最小、最大坐标，单位 mm
 camera:  # 相机识别参数
-  sn: "待填写"  # 相机序列号占位，现场替换为设备 SN
+  sn: auto  # 恰好一台相机时自动选择
   image_size: [4024, 3036]  # 主相机输出宽、高（像素）
+  exposure_us: 6000.0
+  gain_db: 0.0
+  balance_ratio: [2.4219, 1.0, 1.5078]
 record:  # 运行记录参数
   directory: runs  # 记录根目录，可填写相对路径或绝对路径
   image_enabled: true  # 是否保存扫描图像
@@ -51,7 +54,7 @@ supervisor:  # 父程序轮询和主程序活性监控
   poll_s: 0.1  # 设备状态轮询周期，秒
   watchdog_s: 6.0  # 活性文件超时，秒
   startup_grace_s: 60.0  # 启动后等待首个活性点的最长时间，秒，留出设备预检时间
-  child_command: [python, -m, nest_clear.main]  # 主程序命令及参数
+  child_command: [.venv/bin/python, -m, nest_clear.main, --config, config/nest_clear.yaml]  # 主程序命令及参数
 vision:
   max_fine_targets: 10  # 每轮粗拍选出的精定位目标数
   fine_box_half_mm: 4.0  # 精定位框半宽，mm
@@ -141,22 +144,22 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
 
 # 主相机标定，未列出的字段使用 CameraCalibConfig 缺省值
 camera_calibration:
-  start_xyz: null  # 待填写
+  start_xyz: [92.651, 88.445, -8.854]  # 11-22 换真实标定板：11-20 纸面起始位 Z -11.904 抬高 3.05mm（板 3.15 − 纸 0.1；Z 向上为正）
   cols: 21
   rows: 16
   square_mm: 5.0
   marker_mm: 3.75
   dictionary: DICT_5X5_250
-  board_thickness_mm: 3.0
-  xy_limit_mm: 25.0
-  z_limit_mm: 5.0
-  grid_half_mm: 20.0
-  z_outer_mm: 5.0
-  z_inner_mm: 2.5
+  board_thickness_mm: 3.15  # 真实标定板实测厚度（11-22）
+  xy_limit_mm: 12.5
+  z_limit_mm: 3.0
+  grid_half_mm: 12.0
+  z_outer_mm: 3.0
+  z_inner_mm: 1.5
   position_tolerance_mm: 0.05
   min_corner_ratio: 0.6
   saturation_level: 250
-  max_saturated_fraction: 0.01
+  max_saturated_fraction: 0.02
   glare_corner_margin_px: null  # null 自动取相邻角点间距的 1/4；整数为像素距离
   glare_blob_min_px: 2000
   max_rms_px: 0.25

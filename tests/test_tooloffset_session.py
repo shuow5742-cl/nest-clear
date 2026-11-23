@@ -102,7 +102,7 @@ def test_gaussian_noise_with_large_outlier():
     assert all(value <= .02 for value in sess.result()['se'])
 
 
-@pytest.mark.parametrize('board,card,camera_z,normal_sign', [(3., .1, -5., 1), (.6, .25, 12., -1), (1.5, .2, 30., 1)])
+@pytest.mark.parametrize('board,card,camera_z,normal_sign', [(3., .1, -5., 1), (3.15, .1, -5., 1), (.6, .25, 12., -1), (1.5, .2, 30., 1)])
 def test_card_plane_height_at_image_edges(board, card, camera_z, normal_sign):
     from dataclasses import replace
     from nest_clear.vision.geometry import pixel_to_module

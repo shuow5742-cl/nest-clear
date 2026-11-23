@@ -100,6 +100,7 @@ def test_plc_normal_cycle(rig, accept):
         task+=1; code,coords=rig.request(task,150); assert code==150; rig.plc.actual=coords['camcal_xyz']
     else: pytest.fail('会话未结束')
     assert code==(151 if accept else 152)
+    assert list(rig.events.run_directory.glob('pickacc/*/*_raw.png'))
     if accept: assert read(rig.root/'calibration'/'pick_compensation.yaml')['tool1']['type']=='constant'
     else: assert not (rig.root/'calibration'/'pick_compensation.yaml').exists()
 
@@ -188,14 +189,11 @@ def test_pickacc_status_model(tmp_path):
     assert status.data['pickacc']['phase']=='tool_in_place' and status.data['pickacc']['tool']==2
 
 
-@pytest.mark.parametrize('scenario', ['table','simple','commtest'])
-def test_plc_table_simple_and_commtest(rig, scenario):
+@pytest.mark.parametrize('scenario', ['table','simple','constant'])
+def test_plc_table_simple_and_constant(rig, scenario):
     import hashlib, math
     from nest_clear.tooloffset.commands import send
     from nest_clear.tooloffset.session import nominal_targets
-    if scenario=='commtest':
-        object.__setattr__(rig.cfg,'run_mode','commtest')
-        object.__setattr__(rig.cfg,'commtest',{'camcal_travel':rig.cfg.travel})
     tool=2 if scenario=='simple' else 1
     gradient=lambda x,y:(.002*(x-130),.001*(y-70))
     if tool==2:
@@ -219,7 +217,7 @@ def test_plc_table_simple_and_commtest(rig, scenario):
         assert code==155, (code,rig.events.status.data['pickacc'])
         assert list(coords)==[f'pick{tool}_xyz']
         e=rig.batch.blackboard.read('pickaccuracy_session')['engine']; target=e.measured[e.current]; xyz=coords[f'pick{tool}_xyz']
-        error=np.array((.08,-.05) if scenario=='commtest' else gradient(*target))
+        error=np.array((.08,-.05) if scenario=='constant' else gradient(*target))
         if scenario=='simple': error+=np.array([.02,-.01])
         applied=np.asarray(xyz[:2])-target-np.asarray(rig.cfg.tools[tool-1][:2])
         actual=np.asarray(xyz[:2])+error-applied; rig.plc.actual=(*actual,-10.)
@@ -233,7 +231,7 @@ def test_plc_table_simple_and_commtest(rig, scenario):
         task+=1; code,coords=rig.request(task,150); assert code==150; rig.plc.actual=coords['camcal_xyz']
     else: pytest.fail('会话未结束')
     result=read(rig.root/'calibration'/'pick_compensation.yaml')[f'tool{tool}']
-    assert result['type']==('constant' if scenario=='commtest' else 'table')
+    assert result['type']==('constant' if scenario=='constant' else 'table')
     if scenario=='simple': assert len(result['samples'])==6
 
 

@@ -119,7 +119,7 @@ def test_supervisor_exit_stops_preview(tmp_path, monkeypatch):
 def test_preview_closes_camera(tmp_path, monkeypatch):
     import numpy as np
     import nest_clear.preview.process as preview
-    cfg = replace(load_config('config/nest_clear.yaml'), record_directory=str(tmp_path))
+    cfg = replace(load_config('config/nest_clear.yaml'), camera_sn='test-camera', record_directory=str(tmp_path))
     closed = []
     class Stop:
         stopped = False

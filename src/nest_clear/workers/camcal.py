@@ -19,11 +19,9 @@ class CamcalWorker(AsyncRequestWorker):
         seq, capture_id = ctx.events.next_capture()
         archive = getattr(ctx.events, 'archive', None)
         raw = None
-        if ctx.config.run_mode == 'commtest':
+        if ctx.events.run_directory is not None:
             import cv2
-            if ctx.events.run_directory is None:
-                raise OSError('联调相机标定需要记录目录')
-            path = ctx.events.run_directory / 'camcal' / session['directory'] / f'{shot}_raw.png'
+            path = ctx.events.run_directory / 'camcal' / session['directory'] / f'camcal_{shot}_raw.png'
             path.parent.mkdir(parents=True, exist_ok=True)
             if not cv2.imwrite(str(path), image):
                 raise OSError(f'无法保存相机标定原图：{path}')

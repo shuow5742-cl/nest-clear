@@ -33,14 +33,6 @@ def finish(ctx, bb, outcome, **fields):
     ctx.events.abort_camcal = None
 
 
-def guard_commtest(ctx, point):
-    if ctx.config.run_mode != "commtest":
-        return
-    for axis, value, (lo, hi) in zip("xyz", point, ctx.config.commtest["camcal_travel"]):
-        if not lo <= value <= hi:
-            raise GuardError("COMMTEST-CAMCAL-TRAVEL", f"相机标定 {axis.upper()} 轴值 {value} 超出范围 [{lo}, {hi}]", "相机标定", "检查目标坐标和 commtest.camcal_travel。")
-
-
 class Prepare(Instant):
     def __init__(self, ctx):
         super().__init__(name="检查相机标定位置")
@@ -61,9 +53,7 @@ class Prepare(Instant):
             target = tuple(start)
             move = any(abs(a-b) > tolerance for a, b in zip(actual, target))
             if move:
-                guard_commtest(self.ctx, target)
-                if self.ctx.config.run_mode != "commtest":
-                    guard_position(target, self.ctx.config.travel, "相机标定")
+                guard_position(target, self.ctx.config.travel, "相机标定")
             now = self.ctx.events.clock()
             session = {"start": None if move else tuple(actual), "target": target if move else None, "shots": 0, "engine": None,
                        "start_time": now.isoformat(), "directory": now.strftime("%Y%m%d_%H%M%S_%f")}
@@ -127,13 +117,8 @@ class Process(Instant):
         elif step.kind == "move":
             target = tuple(step.target_xyz)
             cfg = session["cfg"]
-            outside_commtest = (ctx.config.run_mode == "commtest" and len(target) == 3
-                                and all(math.isfinite(v) for v in target)
-                                and any(not lo <= v <= hi for v, (lo, hi) in zip(target, ctx.config.commtest["camcal_travel"])))
-            if len(target) != 3 or any(not math.isfinite(v) for v in target) or (not outside_commtest and any(abs(target[i]-session["start"][i]) > (cfg.xy_limit_mm if i < 2 else cfg.z_limit_mm) for i in range(3))):
+            if len(target) != 3 or any(not math.isfinite(v) for v in target) or any(abs(target[i]-session["start"][i]) > (cfg.xy_limit_mm if i < 2 else cfg.z_limit_mm) for i in range(3)):
                 raise ValueError(f"相机标定目标超出起始位置相对行程：{target}")
-            if ctx.config.run_mode != "commtest":
-                guard_position(target, ctx.config.travel, "相机标定")
             session["target"] = target
             bb.write("reply_coordinates", {"camcal_xyz": target}, self.name)
             reply = 80
@@ -147,14 +132,14 @@ class Process(Instant):
 
 class CheckTarget(Instant):
     def __init__(self, ctx):
-        super().__init__(name="检查联调标定终点")
+        super().__init__(name="检查相机标定终点")
         self.ctx = ctx
 
     def perform(self):
         bb = self._blackboard
         if bb.read("reply_func") == 80:
             try:
-                guard_commtest(self.ctx, bb.read("reply_coordinates")["camcal_xyz"])
+                guard_position(bb.read("reply_coordinates")["camcal_xyz"], self.ctx.config.travel, "相机标定")
             except GuardError as exc:
                 finish(self.ctx, bb, "failed", code=exc.code, reason=exc.what)
                 raise

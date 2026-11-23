@@ -17,3 +17,16 @@ def test_missing_sdk_is_clear(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "gxipy", None)
     assert list_cameras.main() == 1
     assert "gxipy" in capsys.readouterr().err
+
+
+def test_resolve_unique_camera(monkeypatch):
+    import pytest
+    from nest_clear.devices.camera_select import resolve_camera
+    from nest_clear.guard import GuardError
+    from nest_clear.tools import list_cameras as module
+    monkeypatch.setattr(module, 'list_cameras', lambda: [{'sn': 'serial-1'}])
+    assert resolve_camera() == 'serial-1'
+    for devices in ([], [{'sn': 'a'}, {'sn': 'b'}], [{'sn': ''}]):
+        monkeypatch.setattr(module, 'list_cameras', lambda: devices)
+        with pytest.raises(GuardError, match='恰好一台'):
+            resolve_camera()

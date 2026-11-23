@@ -48,3 +48,12 @@ def test_order():
     c = load_contract(ROOT / 'config/plc_contract.yaml')
     Handshake(IO(), c, write_readback=False).write_reply(42, 1, {'scan_xyz': [1, 2, 3]})
     assert [c['scan_x'].address, c['reply_func'].address, c['result_id'].address] == [v[0] for v in calls]
+
+
+def test_deleted_mode_rejected(tmp_path):
+    data = yaml.safe_load((ROOT / 'config/nest_clear.yaml').read_text())
+    data['run_mode'] = 'comm' + 'test'
+    path = tmp_path / 'old.yaml'
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(GuardError, match='通信联调模式已删除，请改用 config/nest_clear.yaml'):
+        load_config(path)

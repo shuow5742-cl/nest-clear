@@ -121,7 +121,7 @@ def test_finish_capture_archives_real_coarse_overlay(tmp_path, monkeypatch, fall
     import nest_clear.flow.picking as picking
     from nest_clear.record.images import ImageArchive
     from test_hair_integration import Board
-    config = load_config("config/nest_clear.yaml")
+    config = replace(load_config("config/nest_clear.yaml"), travel=((-500., 500.),)*3)
     calibration = Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)
     events = EventRecorder(tmp_path, run=True)
     events.tray_id = "2026-01-01_0001"
@@ -173,7 +173,7 @@ def test_detection_event_contains_candidates(tmp_path):
     from nest_clear.flow.context import FlowContext, RequestTracker
     from nest_clear.flow.picking import record_detection
     from test_hair_integration import Board
-    config = load_config("config/nest_clear.yaml")
+    config = replace(load_config("config/nest_clear.yaml"), travel=((-500., 500.),)*3)
     calibration = Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)
     events = EventRecorder(tmp_path, run=True)
     events.tray_id = "2026-01-01_0001"

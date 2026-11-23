@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import date
 import json
 import re
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -15,11 +16,14 @@ import pytest
 from nest_clear.config import load_config
 from nest_clear.main import Application
 from nest_clear.vision.geometry import Calibration, load_calibration, pixel_to_module
-from sim.charuco_scene import (SimulatedCharucoCamera, K, DISTORTION, ROTATION,
+from sim.charuco_scene import (CharucoScene, SimulatedCharucoCamera, K, DISTORTION, ROTATION,
                                BOARD_ORIGIN, BOARD_ROTATION)
 from sim.fake_plc import FakePLC
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# 第七帧约预计 176 个角点，60% 覆盖门槛约 106 个；此亮斑遮挡后剩约 78 个。
+LARGE_GLARE_AXES = (1200, 1000)
 
 
 @pytest.fixture
@@ -29,18 +33,19 @@ def running(tmp_path, monkeypatch, request):
     monkeypatch.setattr('nest_clear.main.repository_dirty', lambda *_: None)
     monkeypatch.setattr('nest_clear.main.framework_commit', lambda: 'unknown')
     with FakePLC() as plc:
-        path = tmp_path / 'camera.yaml'
-        path.write_bytes((ROOT / 'config/calibration/camera.yaml').read_bytes())
+        calibration_dir = tmp_path / 'calibration'
+        shutil.copytree(ROOT / 'config/calibration', calibration_dir)
+        path = calibration_dir / 'camera.yaml'
         cfg = load_config(ROOT / 'config/nest_clear.yaml')
         camcal_cfg = {**cfg.camera_calibration, 'start_xyz': [0., 0., 110.]}
         if getattr(request, 'param', None) == 'large_glare':
             # 让大亮斑进入角点覆盖检查，而非先触发整体过曝。
             camcal_cfg['max_saturated_fraction'] = .5
-        cfg = replace(cfg, camera_calibration=camcal_cfg, plc=replace(cfg.plc, ip=plc.host, port=plc.port),
+        cfg = replace(cfg, travel=((-500., 500.),)*3, camera_calibration=camcal_cfg, plc=replace(cfg.plc, ip=plc.host, port=plc.port),
                       record_directory=str(tmp_path / 'record'),
                       vision=replace(cfg.vision, calibration=str(path), camera_backend='mock',
                                      detector='stub', allow_placeholder_calibration=True),
-                      tool_calibration=replace(cfg.tool_calibration, enabled=False))
+                      tool_calibration=replace(cfg.tool_calibration, enabled=False, directory=str(calibration_dir)))
         camera = SimulatedCharucoCamera(plc)
         app = Application(cfg, ROOT / 'config/nest_clear.yaml', camera=camera)
         stop = threading.Event()
@@ -132,6 +137,45 @@ def test_normal_and_offline(running, tmp_path, caplog):
     print(f'完整 TCP 墙钟耗时: {elapsed:.3f}s，在线求解: {durations[0]:.3f}s')
 
 
+
+def test_glare_geometry_without_tcp():
+    """以真实渲染器和生产参数覆盖第七帧亮斑及完整小亮斑会话。"""
+    import copy
+    from nest_clear.camcal import CameraCalibConfig, CameraCalibrationSession
+
+    settings = dict(load_config(ROOT / 'config/nest_clear.yaml').camera_calibration)
+    settings['start_xyz'] = [0., 0., 110.]
+    cfg = CameraCalibConfig(**settings)
+    scene = CharucoScene()
+    nominal = load_calibration(ROOT / 'config/calibration/camera.yaml')
+    session = CameraCalibrationSession(cfg, nominal, scene.size, settings['start_xyz'])
+    pose = tuple(settings['start_xyz'])
+    for _ in range(6):
+        step = session.add(scene.render(pose), pose)
+        assert step.kind == 'move', (step.code, step.reason)
+        pose = step.target_xyz
+
+    # 与 TCP 大亮斑夹具一致：仅为测试覆盖率分支提高饱和比例门槛。
+    large = copy.copy(session)
+    large._obs = list(session._obs)
+    large.cfg = replace(cfg, max_saturated_fraction=.5)
+    step = large.add(scene.render(pose, glare=((2012, 1518), LARGE_GLARE_AXES)), pose)
+    assert step.kind == 'fail' and step.code == 'CAMCAL-GLARE'
+    assert step.detail['glare_blobs']
+    assert step.detail['usable_corners'] < cfg.min_corner_ratio * step.detail['predicted_corners']
+
+    # 小亮斑按生产饱和阈值继续运行，整个真实求解会话仍须成功。
+    step = session.add(scene.render(pose, glare=((2012, 1518), (100, 80))), pose)
+    assert step.kind == 'move' and step.detail['glare_blobs']
+    assert step.detail['usable_corners'] >= cfg.min_corner_ratio * step.detail['predicted_corners']
+    for _ in range(52):
+        if step.kind != 'move':
+            break
+        pose = step.target_xyz
+        step = session.add(scene.render(pose), pose)
+    assert step.kind == 'done', (step.code, step.reason)
+
+
 def test_small_glare_is_accepted(running):
     plc, app, camera, _ = running
     camera.glare_frames.add(7)
@@ -148,7 +192,7 @@ def test_small_glare_is_accepted(running):
 def test_large_glare_and_restart(running):
     plc, app, camera, _ = running
     camera.glare_frames.add(7)
-    camera.glare_axes = (900, 800)
+    camera.glare_axes = LARGE_GLARE_AXES
     replies = plc.start_camera_calibration((0, 0, 110), timeout_s=120)
     assert replies[-1]['func_code'] == 82
     failed = [r for r in events(app) if r['event'] == 'camcal_failed'][-1]

@@ -16,7 +16,7 @@ from test_hair_integration import Board, Events, candidate
 
 def test_work_adapter_both_tools_and_terminal():
     """粗拍、精拍与挑完通过同一状态机传递，终态继续拒绝请求。"""
-    config = load_config("config/nest_clear.yaml")
+    config = replace(load_config("config/nest_clear.yaml"), travel=((-100., 100.),)*3)
     config = replace(config, tools=((1, 2, 3), (4, 5, 6)), travel=((-100, 100),) * 3)
     calibration = Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)
     ctx = FlowContext(None, config, [(0, 0, 0)], RequestTracker(0), Events(), calibration)
@@ -92,7 +92,7 @@ def test_data_precedes_commit():
 def test_placeholder_rejects_pick_without_consuming_attempt():
     """占位标定时拒绝挑取坐标，状态与尝试次数保持不变。"""
     from nest_clear.guard import GuardError
-    config = load_config("config/nest_clear.yaml")
+    config = replace(load_config("config/nest_clear.yaml"), travel=((-100., 100.),)*3)
     calibration = Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)
     events = Events()
     events.calibration_placeholder = True
@@ -115,7 +115,7 @@ def test_fine_finish_capture_archives_without_observations(tmp_path):
     from nest_clear.record.events import EventRecorder
     from nest_clear.record.images import ImageArchive
 
-    config = load_config("config/nest_clear.yaml")
+    config = replace(load_config("config/nest_clear.yaml"), travel=((-100., 100.),)*3)
     config = replace(config, travel=((-100, 100),) * 3)
     calibration = Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)
     events = EventRecorder(tmp_path)
@@ -147,7 +147,7 @@ def test_finish_capture_image_exception_keeps_reply(stage, monkeypatch, caplog):
     import logging
     import nest_clear.flow.picking as picking
 
-    config = load_config("config/nest_clear.yaml")
+    config = replace(load_config("config/nest_clear.yaml"), travel=((-100., 100.),)*3)
     config = replace(config, travel=((-100, 100),) * 3)
     calibration = Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)
     events = Events()
@@ -189,7 +189,7 @@ def test_prepare_error_distinguishes_protocol_from_business_exception():
         def perform(self):
             raise KeyError("observations")
 
-    config = load_config("config/nest_clear.yaml")
+    config = replace(load_config("config/nest_clear.yaml"), travel=((-100., 100.),)*3)
     cycle = WorkCycle([(0, 0, 0)], lambda target, pose: pose, lambda target: (target, target), config.vision)
     cycle.start()
     bb = Board(work_cycle=cycle, request_func=20, task_id=3, next_index=1, raw_path=None)

@@ -118,7 +118,7 @@ class ToolOffset(TreeNode):
                 if ctx.calibration is None or getattr(ctx.calibration, 'placeholder', False) or not path.is_file():
                     raise ValueError('相机标定文件不存在或未完成标定')
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                travel = ctx.config.commtest['camcal_travel'] if ctx.config.run_mode == 'commtest' else ctx.config.travel
+                travel = ctx.config.travel
                 if any(not lo <= v <= hi for v, (lo, hi) in zip(start, travel)):
                     raise ValueError('工具偏移标定起始坐标超出行程')
                 now = ctx.events.clock()

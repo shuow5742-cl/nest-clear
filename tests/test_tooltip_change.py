@@ -33,7 +33,7 @@ class Events:
 @pytest.fixture
 def rig(tmp_path):
     config = load_config(ROOT / 'config/nest_clear.yaml')
-    config = replace(config, tool_calibration=replace(config.tool_calibration, directory=str(tmp_path)), tools=((1.,2.,3.),(4.,5.,6.)))
+    config = replace(config, travel=((-100., 100.),)*3, tool_calibration=replace(config.tool_calibration, directory=str(tmp_path)), tools=((1.,2.,3.),(4.,5.,6.)))
     initialize_tools(tmp_path / 'tools.yaml')
     events = Events(tmp_path)
     ctx = SimpleNamespace(config=config, events=events)
