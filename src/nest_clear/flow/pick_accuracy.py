@@ -117,7 +117,7 @@ class PickAccuracy(ToolOffset):
             if s is None: raise ValueError('无挑取精度会话')
             s['requests'].append({'task_id':bb.read('task_id'),'func':func})
             if func==150 and s['phase']=='wait150':
-                s['phase']='wait155'; self.publish('moving','相机移动中'); return self.set_reply(150,{'camcal_xyz':tuple(s['engine'].target_pose)})
+                s['phase']='wait155'; self.publish('moving','相机移动中'); return self.set_reply(150,{'scan_xyz':tuple(s['engine'].target_pose)})
             if func==155 and s['phase']=='wait155':
                 self.stage='settle_arrival'; self.samples=[]; self.round=0; self.next_read=0.; self.publish('arrival','检查相机到位'); return Status.RUNNING
             if func==156 and s['phase']=='wait156':
@@ -131,7 +131,7 @@ class PickAccuracy(ToolOffset):
         s=self._blackboard.read('pickaccuracy_session'); e=s['engine']
         if result=='failed': return self.fail(e.failure)
         if result=='continue':
-            s['phase']='wait155'; self.publish('moving','相机移动中'); return self.set_reply(150,{'camcal_xyz':tuple(e.target_pose)})
+            s['phase']='wait155'; self.publish('moving','相机移动中'); return self.set_reply(150,{'scan_xyz':tuple(e.target_pose)})
         if result=='tool':
             target=e.measured[e.current]; comp=e._verification_comp(e.current,target) if e.plan[0]=='verify' else (0.,0.)
             # Z 为标定配置绝对值，不叠加工具 Z。
@@ -162,7 +162,7 @@ class PickAccuracy(ToolOffset):
                 if prior and (prior.get('camera_calibration_sha256')!=s['hash'] or prior.get('tool_offset_xy')!=list(ctx.config.tools[0][:2]) or not current_offset_hash or prior.get('tool_offset_result_sha256')!=current_offset_hash): prior=None
                 cfg={**ctx.config.tool_offset,**ctx.config.pick_accuracy}
                 s.update(tool=tool,engine=Session(ctx.calibration,s['start'],s['travel'],cfg,tool,ctx.config.tools,ctx.config.vision.fine_box_half_mm,ctx.config.camera_calibration['board_thickness_mm'],prior),phase='wait155')
-                self.publish('moving','相机移动至起始位置'); return self.set_reply(150,{'camcal_xyz':s['start']})
+                self.publish('moving','相机移动至起始位置'); return self.set_reply(150,{'scan_xyz':s['start']})
             if self.stage.startswith('settle_'):
                 actual=self.settle()
                 if actual is None: return Status.RUNNING

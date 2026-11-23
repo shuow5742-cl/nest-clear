@@ -77,11 +77,12 @@ def test_plc_normal_cycle(rig, accept):
     rig.plc.request=(1,150); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
     send(rig.root,'pickacc_start',{'tool':1}); rig.until(lambda:1 in rig.plc.replies)
     task=1; assert rig.plc.replies[task][0]==150
+    assert 'scan_xyz' in rig.plc.replies[task][1] and 'camcal_xyz' not in rig.plc.replies[task][1]
     for _ in range(80):
         task+=1; rig.plc.request=(task,155); rig.until(lambda:task in rig.plc.replies, timeout=35)
         code,coords=rig.plc.replies[task]
         if code==150:
-            rig.plc.actual=coords['camcal_xyz']; continue
+            rig.plc.actual=coords['scan_xyz']; continue
         assert code==155, (code,rig.events.status.data['pickacc'])
         assert list(coords)==['pick1_xyz'] and coords['pick1_xyz'][2]==-10
         xyz=coords['pick1_xyz']; rig.plc.actual=(xyz[0]+.08,xyz[1]-.05,xyz[2])
@@ -97,7 +98,7 @@ def test_plc_normal_cycle(rig, accept):
         code=rig.plc.replies[task][0]
         if code in (151,152): break
         assert code==156, (code,rig.events.status.data['pickacc'])
-        task+=1; code,coords=rig.request(task,150); assert code==150; rig.plc.actual=coords['camcal_xyz']
+        task+=1; code,coords=rig.request(task,150); assert code==150; rig.plc.actual=coords['scan_xyz']
     else: pytest.fail('会话未结束')
     assert code==(151 if accept else 152)
     assert list(rig.events.run_directory.glob('pickacc/*/*_raw.png'))
@@ -134,7 +135,7 @@ def test_discard_and_abort(rig):
     rig.plc.request=(2,150); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
     send(rig.root,'pickacc_start',{'tool':2}); rig.until(lambda:2 in rig.plc.replies)
     code,coords=rig.request(3,155); assert code==150
-    rig.plc.actual=coords['camcal_xyz']
+    rig.plc.actual=coords['scan_xyz']
     code,coords=rig.request(4,155); assert code==155 and list(coords)==['pick2_xyz'] and coords['pick2_xyz'][2]==-10
     rig.plc.request=(5,156); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='tool_in_place')
     send(rig.root,'pickacc_discard'); rig.until(lambda:5 in rig.plc.replies)
@@ -214,7 +215,7 @@ def test_plc_table_simple_and_constant(rig, scenario):
     for _ in range(100):
         task+=1; rig.plc.request=(task,155); rig.until(lambda:task in rig.plc.replies,timeout=35)
         code,coords=rig.plc.replies[task]
-        if code==150: rig.plc.actual=coords['camcal_xyz']; continue
+        if code==150: rig.plc.actual=coords['scan_xyz']; continue
         assert code==155, (code,rig.events.status.data['pickacc'])
         assert list(coords)==[f'pick{tool}_xyz']
         e=rig.batch.blackboard.read('pickaccuracy_session')['engine']; target=e.measured[e.current]; xyz=coords[f'pick{tool}_xyz']
@@ -229,7 +230,7 @@ def test_plc_table_simple_and_constant(rig, scenario):
         code=rig.plc.replies[task][0]
         if code==151: break
         assert code==156, (code,rig.events.status.data['pickacc'])
-        task+=1; code,coords=rig.request(task,150); assert code==150; rig.plc.actual=coords['camcal_xyz']
+        task+=1; code,coords=rig.request(task,150); assert code==150; rig.plc.actual=coords['scan_xyz']
     else: pytest.fail('会话未结束')
     result=read(rig.root/'calibration'/'pick_compensation.yaml')[f'tool{tool}']
     assert result['type']==('constant' if scenario=='constant' else 'table')
