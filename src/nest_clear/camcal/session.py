@@ -11,6 +11,7 @@ import numpy as np
 import yaml
 from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
+from nest_clear.guard import format_pose
 from .config import CameraCalibConfig
 from nest_clear.vision.geometry import Calibration, pixel_to_module
 
@@ -247,7 +248,7 @@ class CameraCalibrationSession:
                 'glare_missing_ids': [], 'glare_excluded_ids': [],
                 'glare_missing_corners': 0, 'glare_excluded_corners': 0}
         if fraction > cfg.max_saturated_fraction:
-            cv2.putText(overlay,f'{n} xyz={tuple(np.round(pose,2))} sat={fraction:.3%}',(10,30),cv2.FONT_HERSHEY_SIMPLEX,.7,(255,255,0),2)
+            cv2.putText(overlay,f'{n} xyz={format_pose(pose)} sat={fraction:.3%}',(10,30),cv2.FONT_HERSHEY_SIMPLEX,.7,(255,255,0),2)
             label = '标定板区域内饱和比例' if scope == 'board' else '全图饱和比例（无法确定有效标定板区域）'
             return self._fail('CAMCAL-OVEREXPOSED',f'第 {n} 张{label} {fraction:.3%} 超过 {cfg.max_saturated_fraction:.3%}；请降低照明。',detail,overlay)
         margin = _glare_margin(predicted, cfg)
@@ -289,7 +290,7 @@ class CameraCalibrationSession:
                        'usable_corners': int(keep.sum())})
         if blobs:
             detail.update({'bbox': blobs[0]['bbox'], 'area_px': blobs[0]['area_px']})
-        cv2.putText(overlay,f'{n}/{len(self._plan)+1 if self._plan else "?"} xyz={tuple(np.round(pose,2))} corners={len(ids)} sat={fraction:.3%}',(10,30),cv2.FONT_HERSHEY_SIMPLEX,.7,(255,255,0),2)
+        cv2.putText(overlay,f'{n}/{len(self._plan)+1 if self._plan else "?"} xyz={format_pose(pose)} corners={len(ids)} sat={fraction:.3%}',(10,30),cv2.FONT_HERSHEY_SIMPLEX,.7,(255,255,0),2)
         if keep.sum() < 4 or expected == 0 or keep.sum() < cfg.min_corner_ratio * expected:
             # Compare glare-related losses to all other losses; count each ID once.
             glare_loss = len(attributed | (excluded & set(np.flatnonzero(visible))))

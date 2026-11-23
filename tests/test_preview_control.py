@@ -33,7 +33,7 @@ def test_ui_controls():
     assert not preview_controls({}, None)['enabled']
     assert preview_controls({'pid': 1}, 1)['enabled']
     assert not preview_controls({'pid': 1, 'child_pid': 2}, 1)['enabled']
-    assert '挑毛主流程' in preview_controls({'pid': 1, 'child_state': '启动中'}, 1)['reason']
+    assert '主程序运行中' in preview_controls({'pid': 1, 'child_state': '启动中'}, 1)['reason']
     assert not preview_controls({'pid': 1}, 4)['enabled']
 
 

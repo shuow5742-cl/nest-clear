@@ -2,13 +2,13 @@
 import math
 
 from nest_clear.config import Scan
-from nest_clear.guard import GuardError
+from nest_clear.guard import GuardError, format_pose
 
 
 def guard_position(position: tuple[float, ...], travel: tuple[tuple[float, ...], ...], where: str) -> None:
     """检查三轴有限值和行程，供扫描及挑取下发前共用。"""
     if len(position) != 3 or len(travel) != 3 or any(not math.isfinite(v) or not bounds[0] <= v <= bounds[1] for v, bounds in zip(position, travel)):
-        raise GuardError("POSITION-TRAVEL", f"坐标 {position} 超出行程 {travel} 或不是有限数", where, "检查扫描范围、工具补偿和设备行程。")
+        raise GuardError("POSITION-TRAVEL", f"坐标 {format_pose(position)} 超出行程 {travel} 或不是有限数", where, "检查扫描范围、工具补偿和设备行程。")
 
 
 def _axis_points(start: float, end: float, step: float) -> list[float]:

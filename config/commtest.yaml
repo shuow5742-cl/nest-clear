@@ -170,13 +170,13 @@ tool_calibration:
   max_condition: 100.0
   z_disagreement_mm: 0.03
 camera_calibration:
-  start_xyz: [92.651, 88.445, -11.904]  # 用户 11-20 现场预览找的起始位
+  start_xyz: [92.651, 88.445, -8.854]  # 11-22 换真实标定板：11-20 纸面起始位 Z -11.904 抬高 3.05mm（板 3.15 − 纸 0.1；Z 向上为正）
   cols: 21
   rows: 16
   square_mm: 5.0
   marker_mm: 3.75
   dictionary: DICT_5X5_250
-  board_thickness_mm: 0.1  # 打印纸代替标定板；若贴在硬板上，填纸+板实测总厚
+  board_thickness_mm: 3.15  # 11-22 真实标定板实测厚度（图案同标定纸）
   # 起始 X 距下限 12.65 mm、Z 距下限 3.1 mm，故缩小标定幅度。
   xy_limit_mm: 12.5
   z_limit_mm: 3.0

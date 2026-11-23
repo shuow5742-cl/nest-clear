@@ -44,6 +44,7 @@ class Widget:
     def column(self, *args, **kwargs): pass
     def tag_configure(self, *args, **kwargs): pass
     def yview(self, *args): pass
+    def yview_moveto(self, *args): pass
     def set(self, *args): pass
     def insert(self, parent, where, iid=None, **kwargs):
         iid = str(iid) if iid is not None else str(len(self.rows))
@@ -61,6 +62,8 @@ class Widget:
     def create_line(self, *args, **kwargs): pass
     def create_polygon(self, *args, **kwargs): pass
     def create_image(self, *args, **kwargs): pass
+    def create_window(self, *args, **kwargs): return 1
+    def itemconfigure(self, *args, **kwargs): pass
     def scan_mark(self, *args): pass
     def scan_dragto(self, *args, **kwargs): pass
 
@@ -232,6 +235,14 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
             assert ui.cam_step.values_data['亮斑'] == '(1,2)–(3,4)，面积 42 px'
         ui.update_cam({'kind':'move', 'detail':{}})
         assert ui.cam_step.values_data['亮斑'] == '无'
+        ui.update_cam({'kind': 'fail', 'code': 'CAMCAL-FLOW', 'reason': '到位超差', 'hint': '检查位置'})
+        assert ui.cam_result_card.options['row'] == 1
+        assert ui.cam_plan_card.options['row'] == 4
+        assert ui.cam_result.options['height'] >= 5
+        assert ui._cam_result_cache[0] == '失败：CAMCAL-FLOW\n到位超差\n建议：检查位置'
+        ui.update_cam({'kind': 'move'})
+        assert ui.cam_result_card.options['row'] == 4
+        assert ui.cam_plan_card.options['row'] == 1
         assert len([t for t in plan_titles if t and t.startswith('Z')]) == 5
         assert {'Z0', 'Z-5', 'Z-2.5', 'Z+2.5', 'Z+5'} == {t.split(' · ')[0] for t in plan_titles if t and t.startswith('Z')}
         assert ui.reply_table.options['height'] == 5
@@ -456,3 +467,57 @@ def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
             time.sleep(0.01)
         assert pic.image is not None
         assert pic.options.get('text') == ''
+
+
+def test_reply_detail_shows_full_reason(monkeypatch):
+    from nest_clear.ui import app
+    created = []
+    class Text(Widget):
+        def insert(self, index, value):
+            self.content = value
+            created.append(self)
+    monkeypatch.setattr(app.tk, 'Toplevel', Widget)
+    monkeypatch.setattr(app.tk, 'Text', Text)
+    monkeypatch.setattr(app.ttk, 'Scrollbar', Widget)
+    ui = object.__new__(app.App)
+    ui.root = Widget(); ui.theme = SimpleNamespace(mono=('monospace', 10))
+    ui.reply_table = Widget()
+    reason = '相机标定失败：' + '检查位姿与光照。' * 30
+    row = ui.reply_table.insert('', 'end', values=('12:00', 42, '80 → 82', reason))
+    ui.reply_table.sel = (row,)
+    ui.reply_detail()
+    assert reason in created[0].content
+    assert created[0].options['state'] == 'disabled'
+
+
+def test_cam_scroll_geometry_coalesces_feedback_and_ignores_content_width():
+    from nest_clear.ui.app import ScrollGeometry
+
+    class Canvas:
+        def __init__(self):
+            self.queue = []; self.width_updates = []; self.regions = []; self.content_width = 343
+        def after_idle(self, callback): self.queue.append(callback)
+        def bbox(self, _tag): return (0, 0, self.content_width, 1030)
+        def itemconfigure(self, _window, **kwargs):
+            self.width_updates.append(kwargs['width'])
+            geometry.content_changed(None)
+        def configure(self, **kwargs):
+            self.regions.append(kwargs['scrollregion'])
+            self.content_width = 346 if self.content_width == 343 else 343
+            geometry.content_changed(None)
+
+    canvas = Canvas(); geometry = ScrollGeometry(canvas, 1)
+    for _ in range(10): geometry.content_changed(None)
+    assert not canvas.queue and not canvas.regions
+    for _ in range(10): geometry.viewport_changed(SimpleNamespace(width=450))
+    assert len(canvas.queue) == 1
+    steps = 0
+    while canvas.queue and steps < 10:
+        canvas.queue.pop(0)(); steps += 1
+    assert not canvas.queue and steps == 2
+    assert canvas.width_updates == [450]
+    assert canvas.regions == [(0, 0, 450, 1030)]
+    canvas.content_width = 343
+    geometry.content_changed(None)
+    canvas.queue.pop(0)()
+    assert not canvas.queue and len(canvas.regions) == 1

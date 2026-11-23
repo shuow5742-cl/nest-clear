@@ -11,7 +11,7 @@ from autoweaver.motion_policy.nodes.leaf.condition import Condition
 from autoweaver.motion_policy.nodes.node import Status, TreeNode
 
 from nest_clear.config import Config
-from nest_clear.guard import GuardError, diagnostic
+from nest_clear.guard import GuardError, diagnostic, format_pose
 from nest_clear.vision.hair_integration import render
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.events import EventRecorder
@@ -207,7 +207,7 @@ class CheckArrival(Instant):
         bb.write("arrival_ok", ok, self.name)
         self.events.emit("arrival", task_id=bb.read("task_id"), expected=expected, actual=actual, ok=ok)
         if not ok:
-            reason = f"到位超差：期望 {expected}，实际 {actual}，公差 {self.config.arrival_tolerance_mm} mm"
+            reason = f"到位超差：期望 {format_pose(expected)}，实际 {format_pose(actual)}，公差 {self.config.arrival_tolerance_mm} mm"
             bb.write("error", reason, self.name)
             bb.write("error_diagnostic", diagnostic(reason, code="MOTION-ARRIVAL", where="扫描位到位校验", hint="检查设备坐标、运动和到位公差。"), self.name)
 

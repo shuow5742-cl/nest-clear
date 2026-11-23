@@ -29,7 +29,7 @@ class MainStatus:
             if e == 'mode_change': d['mode'] = row.get('mode','空闲')
             if e == 'request':
                 d.update(task_id=row.get('task_id'), request_func=row.get('func'))
-                if row.get('func') == 80 and d['camcal'].get('event') not in ('camcal_start', 'camcal_goto_start', 'camcal_step'):
+                if row.get('func') == 80 and d['camcal'].get('event') not in ('camcal_start', 'camcal_goto_start', 'camcal_step', 'camcal_glare_warning'):
                     d['camcal'] = {'event': 'camcal_starting'}
             if e == 'reply':
                 reply = row.get('reply_func', row.get('func'))
@@ -42,9 +42,12 @@ class MainStatus:
                     del d['recent_replies'][5:]
             if e in ('work_cycle','detection','capture','scan_plan','tray_end'): d['picking'].update({k:v for k,v in row.items() if k not in ('event','pid','mono')})
             if e == 'camcal_start': d['camcal'] = {}
-            if e.startswith('camcal_'):
+            if e == 'camcal_glare_warning':
+                d['camcal']['glare_warning'] = {k: row[k] for k in ('image_index', 'bboxes', 'excluded_corners') if k in row}
+            elif e.startswith('camcal_'):
                 d['camcal'].update(row)
                 if e == 'camcal_step':
+                    d['camcal'].pop('glare_warning', None)
                     count = max(0, int(row.get('sequence', 1)) - 1)
                     d['camcal']['completed_indices'] = list(range(min(count, len(row.get('plan') or []))))
                     d['camcal']['current_index'] = count if count < len(row.get('plan') or []) else None

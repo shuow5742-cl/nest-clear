@@ -109,6 +109,7 @@ class KeyValueGrid(tk.Frame):
         super().__init__(parent, bg=WHITE)
         self.columnconfigure(1, weight=1)
         self.values = {}
+        self._wrap_width = None
         for index, key in enumerate(keys):
             label = tk.Label(self, text=key, font=theme.body, bg=WHITE, fg=MUTED, anchor='ne', justify='right')
             label.grid(row=index, column=0, sticky='ne', padx=(0, 8), pady=2)
@@ -120,6 +121,9 @@ class KeyValueGrid(tk.Frame):
     def _rewrap(self, event):
         key_width = max((child.winfo_reqwidth() for child in self.grid_slaves(column=0)), default=0)
         width = max(40, event.width - key_width - 12)
+        if width == getattr(self, '_wrap_width', None):
+            return
+        self._wrap_width = width
         for value in self.values.values():
             value.configure(wraplength=width)
 
@@ -127,6 +131,41 @@ class KeyValueGrid(tk.Frame):
         for key, widget in self.values.items():
             value = values.get(key)
             widget.configure(text=str(value) if value is not None else '—')
+
+
+class ScrollGeometry:
+    """Coalesce geometry events and update the canvas only when values change."""
+    def __init__(self, canvas, window):
+        self.canvas, self.window = canvas, window
+        self.width = self.applied_width = self.region = None
+        self.pending = False
+
+    def viewport_changed(self, event):
+        if event.width > 1:
+            self.width = event.width
+            self.schedule()
+
+    def content_changed(self, _event):
+        if self.width is not None:
+            self.schedule()
+
+    def schedule(self):
+        if not self.pending:
+            self.pending = True
+            self.canvas.after_idle(self.apply)
+
+    def apply(self):
+        self.pending = False
+        if self.width is None:
+            return
+        if self.width != self.applied_width:
+            self.applied_width = self.width
+            self.canvas.itemconfigure(self.window, width=self.width)
+        bounds = self.canvas.bbox('all')
+        region = (0, 0, self.width, max(0, bounds[3]) if bounds else 0)
+        if region != self.region:
+            self.region = region
+            self.canvas.configure(scrollregion=region)
 
 
 class Picture(tk.Label):
@@ -141,6 +180,7 @@ class Picture(tk.Label):
         self.busy = False
         self.size = None
         self.aspect_changed = None
+        self.keep_on_missing = False
         self.bind('<Button-1>', self.enlarge)
 
     def poll(self):
@@ -152,7 +192,7 @@ class Picture(tk.Label):
             stamp = None
         size = (max(1, self.winfo_width()), max(1, self.winfo_height()))
         if stamp is None:
-            if self.image is not None or self.photo is not None or self.mtime is not None:
+            if not getattr(self, 'keep_on_missing', False) and (self.image is not None or self.photo is not None or self.mtime is not None):
                 self.image = self.photo = self.mtime = self.size = None
                 self.configure(image='', text='暂无图像')
         elif (stamp != self.mtime or size != self.size) and not self.busy and min(size) > 1:
@@ -356,6 +396,9 @@ class App:
         reply = self.card(left, '最近应答', 2, 0, columnspan=2)
         self.reply_table = self.table_widget(reply, ('时间', 'Task_ID', '功能码', '原因'),
                                              (80, 65, 85, 120), stretch=('原因',), height=5)
+        self.reply_table.bind('<Double-1>', self.reply_detail)
+        self.reply_table.bind('<Motion>', self.reply_hover)
+        self.reply_table.bind('<Leave>', self.reply_hover_close)
         image_container = tk.Frame(self.home, bg=BG, width=400)
         image_container.grid(row=0, column=1, sticky='nsew')
         image_container.grid_propagate(False)
@@ -413,7 +456,19 @@ class App:
         self.cam.columnconfigure(0, weight=65, uniform='camcols'); self.cam.columnconfigure(1, weight=35, uniform='camcols')
         self.cam.rowconfigure(0, weight=1)
         self.cam_picture = self.picture(self.card(self.cam, '主相机实时标注 · 点击放大', 0, 0), 'camcal_latest')
-        right = self.cam_right = tk.Frame(self.cam, bg=BG); right.grid(row=0, column=1, sticky='nsew')
+        self.cam_picture.keep_on_missing = True
+        container = tk.Frame(self.cam, bg=BG); container.grid(row=0, column=1, sticky='nsew')
+        container.rowconfigure(0, weight=1); container.columnconfigure(0, weight=1)
+        viewport = self.cam_viewport = tk.Canvas(container, bg=BG, highlightthickness=0)
+        viewport.grid(row=0, column=0, sticky='nsew')
+        scroll = ttk.Scrollbar(container, orient='vertical', command=viewport.yview)
+        scroll.grid(row=0, column=1, sticky='ns'); viewport.configure(yscrollcommand=scroll.set)
+        right = self.cam_right = tk.Frame(viewport, bg=BG)
+        window = viewport.create_window((0, 0), window=right, anchor='nw', width=400)
+        geometry = self.cam_scroll_geometry = ScrollGeometry(viewport, window)
+        right.bind('<Configure>', geometry.content_changed)
+        viewport.bind('<Configure>', geometry.viewport_changed)
+        viewport.bind('<MouseWheel>', lambda event: viewport.yview_scroll(-int(event.delta / 120), 'units'))
         right.columnconfigure(0, weight=1)
         for row, weight in enumerate((3, 3, 3, 5, 2)): right.rowconfigure(row, weight=weight)
         progress = self.card(right, '标定进度', 0, 0)
@@ -503,7 +558,7 @@ class App:
         self.preview_status = self.label(progress, '已关闭')
         self.preview_status.grid(row=3, column=0, sticky='w')
         plan = self.card(right, '计划点 · XY 平面', 1, 0)
-        self.plan = tk.Canvas(plan, bg=WHITE, highlightthickness=0)
+        self.plan = tk.Canvas(plan, bg=WHITE, highlightthickness=0, height=150)
         self.plan.grid(row=0, column=0, sticky='nsew')
         step = self.card(right, '当前步', 2, 0)
         self.cam_step = KeyValueGrid(step, ('步骤', '检出角点', '饱和比例', '亮斑'), self.theme)
@@ -512,10 +567,13 @@ class App:
         self.preview_values = KeyValueGrid(preview, ('模组 XYZ', '清晰度', '检出角点', '板中心偏移 mm', '提示'), self.theme)
         self.preview_values.grid(row=0, column=0, sticky='new')
         result = self.card(right, '结果', 4, 0)
+        self.cam_plan_card, self.cam_result_card = plan.master, result.master
         self.cam_other_cards = [plan.master, step.master, preview.master, result.master]
-        self.cam_result = tk.Label(result, text='标定进行中', bg='#ecfdf3', fg=COLORS['green'],
-                                   font=self.theme.body, justify='left', anchor='nw', wraplength=460, padx=6, pady=4)
+        self.cam_result = tk.Text(result, height=5, width=20, wrap='word', state='disabled', bg='#ecfdf3', fg=COLORS['green'],
+                                  font=self.theme.body, padx=6, pady=4)
         self.cam_result.grid(row=0, column=0, sticky='nsew')
+        result_scroll = ttk.Scrollbar(result, orient='vertical', command=self.cam_result.yview)
+        result_scroll.grid(row=0, column=1, sticky='ns'); self.cam_result.configure(yscrollcommand=result_scroll.set)
 
     def build_offset(self):
         self.offset_tool = None; self.offset_mode = 'center'; self.offset_pending = 0; self.offset_dialog = None; self.offset_last_phase = None
@@ -1024,6 +1082,38 @@ class App:
                     ttk.Button(top, text='查看 ' + key, command=lambda image_path=path: self.open_image(image_path)).grid(row=index, column=0, sticky='w')
                     index += 1
 
+    def reply_detail(self, _event=None):
+        selected = self.reply_table.selection()
+        if not selected: return
+        values = self.reply_table.item(selected[0], 'values')
+        if not values: return
+        top = tk.Toplevel(self.root); top.title('应答详情')
+        top.rowconfigure(0, weight=1); top.columnconfigure(0, weight=1)
+        text = tk.Text(top, width=80, height=16, wrap='word', font=self.theme.mono)
+        text.grid(row=0, column=0, sticky='nsew')
+        scroll = ttk.Scrollbar(top, orient='vertical', command=text.yview)
+        scroll.grid(row=0, column=1, sticky='ns'); text.configure(yscrollcommand=scroll.set)
+        text.insert('1.0', '\n'.join(f'{name}：{value}' for name, value in zip(('时间', 'Task_ID', '功能码', '原因'), values)))
+        text.config(state='disabled')
+
+    def reply_hover_close(self, _event=None):
+        tip = getattr(self, '_reply_tip', None)
+        if tip is not None: tip.destroy()
+        self._reply_tip = None; self._reply_tip_row = None
+
+    def reply_hover(self, event):
+        row = self.reply_table.identify_row(event.y)
+        if not row or self.reply_table.identify_column(event.x) != '#4':
+            self.reply_hover_close(); return
+        if row == getattr(self, '_reply_tip_row', None): return
+        self.reply_hover_close()
+        values = self.reply_table.item(row, 'values')
+        if len(values) < 4: return
+        tip = self._reply_tip = tk.Toplevel(self.root); self._reply_tip_row = row
+        tip.wm_overrideredirect(True)
+        tip.geometry(f'+{event.x_root + 12}+{event.y_root + 16}')
+        tk.Label(tip, text=str(values[3]), justify='left', wraplength=600, bg='#fffbe6', relief='solid', borderwidth=1).pack()
+
     def open_image(self, path):
         try:
             widget = Picture(self.root, Path(path), self.theme)
@@ -1033,11 +1123,16 @@ class App:
             pass
 
     def file_data(self, path):
-        try: stamp = path.stat().st_mtime_ns
-        except OSError: stamp = None
-        if path not in self.files or self.files[path][0] != stamp:
-            self.files[path] = (stamp, read_json(path))
-        return self.files[path][1]
+        try:
+            stamp = path.stat().st_mtime_ns
+            if path not in self.files or self.files[path][0] != stamp:
+                value = json.loads(path.read_text(encoding='utf-8'))
+                if not isinstance(value, dict):
+                    raise ValueError('状态必须是字典')
+                self.files[path] = (stamp, value)
+        except (OSError, ValueError, UnicodeError):
+            pass
+        return self.files.get(path, (None, {}))[1]
 
     @staticmethod
     def val(data, *keys, default='—'):
@@ -1134,20 +1229,33 @@ class App:
 
         failed = data.get('event') in ('camcal_failed', 'camcal_aborted') or data.get('kind') == 'fail'
         done = data.get('event') == 'camcal_done' or data.get('kind') == 'done'
+        if failed != getattr(self, '_cam_failed', False):
+            self.cam_result_card.grid_configure(row=1 if failed else 4)
+            self.cam_plan_card.grid_configure(row=4 if failed else 1)
+            if failed: self.cam_viewport.yview_moveto(0)
+            self._cam_failed = failed
         if failed:
             reason = data.get('reason') or '标定失败'
             hint = data.get('hint') or ('请' + reason.rsplit('请', 1)[1] if '请' in reason else '检查标定板、光照和相机连接。')
-            text = f"{data.get('code') or 'CAMCAL-FAILED'}\n{reason}\n建议：{hint}"
-            self.cam_result.config(text=text, bg='#b42318', fg=WHITE)
+            text = f"失败：{data.get('code') or 'CAMCAL-FAILED'}\n{reason}\n建议：{hint}"
+            color, background = COLORS['red'], '#fff1f0'
         elif done:
             report = data.get('report') if isinstance(data.get('report'), dict) else detail
             text = (f"标定成功  RMS：{report.get('rms_px', '—')} px\n"
                     f"主点尺度：{report.get('um_per_px_at_principal', '—')} µm/px  "
                     f"轴比例：{report.get('axis_scale', '—')}\n倾角：{report.get('camera_tilt_deg', '—')}°\n"
                     f"文件：{data.get('calibration_path') or '—'}  备份：{data.get('backup_path') or '—'}")
-            self.cam_result.config(text=text, bg='#ecfdf3', fg=COLORS['green'])
+            color, background = COLORS['green'], '#ecfdf3'
         else:
-            self.cam_result.config(text='标定进行中' if data else '无数据', bg='#ecfdf3', fg=COLORS['green'])
+            text = '标定进行中' if data else '无数据'
+            color, background = COLORS['green'], '#ecfdf3'
+        if not failed:
+            text = f'当前步骤：{step}' + (f'  {code}' if code else '') + '\n' + text
+        if (text, color, background) != getattr(self, '_cam_result_cache', None):
+            self.cam_result.config(state='normal', bg=background, fg=color)
+            self.cam_result.delete('1.0', 'end'); self.cam_result.insert('1.0', text)
+            self.cam_result.config(state='disabled')
+            self._cam_result_cache = (text, color, background)
         start = data.get('start_xyz')
         origin_z = start[2] if isinstance(start, (list, tuple)) and len(start) == 3 else None
         self.draw_plan(points, count, origin_z)
@@ -1205,8 +1313,12 @@ class App:
             self.cam_picture.image = self.cam_picture.photo = None
             self.cam_picture.config(image='', text='暂无图像')
         p = self.preview_data
-        self.preview_values.set({'模组 XYZ': p.get('actual_xyz') if p.get('actual_xyz') is not None else '--', '清晰度': p.get('sharpness'),
-                           '检出角点': p.get('corners'), '板中心偏移 mm': p.get('board_offset_mm'),
+        def vector(value):
+            if not isinstance(value, (list, tuple)): return '—'
+            try: return '[' + ', '.join(f'{float(v):.3f}' for v in value) + ']'
+            except (TypeError, ValueError): return str(value)
+        self.preview_values.set({'模组 XYZ': vector(p.get('actual_xyz')), '清晰度': p.get('sharpness'),
+                           '检出角点': p.get('corners'), '板中心偏移 mm': vector(p.get('board_offset_mm')),
                            '提示': '偏移接近 0 且清晰度最大处即为推荐起始位'})
 
     def focus_action(self, action, **fields):

@@ -22,6 +22,10 @@ def test_decode_and_status():
     assert status_indicators({}, {})['PLC 连接'][0]=='gray'
     assert status_indicators({'plc_connected':False}, {})['PLC 连接'][0]=='red'
 
+def test_preview_unavailable_when_main_running():
+    from nest_clear.ui.model import preview_controls
+    assert preview_controls({'pid': 1, 'child_pid': 2}, 0)['reason'] == '主程序运行中，预览不可用'
+
 def test_categories():
     for row, category in [({'event':'camcal_failed'},'标定'),({'event':'plc_disconnected'},'通信'),({'event':'error','code':'CONFIG-X'},'配置'),({'event':'error','code':'CAMERA-X'},'相机'),({'event':'supervisor_reply_999','process':'supervisor'},'父程序'),({'event':'error'},'算法')]:
         assert classify_event(row)['category']==category

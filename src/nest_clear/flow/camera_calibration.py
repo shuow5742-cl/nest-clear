@@ -7,7 +7,7 @@ from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 
 from nest_clear.plan.scan_path import guard_position
-from nest_clear.guard import GuardError, diagnostic
+from nest_clear.guard import GuardError, diagnostic, format_pose
 from .calibration import change_mode
 from .leaves import CallWorker, Instant, Predicate
 from .modes import Mode
@@ -80,7 +80,7 @@ class Prepare(Instant):
                 self.ctx.events.emit("camcal_goto_start", task_id=bb.read("task_id"), actual=actual, target=target)
         elif session["target"] is not None:
             if any(abs(a-b) > tolerance for a,b in zip(actual, session["target"])):
-                reason = f"相机标定到位超差：期望 {session['target']}，实际 {actual}，公差 {tolerance} mm"
+                reason = f"相机标定到位超差：期望 {format_pose(session['target'])}，实际 {format_pose(actual)}，公差 {tolerance} mm"
                 finish(self.ctx, bb, "aborted", reason=reason)
                 raise ValueError(reason)
             if session["start"] is None:
@@ -131,7 +131,7 @@ class Process(Instant):
                                 and all(math.isfinite(v) for v in target)
                                 and any(not lo <= v <= hi for v, (lo, hi) in zip(target, ctx.config.commtest["camcal_travel"])))
             if len(target) != 3 or any(not math.isfinite(v) for v in target) or (not outside_commtest and any(abs(target[i]-session["start"][i]) > (cfg.xy_limit_mm if i < 2 else cfg.z_limit_mm) for i in range(3))):
-                raise ValueError(f"相机标定目标超出起始位置相对行程：{target}")
+                raise ValueError(f"相机标定目标超出起始位置相对行程：{format_pose(target)}")
             if ctx.config.run_mode != "commtest":
                 guard_position(target, ctx.config.travel, "相机标定")
             session["target"] = target

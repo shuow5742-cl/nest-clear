@@ -14,7 +14,7 @@ from autoweaver.motion_policy.nodes.control.fallback import Fallback
 from autoweaver.motion_policy.nodes.control.sequence import Sequence
 from autoweaver.motion_policy.nodes.node import TreeNode, Status
 
-from nest_clear.guard import GuardError, diagnostic
+from nest_clear.guard import GuardError, diagnostic, format_pose
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.summary import write_tooltip_summary
 from nest_clear.tooltip import SilhouetteTipDetector, check_quality, compute_compensation, is_aligned, solve_correction, fit_view_jacobian
@@ -92,7 +92,7 @@ class SaveCompensation(Instant):
                              expected=expected, actual=final, realtime=actual if not session["offset"] else None,
                              tolerance_mm=tol, ok=ok)
         if not ok:
-            fail(f"最终坐标不一致：期望 {expected}，实际 {final}，实时 {actual}，公差 {tol} mm")
+            fail(f"最终坐标不一致：期望 {format_pose(expected)}，实际 {format_pose(final)}，实时 {format_pose(actual)}，公差 {tol} mm")
         result = compute_compensation(baseline, final)
         new = tuple(float(x) for x in result.offset_xyz)
         delta = [float(x) for x in result.delta_xyz]
@@ -228,7 +228,7 @@ class CheckPosition(Instant):
         self.ctx.events.emit("tooltip_position_check", task_id=bb.read("task_id"), tool=session["tool"],
                              actual=actual, expected=expected, tolerance_mm=tol, ok=ok)
         if not ok:
-            fail(f"对刀位置超差：实际 {actual}，期望 {expected}，公差 {tol} mm")
+            fail(f"对刀位置超差：实际 {format_pose(actual)}，期望 {format_pose(expected)}，公差 {tol} mm")
         if self.start:
             target = Mode.CALIBRATING_1 if session["tool"] == 1 else Mode.CALIBRATING_2
             change_mode(bb, self.ctx, target, self.name)

@@ -84,7 +84,7 @@ def pickacc_demo(state, stamp):
                         'tool2':{'type':'table','time':stamp,'verification':[{}],'stale':True}}, 'candidate':candidate}
 
 
-def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None, focus_state=None):
+def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None, focus_state=None, camcal_state=None):
     root = Path(root)
     now = datetime.now().astimezone(); stamp = now.isoformat()
     start = (now - timedelta(hours=2, minutes=18)).isoformat()
@@ -117,6 +117,13 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
             'existing':{'tool1':{'time':stamp,'offset_xy_mm':[1.2,-0.3],'n':5,'se':[.01,.01], 'current_tools_xy':[1.2,-0.3], 'baseline_stale':True}, 'tool2':{}},
             'samples':[{'target':'T02','offset_xy_mm':[1.2,-.3], 'distance_from_mean_mm':.01, 'outlier':False}],
             'mean':[1.2,-.3], 'std':[.01,.01], 'se':[.005,.005], 'edges':[]}})
+    if camcal_state:
+        path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
+        data['camcal'].update(event='camcal_failed' if camcal_state == 'failed' else 'camcal_step',
+                              kind='fail' if camcal_state == 'failed' else 'move')
+        if camcal_state == 'failed':
+            data['camcal'].update(code='CAMCAL-FLOW', reason='相机标定到位超差：期望 (105.185, 79.960, -14.904)，实际 (105.480, 80.120, -14.800)，公差 0.05 mm。请检查模组位置、运动状态及标定板，确认设备已到达目标位置后重新标定。', hint='检查模组运动、位置反馈和标定板，然后重新启动标定。')
+        atomic(path, data)
     if offset_state:
         path = main_status_file(root)
         data = json.loads(path.read_text(encoding='utf-8'))
@@ -256,7 +263,10 @@ def main():
     from .__main__ import add_view_arguments, validate_view_arguments
     parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm')); parser.add_argument('--tooltip-state', choices=('idle','probe','confirm_move','in_range','done','fail')); add_view_arguments(parser)
     parser.add_argument('--focus-state', choices=('off','live','exposure'), default=None)
+    parser.add_argument('--camcal-state', choices=('running', 'failed', 'preview'), default=None)
     args = parser.parse_args(); validate_view_arguments(parser, args)
+    if args.camcal_state:
+        args.preview_state = 'on' if args.camcal_state == 'preview' else 'blocked'
     if args.offset_state is None and args.page in ('offset', 'tool-offset', '工具偏移标定', '工具偏移标定页'):
         args.offset_state = 'wait_tool'
     if args.focus_state == 'off':
@@ -264,11 +274,11 @@ def main():
     elif args.focus_state in ('live', 'exposure'):
         args.preview_state = 'on'
     # 先同步生成第一帧，让短延迟截图也有完整内容。
-    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state)
+    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state)
     def update():
         step = 1
         while True:
-            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state); step += 1
+            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state); step += 1
     threading.Thread(target=update, daemon=True).start()
     from .app import App
     app = App(args.root, page=args.page, screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms, ignore_before_ns=0)

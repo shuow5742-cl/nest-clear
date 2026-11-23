@@ -32,3 +32,12 @@ def diagnostic(error, *, code="INTERNAL-ERROR", where="算法流程", hint="检�
                 parsed[field] = line[len(prefix):].strip()
     return {"reason_code": parsed.get("reason_code") or code, "what": parsed.get("what") or value,
             "where": parsed.get("where") or where, "hint": parsed.get("hint") or hint}
+
+
+def format_pose(pose):
+    """Format coordinates for human-readable diagnostics without changing their values."""
+    try:
+        return '(' + ', '.join(f'{float(value):.3f}' for value in pose) + ')'
+    except (TypeError, ValueError, OverflowError):
+        return str(pose)
+
