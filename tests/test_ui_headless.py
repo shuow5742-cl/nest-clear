@@ -22,6 +22,8 @@ class Widget:
     def rowconfigure(self, index, **kwargs): self.row_options.setdefault(index, {}).update(kwargs)
     def columnconfigure(self, *args, **kwargs): pass
     def grid(self, *args, **kwargs): pass
+    def grid_remove(self): pass
+    def tkraise(self): pass
     def grid_configure(self, **kwargs): self.options.update(kwargs)
     def grid_propagate(self, *args): pass
     def bind(self, event, callback, *args, **kwargs): self.bindings[event] = callback
@@ -98,7 +100,7 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     write_demo(tmp_path, initial=True)
     for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text'):
         monkeypatch.setattr(app.tk, name, Widget)
-    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button'):
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox'):
         monkeypatch.setattr(app.ttk, name, Widget)
     monkeypatch.setattr(app.ttk, 'Style', Style)
     monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
@@ -149,6 +151,28 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
             ui.select_page(name + '页' if name != '主页' else name)
             assert ui.tabs.selected == index
         ui.refresh()
+        ui.update_preview({'pid': 1, 'child_pid': 2})
+        assert ui.focus_button.options['state'] == 'disabled'
+        assert ui.preview_button.options['state'] == 'disabled'
+        focus = {'on': True, 'mode': 'focus', 'scores': [1.0]*9, 'peaks': [2.0]*9,
+                 'percent': [50.0]*9, 'center': 1.0, 'median': 1.0, 'laplacian': [10.0]*9,
+                 'cell_means': [100.0]*9, 'mean': 100.0, 'p1': 20, 'p99': 180,
+                 'saturated_pct': 0, 'dark_pct': 0, 'tilt': '左上', 'exposure_hint': ''}
+        ui.update_preview({'pid': 1, 'preview': focus})
+        assert ui.focus_button.options['state'] == 'normal'
+        assert ui.preview_button.options['state'] == 'disabled'
+        assert ui.focus_percent.options['text'] == '50%'
+        assert ui.focus_alert.options['text'] == '左上'
+        assert ui.focus_curve.options['height'] >= 120
+        assert len(ui.focus_score_cells) == len(ui.focus_mean_cells) == 9
+        row = {'exposure_us': 3000, 'saturated_fraction': 0, 'p99': 200, 'corners': 30, 'sharpness': 1.2}
+        focus['exposure_sweep'] = {'state': 'done', 'mode': 'calibration', 'index': 10, 'total': 10,
+                                   'original_us': 6000, 'rows': [row], 'recommendation': row}
+        ui.update_preview({'pid': 1, 'preview': focus})
+        assert ui.exposure_apply.options['state'] == 'normal'
+        assert any('推荐 3000.0' in str(value) for value in ui.exposure_message.options.values())
+        assert next(iter(ui.exposure_table.rows.values()))['tags'] == ('recommended',)
+        ui.update_preview({'pid': 1, 'preview': {'on': False}})
         assert all(b.options['state'] == 'disabled' for b in ui.offset_tool_buttons + ui.offset_mode_buttons)
         assert ui.offset_start.options['state'] == 'disabled'
         assert ui.offset_tool_buttons[0].options['style'] == 'OffsetSelected.TButton'
@@ -369,7 +393,7 @@ def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
 
     for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text'):
         monkeypatch.setattr(app.tk, name, Widget)
-    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button'):
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox'):
         monkeypatch.setattr(app.ttk, name, Widget)
     monkeypatch.setattr(app.ttk, 'Style', Style)
     monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])

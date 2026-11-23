@@ -163,7 +163,10 @@ def preview_controls(status, age_s):
     live = bool(status.get('pid')) and age_s is not None and age_s <= 3
     running = bool(status.get('child_pid')) or status.get('child_state') in ('启动中', '运行', '就绪')
     reason = '父程序未运行' if not live else '挑毛主流程运行中，预览不可用' if running else None
-    return {'enabled': live and not running, 'on': bool(preview.get('on')), 'reason': reason}
+    on = bool(preview.get('on'))
+    mode = preview.get('mode', 'preview')
+    enabled = live and not running
+    return {'enabled': enabled, 'on': on, 'mode': mode, 'preview_enabled': enabled and (not on or mode == 'preview'), 'focus_enabled': enabled and (not on or mode == 'focus'), 'reason': reason}
 
 
 def edge_corner_label(corner):

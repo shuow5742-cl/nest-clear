@@ -80,6 +80,7 @@ class Supervisor:
         self._ui_disabled = False
         self.preview_process = None
         self.preview_seq = 0
+        self.preview_mode = None
         self.preview_xyz = None
         self._preview_command_stamp = None
         self._preview_xyz_next = 0.0
@@ -213,7 +214,8 @@ class Supervisor:
         try:
             if process.is_alive():
                 process.terminate()
-                process.join(timeout=2)
+                timeout = max(2, self.config.capture_timeout_s + 8) if self.preview_mode == 'focus' else 2
+                process.join(timeout=timeout)
                 if process.is_alive():
                     process.kill()
                     process.join(timeout=2)
@@ -239,6 +241,9 @@ class Supervisor:
                 return
             command = json.loads(path.read_text(encoding="utf-8"))
             seq, wanted = command['seq'], command['preview']
+            mode = command.get('mode', 'preview')
+            if mode not in ('preview', 'focus'):
+                return
             if type(seq) is not int or type(wanted) is not bool:
                 return
             self._preview_command_stamp = stamp
@@ -253,8 +258,9 @@ class Supervisor:
                 from ..preview.process import run_preview
                 status = Path(self.config.record_directory) / 'state' / 'preview_status.json'
                 status.unlink(missing_ok=True)
-                self.preview_process = multiprocessing.get_context('spawn').Process(target=run_preview, args=(self.config,))
+                self.preview_process = multiprocessing.get_context('spawn').Process(target=run_preview, args=(self.config, mode))
                 self.preview_process.start()
+                self.preview_mode = mode
                 self.events.emit('preview_start', pid=self.preview_process.pid)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             logger.warning("读取预览命令失败：%s", exc)

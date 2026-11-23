@@ -10,7 +10,7 @@ import threading
 from datetime import date
 from pathlib import Path
 import tkinter as tk
-from tkinter import font as tkfont, ttk
+from tkinter import font as tkfont, ttk, messagebox
 
 from PIL import Image, ImageGrab, ImageTk
 
@@ -413,7 +413,7 @@ class App:
         self.cam.columnconfigure(0, weight=65, uniform='camcols'); self.cam.columnconfigure(1, weight=35, uniform='camcols')
         self.cam.rowconfigure(0, weight=1)
         self.cam_picture = self.picture(self.card(self.cam, '主相机实时标注 · 点击放大', 0, 0), 'camcal_latest')
-        right = tk.Frame(self.cam, bg=BG); right.grid(row=0, column=1, sticky='nsew')
+        right = self.cam_right = tk.Frame(self.cam, bg=BG); right.grid(row=0, column=1, sticky='nsew')
         right.columnconfigure(0, weight=1)
         for row, weight in enumerate((3, 3, 3, 5, 2)): right.rowconfigure(row, weight=weight)
         progress = self.card(right, '标定进度', 0, 0)
@@ -424,6 +424,82 @@ class App:
         self.progress.grid(row=1, column=0, sticky='ew', pady=4)
         self.preview_button = ttk.Button(progress, text='打开相机预览', command=self.toggle_preview)
         self.preview_button.grid(row=2, column=0, sticky='w')
+        self.focus_button = ttk.Button(progress, text='对焦/光圈辅助', command=lambda: self.toggle_preview('focus'))
+        self.focus_button.grid(row=2, column=0, sticky='e')
+        self.focus_panel = tk.Frame(right, bg=WHITE)
+        self.focus_panel.grid(row=1, column=0, sticky='nsew', padx=3)
+        self.focus_panel.columnconfigure(0, weight=1)
+        self.focus_panel.rowconfigure(7, weight=1)
+        headline = tk.Frame(self.focus_panel, bg=WHITE); headline.grid(row=0, column=0, sticky='ew')
+        headline.columnconfigure(1, weight=1)
+        self.focus_percent = self.label(headline, '—%', font=(self.theme.mono[0], -32))
+        self.focus_percent.grid(row=0, column=0, sticky='w', padx=(3, 12))
+        self.focus_summary = self.label(headline, '等待对焦数据', font=self.theme.table)
+        self.focus_summary.config(justify='left')
+        self.focus_summary.grid(row=0, column=1, sticky='ew')
+        self.focus_bar = tk.Canvas(self.focus_panel, height=16, bg='#e4e7ec', highlightthickness=0)
+        self.focus_bar.grid(row=1, column=0, sticky='ew')
+        self.focus_details = self.label(self.focus_panel, '', font=self.theme.table)
+        self.focus_details.config(justify='left', anchor='nw')
+        self.focus_details.grid(row=2, column=0, sticky='ew')
+        self.focus_alert = self.label(self.focus_panel, '', font=self.theme.table)
+        self.focus_alert.config(justify='left', anchor='nw', fg='#b54708', wraplength=430)
+        self.focus_alert.grid(row=3, column=0, sticky='ew')
+        tables = tk.Frame(self.focus_panel, bg=WHITE); tables.grid(row=4, column=0, sticky='ew')
+        tables.columnconfigure(0, weight=3, uniform='focus_tables'); tables.columnconfigure(1, weight=1, uniform='focus_tables')
+        score_frame = tk.Frame(tables, bg=WHITE); score_frame.grid(row=0, column=0, sticky='ew')
+        mean_frame = tk.Frame(tables, bg=WHITE); mean_frame.grid(row=0, column=1, sticky='ew')
+        self.label(score_frame, '各格 当前/峰值  %', font=self.theme.table).grid(row=0, column=0, columnspan=3, sticky='w')
+        self.label(mean_frame, '灰度均值', font=self.theme.table).grid(row=0, column=0, columnspan=3, sticky='w')
+        self.focus_score_cells, self.focus_mean_cells = [], []
+        for col in range(3):
+            score_frame.columnconfigure(col, weight=1, uniform='scores')
+            mean_frame.columnconfigure(col, weight=1, uniform='means')
+        for i in range(9):
+            score = self.label(score_frame, '—', font=(self.theme.mono[0], -12), anchor='center', bg='#f3f5f8')
+            mean = self.label(mean_frame, '—', font=(self.theme.mono[0], -12), anchor='center', bg='#f3f5f8')
+            score.grid(row=1+i//3, column=i%3, sticky='ew', padx=1, pady=1)
+            mean.grid(row=1+i//3, column=i%3, sticky='ew', padx=1, pady=1)
+            self.focus_score_cells.append(score); self.focus_mean_cells.append(mean)
+        self.focus_curve = tk.Canvas(self.focus_panel, height=120, bg='#f1f5f9', highlightthickness=0)
+        self.focus_curve.grid(row=5, column=0, sticky='ew', pady=(3, 0))
+        self.focus_record_title = self.label(self.focus_panel, '本次记录', font=self.theme.table)
+        self.focus_record_title.grid(row=6, column=0, sticky='w')
+        self.focus_table = ttk.Treeview(self.focus_panel, columns=('time','note','center','median','mean','sat'), show='headings', height=1)
+        for col, title, width in [('time','时间',65),('note','备注',90),('center','中心',65),('median','中位数',65),('mean','均值',50),('sat','饱和%',55)]:
+            self.focus_table.heading(col, text=title); self.focus_table.column(col, width=width, minwidth=30, stretch=True)
+        self.focus_table.grid(row=7, column=0, sticky='nsew')
+        self.exposure_panel = tk.Frame(self.focus_panel, bg=WHITE)
+        self.exposure_panel.columnconfigure(0, weight=1); self.exposure_panel.rowconfigure(1, weight=1)
+        self.exposure_message = self.label(self.exposure_panel, '曝光自测', font=self.theme.table)
+        self.exposure_message.grid(row=0, column=0, sticky='ew')
+        self.exposure_table = ttk.Treeview(self.exposure_panel, columns=('us','sat','p99','corners','sharp'), show='headings', height=4)
+        for col, title, width in [('us','曝光 us',80),('sat','饱和%',65),('p99','P99',50),('corners','角点',50),('sharp','清晰度',65)]:
+            self.exposure_table.heading(col, text=title); self.exposure_table.column(col, width=width, minwidth=30, stretch=True)
+        self.exposure_table.tag_configure('recommended', background='#d1fadf', foreground='#067647')
+        self.exposure_table.grid(row=1, column=0, sticky='nsew')
+        exposure_actions = tk.Frame(self.exposure_panel, bg=WHITE); exposure_actions.grid(row=2, column=0, sticky='ew')
+        self.exposure_apply = ttk.Button(exposure_actions, text='应用推荐曝光', command=self.apply_exposure)
+        self.exposure_apply.grid(row=0, column=0, sticky='w')
+        ttk.Button(exposure_actions, text='返回曲线', command=self.close_exposure_results).grid(row=0, column=1, sticky='e')
+        exposure_actions.columnconfigure(1, weight=1)
+        self.exposure_panel.grid(row=5, column=0, rowspan=3, sticky='nsew'); self.exposure_panel.grid_remove()
+        self.exposure_visible = False; self.exposure_cache = None
+        exposure_controls = tk.Frame(self.focus_panel, bg=WHITE); exposure_controls.grid(row=8, column=0, sticky='ew')
+        self.exposure_mode = ttk.Combobox(exposure_controls, values=('标定用（角点最多）', '亮度目标'), state='readonly', width=18)
+        self.exposure_mode.set('标定用（角点最多）'); self.exposure_mode.grid(row=0, column=0, sticky='ew')
+        exposure_controls.columnconfigure(0, weight=1)
+        self.exposure_button = ttk.Button(exposure_controls, text='曝光自测', command=self.toggle_exposure_sweep)
+        self.exposure_button.grid(row=0, column=1, sticky='e')
+        actions = tk.Frame(self.focus_panel, bg=WHITE); actions.grid(row=9, column=0, sticky='ew')
+        ttk.Button(actions, text='重置峰值', command=self.reset_focus).grid(row=0, column=0)
+        self.label(actions, '备注').grid(row=0, column=1, padx=(5, 2))
+        self.focus_note = ttk.Entry(actions, width=8); self.focus_note.grid(row=0, column=2, sticky='ew'); actions.columnconfigure(2, weight=1)
+        ttk.Button(actions, text='记录当前', command=self.record_focus).grid(row=0, column=3)
+        self.focus_panel.grid_remove()
+        self.focus_history = []
+        self.focus_last_sample = None
+        self.focus_was_on = False
         self.preview_status = self.label(progress, '已关闭')
         self.preview_status.grid(row=3, column=0, sticky='w')
         plan = self.card(right, '计划点 · XY 平面', 1, 0)
@@ -436,6 +512,7 @@ class App:
         self.preview_values = KeyValueGrid(preview, ('模组 XYZ', '清晰度', '检出角点', '板中心偏移 mm', '提示'), self.theme)
         self.preview_values.grid(row=0, column=0, sticky='new')
         result = self.card(right, '结果', 4, 0)
+        self.cam_other_cards = [plan.master, step.master, preview.master, result.master]
         self.cam_result = tk.Label(result, text='标定进行中', bg='#ecfdf3', fg=COLORS['green'],
                                    font=self.theme.body, justify='left', anchor='nw', wraplength=460, padx=6, pady=4)
         self.cam_result.grid(row=0, column=0, sticky='nsew')
@@ -1075,14 +1152,14 @@ class App:
         origin_z = start[2] if isinstance(start, (list, tuple)) and len(start) == 3 else None
         self.draw_plan(points, count, origin_z)
 
-    def toggle_preview(self):
+    def toggle_preview(self, mode="preview"):
         path = ui_command_file(self.directory)
         try:
             old = read_json(path)
             seq = max(time.time_ns(), int(old.get('seq', 0)) + 1, int(self.preview_data.get('seq', 0)) + 1)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix('.tmp')
-            tmp.write_text(json.dumps({'preview': not self.preview_data.get('on', False), 'seq': seq,
+            tmp.write_text(json.dumps({'preview': not self.preview_data.get('on', False), 'mode': mode, 'seq': seq,
                                        'time': datetime.now().astimezone().isoformat()}), encoding='utf-8')
             os.replace(tmp, path)
         except (OSError, ValueError, TypeError):
@@ -1095,8 +1172,28 @@ class App:
             age = None
         controls = preview_controls(supervisor, age)
         self.preview_data = supervisor.get('preview') if isinstance(supervisor.get('preview'), dict) else {}
-        self.preview_button.config(text='关闭相机预览' if controls['on'] else '打开相机预览',
-                                   state='normal' if controls['enabled'] else 'disabled')
+        self.preview_button.config(text='关闭相机预览' if controls['on'] and controls['mode'] == 'preview' else '打开相机预览',
+                                   state='normal' if controls['preview_enabled'] else 'disabled')
+        focus_on = controls['on'] and controls['mode'] == 'focus'
+        self.focus_button.config(text='关闭对焦/光圈辅助' if focus_on else '对焦/光圈辅助', state='normal' if controls['focus_enabled'] else 'disabled')
+        if focus_on != self.focus_was_on:
+            if focus_on:
+                self.focus_history.clear(); self.focus_last_sample = None
+                self.exposure_cache = None
+                self.close_exposure_results()
+                self.focus_table.delete(*self.focus_table.get_children())
+                for card in self.cam_other_cards: card.grid_remove()
+                self.progress_text.grid_remove(); self.progress.grid_remove()
+                for row in range(5): self.cam_right.rowconfigure(row, weight=1 if row == 1 else 0)
+                self.focus_panel.grid(); self.focus_panel.tkraise()
+            else:
+                self.focus_panel.grid_remove()
+                for card in self.cam_other_cards: card.grid()
+                self.progress_text.grid(); self.progress.grid()
+                for row, weight in enumerate((3, 3, 3, 5, 2)): self.cam_right.rowconfigure(row, weight=weight)
+        if focus_on:
+            self.update_focus(self.preview_data)
+        self.focus_was_on = focus_on
         text = ('不可用：' + controls['reason'] if controls['reason'] else
                 f"预览中 {self.preview_data.get('fps', 0)} fps" if controls['on'] else
                 '不可用：' + str(self.preview_data['error']) if self.preview_data.get('error') else '已关闭')
@@ -1111,6 +1208,141 @@ class App:
         self.preview_values.set({'模组 XYZ': p.get('actual_xyz') if p.get('actual_xyz') is not None else '--', '清晰度': p.get('sharpness'),
                            '检出角点': p.get('corners'), '板中心偏移 mm': p.get('board_offset_mm'),
                            '提示': '偏移接近 0 且清晰度最大处即为推荐起始位'})
+
+    def focus_action(self, action, **fields):
+        path = self.directory / 'state' / 'focus_action.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix('.tmp')
+        tmp.write_text(json.dumps({'seq': time.time_ns(), 'action': action, **fields}), encoding='utf-8')
+        os.replace(tmp, path)
+
+    def toggle_exposure_sweep(self):
+        sweep = self.preview_data.get('exposure_sweep') or {}
+        if sweep.get('state') == 'running':
+            self.focus_action('cancel_sweep')
+        else:
+            mode = 'brightness' if self.exposure_mode.get() == '亮度目标' else 'calibration'
+            self.exposure_cache = None
+            self.focus_action('exposure_sweep', mode=mode)
+            self.exposure_message.config(text='正在启动曝光自测…')
+            self.show_exposure_results()
+
+    def show_exposure_results(self):
+        self.exposure_visible = True
+        self.focus_curve.grid_remove(); self.focus_record_title.grid_remove(); self.focus_table.grid_remove()
+        self.exposure_panel.grid(); self.exposure_panel.tkraise()
+
+    def close_exposure_results(self):
+        self.exposure_visible = False
+        self.exposure_panel.grid_remove()
+        self.focus_curve.grid(); self.focus_record_title.grid(); self.focus_table.grid()
+
+    def apply_exposure(self):
+        sweep = self.preview_data.get('exposure_sweep') or {}
+        recommendation = sweep.get('recommendation')
+        if sweep.get('state') != 'done' or not recommendation:
+            return
+        old, new = sweep.get('original_us'), recommendation['exposure_us']
+        if messagebox.askyesno('应用推荐曝光', f'当前曝光 {old} us → 推荐曝光 {new:.1f} us\n写入覆盖文件，主程序下次启动生效。确定应用？', parent=self.root):
+            self.focus_action('apply_exposure')
+            self.exposure_message.config(text='正在保存曝光覆盖文件…')
+
+    def update_exposure(self, p):
+        sweep = p.get('exposure_sweep') or {}
+        running = sweep.get('state') == 'running'
+        self.exposure_button.config(text='取消' if running else '曝光自测')
+        self.exposure_mode.config(state='disabled' if running else 'readonly')
+        if (running or (p.get('demo_exposure') and self.exposure_cache is None)) and not self.exposure_visible: self.show_exposure_results()
+        if not sweep: return
+        key = json.dumps([sweep, p.get('exposure_apply')], ensure_ascii=False, sort_keys=True)
+        if key == self.exposure_cache: return
+        self.exposure_cache = key
+        self.exposure_table.delete(*self.exposure_table.get_children())
+        recommendation = sweep.get('recommendation') or {}
+        for row in sweep.get('rows', []):
+            selected = row['exposure_us'] == recommendation.get('exposure_us')
+            self.exposure_table.insert('', 'end', values=(f"{row['exposure_us']:.1f}", f"{row['saturated_fraction']*100:.2f}", row['p99'], row['corners'], f"{row['sharpness']:.3f}"), tags=('recommended',) if selected else ())
+        self.exposure_apply.config(state='normal' if sweep.get('state') == 'done' and recommendation and not p.get('demo_exposure') else 'disabled')
+        reason = sweep.get('reason') or ''
+        status = f"第 {sweep.get('index', 0)}/{sweep.get('total', 0)} 档" if running else '扫描完成' if sweep.get('state') == 'done' else '已取消' if sweep.get('state') == 'cancelled' else '自测失败'
+        old = sweep.get('original_us')
+        suggested = recommendation.get('exposure_us')
+        configured = sweep.get('configured_us', old)
+        text = f"{status}  当前配置曝光 {configured if configured is not None else '未指定'} us"
+        if configured is None and old is not None: text += f"（相机回读 {old:.1f} us）"
+        if suggested is not None: text += f"  推荐 {suggested:.1f} us"
+        if p.get('demo_exposure'): text += '\n演示结果（不可应用）'
+        if reason: text += '\n' + reason
+        applied = p.get('exposure_apply') or {}
+        if applied.get('message'): text += '\n' + applied['message']
+        self.exposure_message.config(text=text, fg=COLORS['red'] if reason or applied.get('state') == 'error' else INK)
+
+    def reset_focus(self):
+        path = self.directory / 'state' / 'focus_action.json'
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix('.tmp')
+            tmp.write_text(json.dumps({'seq': time.time_ns(), 'action': 'reset'}), encoding='utf-8')
+            os.replace(tmp, path)
+        except OSError:
+            logger.exception('重置峰值失败')
+
+    def record_focus(self):
+        p = self.preview_data
+        if not p.get('scores') or p.get('mode') != 'focus' or not p.get('on'):
+            return
+        try:
+            from nest_clear.preview.focus import write_record
+            record = write_record(self.directory, p, live_image_file(self.directory, 'preview_latest').read_bytes(), self.focus_note.get())
+            self.focus_table.insert('', 'end', values=(record['time'][11:19], record['note'], f"{p['center']:.4f}", f"{p['median']:.4f}", f"{p['mean']:.1f}", f"{p['saturated_pct']:.2f}"))
+        except OSError:
+            logger.exception('记录对焦数据失败')
+
+    def update_focus(self, p):
+        if not p.get('scores'):
+            return
+        pct = p['percent'][4]
+        color = '#168448' if pct >= 98 else '#916300' if pct >= 90 else '#b42318'
+        self.focus_percent.config(text=f'{pct:.0f}%', fg=color)
+        self.focus_summary.config(text=f"中心 {p['center']:.4f} / 峰值 {p['peaks'][4]:.4f}\n九格中位 {p['median']:.4f}   Laplacian {p['laplacian'][4]:.1f}")
+        self.focus_bar.delete('all'); w = max(self.focus_bar.winfo_width(), 100)
+        self.focus_bar.create_rectangle(0, 0, w * min(pct, 100) / 100, 16, fill=color, outline='')
+        self.update_exposure(p)
+        self.focus_details.config(text=(f"曝光 {p.get('exposure_us')} us（{p.get('exposure_source', '配置')}）  增益 {p.get('gain_db')} dB\n"
+            f"均值 {p['mean']:.1f}  P1/P99 {p['p1']:.0f}/{p['p99']:.0f}  饱和 {p['saturated_pct']:.2f}%  过暗 {p['dark_pct']:.2f}%"))
+        self.focus_alert.config(text='  '.join(x for x in (p.get('exposure_hint'), p.get('tilt')) if x),
+                                fg=COLORS['red'] if p.get('saturated_pct', 0) > .5 else '#b54708')
+        for i, (score, peak, percent, mean) in enumerate(zip(p['scores'], p['peaks'], p['percent'], p['cell_means'])):
+            fg = '#168448' if percent >= 98 else '#916300' if percent >= 90 else '#b42318'
+            self.focus_score_cells[i].config(text=f'{score:.2f}/{peak:.2f} {percent:.0f}%', fg=fg)
+            self.focus_mean_cells[i].config(text=f'{mean:.0f}')
+        stamp = p.get('analysis_time')
+        # 演示数据带有实际分析生成的历史；真实相机会逐帧累积。
+        for t, value in p.get('demo_history', []):
+            if not self.focus_history or t > self.focus_history[-1][0]:
+                self.focus_history.append((t, value))
+        if stamp and stamp != self.focus_last_sample and (not self.focus_history or stamp > self.focus_history[-1][0]):
+            self.focus_history.append((stamp, p['center']))
+        self.focus_last_sample = stamp
+        now = time.time()
+        self.focus_history = [(t,v) for t,v in self.focus_history if 0 <= now-t <= 30]
+        c = self.focus_curve; c.delete('all'); w = max(c.winfo_width(), 100); h = max(c.winfo_height(), 120)
+        left, right, top, bottom = 52, w-8, 20, h-20
+        peak = max(p['peaks'][4], max((v for _, v in self.focus_history), default=0), 1e-9)
+        for fraction in (0, .5, 1):
+            y = bottom - (bottom-top)*fraction
+            c.create_line(left, y, right, y, fill='#cbd5e1', dash=(3, 3))
+            c.create_text(left-4, y, text=f'{peak*fraction:.2f}', anchor='e', fill='#475569', font=self.theme.table)
+        c.create_line(left, top, right, top, fill='#b54708', dash=(6, 3))
+        c.create_text(right, top, text='峰值', anchor='ne', fill='#b54708', font=self.theme.table)
+        if len(self.focus_history) > 1:
+            coords = []
+            for t, value in self.focus_history:
+                coords.extend((left + (right-left) * (1-(now-t)/30), bottom-(bottom-top)*value/peak))
+            c.create_line(*coords, fill='#2563eb', width=2)
+        c.create_text(left, 2, text='中心清晰度 · 最近 30 秒', anchor='nw', fill='#334155', font=self.theme.table)
+        c.create_text(left, h-2, text='−30 秒', anchor='sw', fill='#475569', font=self.theme.table)
+        c.create_text(right, h-2, text='现在', anchor='se', fill='#475569', font=self.theme.table)
 
     def update_tip(self, data):
         key = json.dumps([data, self.tip_pending], ensure_ascii=False, default=str)

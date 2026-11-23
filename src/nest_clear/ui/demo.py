@@ -84,7 +84,7 @@ def pickacc_demo(state, stamp):
                         'tool2':{'type':'table','time':stamp,'verification':[{}],'stale':True}}, 'candidate':candidate}
 
 
-def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None):
+def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None, focus_state=None):
     root = Path(root)
     now = datetime.now().astimezone(); stamp = now.isoformat()
     start = (now - timedelta(hours=2, minutes=18)).isoformat()
@@ -187,6 +187,47 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
             draw.line((488, 379, 518, 379), fill='red', width=3); draw.line((503, 364, 503, 394), fill='red', width=3)
         draw.text((30, 30), f'{name}  frame {step}', fill='white')
         temp = path.with_suffix('.tmp'); image.save(temp, format='JPEG'); os.replace(temp, path)
+    if focus_state in ('live', 'exposure'):
+        import math
+        import cv2
+        import numpy as np
+        from nest_clear.preview.focus import FocusSession, draw_focus
+        if initial or not hasattr(write_demo, '_focus_session'):
+            write_demo._focus_session = FocusSession()
+            write_demo._focus_history = []
+        main_path = main_status_file(root)
+        main = json.loads(main_path.read_text(encoding='utf-8'))
+        main['mode'] = '空闲'
+        main['camcal'] = {}
+        atomic(main_path, main)
+        yy, xx = np.indices((759, 1006))
+        light = (1.0 - 0.96 * xx / 1005)
+        source = ((((xx // 32 + yy // 32) % 2) * 150 + 70) * light).astype(np.uint8)
+        now_s = time.time()
+        for tick in (range(-25, 1) if initial else (step,)):
+            sigma = 1.75 + 1.25 * math.cos(2 * math.pi * tick / 20)
+            board = cv2.GaussianBlur(source, (0, 0), sigma)
+            if tick >= -3:
+                patch = board[:330, :410]
+                board[:330, :410] = cv2.GaussianBlur(patch, (0, 0), 3.0)
+            data = write_demo._focus_session.update(board)
+            timestamp = now_s + tick if initial else now_s
+            write_demo._focus_history.append((timestamp, data['center']))
+        write_demo._focus_history = [(t, v) for t, v in write_demo._focus_history if now_s-t <= 30]
+        data.update(mode='focus', on=True, seq=1, fps=6, exposure_us=10000, gain_db=0,
+                    analysis_time=now_s, demo_history=write_demo._focus_history)
+        if focus_state == 'exposure':
+            if initial or not hasattr(write_demo, '_exposure_result'):
+                from nest_clear.preview.exposure import demo_sweep
+                write_demo._exposure_result = demo_sweep()
+            data['exposure_sweep'] = write_demo._exposure_result
+            data['demo_exposure'] = True
+        supervisor_path = supervisor_state_file(root)
+        supervisor = json.loads(supervisor_path.read_text(encoding='utf-8'))
+        supervisor['preview'] = data
+        atomic(supervisor_path, supervisor)
+        ok, encoded = cv2.imencode('.jpg', draw_focus(board, data))
+        if ok: live_image_file(root, 'preview_latest').write_bytes(encoded.tobytes())
     if initial:
         path = root / now.date().isoformat() / 'demo' / 'events.jsonl'
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,15 +255,20 @@ def generate(root):
 def main():
     from .__main__ import add_view_arguments, validate_view_arguments
     parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm')); parser.add_argument('--tooltip-state', choices=('idle','probe','confirm_move','in_range','done','fail')); add_view_arguments(parser)
+    parser.add_argument('--focus-state', choices=('off','live','exposure'), default=None)
     args = parser.parse_args(); validate_view_arguments(parser, args)
     if args.offset_state is None and args.page in ('offset', 'tool-offset', '工具偏移标定', '工具偏移标定页'):
         args.offset_state = 'wait_tool'
+    if args.focus_state == 'off':
+        args.preview_state = 'off'
+    elif args.focus_state in ('live', 'exposure'):
+        args.preview_state = 'on'
     # 先同步生成第一帧，让短延迟截图也有完整内容。
-    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state)
+    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state)
     def update():
         step = 1
         while True:
-            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state); step += 1
+            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state); step += 1
     threading.Thread(target=update, daemon=True).start()
     from .app import App
     app = App(args.root, page=args.page, screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms, ignore_before_ns=0)

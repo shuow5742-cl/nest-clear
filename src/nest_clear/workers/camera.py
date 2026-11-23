@@ -37,6 +37,8 @@ class CameraWorker(AsyncRequestWorker):
         self.expected_size = image_size
         try:
             self.camera = camera or (MockCamera(CameraConfig(device_sn=sn), width=(image_size or (1280, 960))[0], height=(image_size or (1280, 960))[1]) if backend == "mock" else DahengCamera(CameraConfig(device_sn=sn, trigger_mode=True)))
+            self._simulate_exposure = isinstance(self.camera, MockCamera)
+            self._mock_base_exposure = exposure_us or 10000.0
         except Exception as exc:
             raise GuardError("CAMERA-CREATE", f"相机创建失败：{exc}", f"相机 SN={sn}", "检查大恒 SDK 和序列号。") from exc
 
@@ -106,6 +108,9 @@ class CameraWorker(AsyncRequestWorker):
                         self.readback[key] = getattr(device, feature).get() if device else getattr(self.camera, key, None)
                     except Exception:
                         logger.warning("相机 %s %s 回读不可用", self.sn, key)
+            if self._simulate_exposure and self.readback['exposure_us'] is None:
+                self.camera.exposure_us = self._mock_base_exposure
+                self.readback['exposure_us'] = self._mock_base_exposure
             if self.readback["balance_ratio"] is None and device is None:
                 self.readback["balance_ratio"] = getattr(self.camera, "balance_ratio", None)
             elif self.readback["balance_ratio"] is None:
@@ -125,6 +130,39 @@ class CameraWorker(AsyncRequestWorker):
                     logger.warning("相机 %s 白平衡回读不可用", self.sn)
         except Exception as exc:
             raise GuardError("CAMERA-OPEN", f"打开或参数回读失败：{exc}", f"相机 SN={self.sn}", "检查供电、连接、SDK、序列号及相机参数。") from exc
+
+    def exposure_auto_mode(self):
+        device = getattr(self.camera, '_cam', None)
+        node = getattr(device, 'ExposureAuto', None) if device is not None else None
+        return node.get() if node is not None else None
+
+    def restore_exposure_auto_mode(self, value):
+        device = getattr(self.camera, '_cam', None)
+        node = getattr(device, 'ExposureAuto', None) if device is not None else None
+        if node is not None and value is not None:
+            node.set(value)
+
+    def set_exposure(self, exposure_us: float) -> float:
+        """在无并发采图时设置曝光并回读，失败时抛错。"""
+        if exposure_us is None or not np.isfinite(exposure_us) or exposure_us <= 0:
+            raise ValueError('曝光必须为正的有限数')
+        with self.capture_lock:
+            device = getattr(self.camera, '_cam', None)
+            if device is not None:
+                auto = getattr(device, 'ExposureAuto', None)
+                if auto is not None: auto.set(self.camera._gx.GxAutoEntry.OFF)
+                node = device.ExposureTime
+                node.set(float(exposure_us))
+                actual = float(node.get())
+            else:
+                if hasattr(self.camera, 'set_exposure_time'):
+                    self.camera.set_exposure_time(float(exposure_us))
+                self.camera.exposure_us = float(exposure_us)
+                actual = float(self.camera.exposure_us)
+            if abs(actual - exposure_us) > max(0.01, abs(exposure_us) * .001):
+                raise ValueError(f'曝光设置期望 {exposure_us}，实际 {actual}')
+            self.readback['exposure_us'] = actual
+            return actual
 
     def execute(self, payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         with self.capture_lock:
@@ -171,6 +209,9 @@ class CameraWorker(AsyncRequestWorker):
                 raise ValueError("图像为 None、空图或非数组")
             if image.ndim not in (2, 3) or image.dtype != np.uint8:
                 raise ValueError(f"图像格式异常：shape={image.shape}，dtype={image.dtype}，期望 uint8 灰度或彩色")
+            if self._simulate_exposure:
+                actual_exposure = getattr(self.camera, 'exposure_us', None) or self._mock_base_exposure
+                image = np.clip(image.astype(np.float32) * (actual_exposure / self._mock_base_exposure), 0, 255).astype(np.uint8)
             h, w = image.shape[:2]
             if self.size is not None and (w, h) != tuple(self.size):
                 raise ValueError(f"图像尺寸不符：期望 {self.size}，实际 {(w, h)}")

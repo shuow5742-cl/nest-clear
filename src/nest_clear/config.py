@@ -143,6 +143,8 @@ class Config:
     ui_preview: dict[str, Any] = field(default_factory=dict)
     tool_offset: dict[str, Any] = field(default_factory=dict)
     pick_accuracy: dict[str, Any] = field(default_factory=dict)
+    exposure_override_path: str = ""
+    exposure_source: str = "配置"
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -498,6 +500,21 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     )
     if v["camera_backend"] not in ("mock", "daheng"):
         _fail("vision.camera_backend", "应为 mock 或 daheng")
+    exposure_path = Path(v['calibration'])
+    if not exposure_path.is_absolute():
+        exposure_path = Path(path).resolve().parent / exposure_path
+    exposure_path = exposure_path.parent / 'camera_exposure.yaml'
+    exposure_source = '配置'
+    if exposure_path.exists():
+        try:
+            with exposure_path.open(encoding='utf-8') as f:
+                override = yaml.safe_load(f)
+            if not isinstance(override, dict):
+                raise ValueError('曝光覆盖文件须为映射')
+            exposure = _number(override.get('exposure_us'), 'camera_exposure.exposure_us', True)
+            exposure_source = '自测 ' + str(override.get('time') or '时间未知')
+        except (OSError, yaml.YAMLError, ValueError) as exc:
+            _fail('camera_exposure', str(exc))
     if not isinstance(v["pixels"], list):
         _fail("vision.pixels", "应为 [u, v, score] 列表")
     pixels = tuple(_vector(item, "vision.pixels", 3) for item in v["pixels"])
@@ -634,11 +651,20 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _fail("ui", "开关须为布尔值，刷新间隔须为不小于 50 的整数")
     if not isinstance(root["ui_preview"], dict):
         _fail("ui_preview", "应为映射")
-    preview_data = _mapping({"interval_s": .15, "width": 960, "jpeg_quality": 75, "analysis_interval_s": 1.0, **root["ui_preview"]}, "ui_preview", ["interval_s", "width", "jpeg_quality", "analysis_interval_s"])
+    preview_data = _mapping({"interval_s": .15, "width": 960, "jpeg_quality": 75, "analysis_interval_s": 1.0, "exposure_sweep": {}, **root["ui_preview"]}, "ui_preview", ["interval_s", "width", "jpeg_quality", "analysis_interval_s", "exposure_sweep"])
     preview_data["interval_s"] = _number(preview_data["interval_s"], "ui_preview.interval_s", True)
     preview_data["analysis_interval_s"] = _number(preview_data["analysis_interval_s"], "ui_preview.analysis_interval_s", True)
     if type(preview_data["width"]) is not int or preview_data["width"] < 100 or type(preview_data["jpeg_quality"]) is not int or not 1 <= preview_data["jpeg_quality"] <= 100:
         _fail("ui_preview", "width 须不小于 100，jpeg_quality 须在 1 至 100 之间")
+    sweep = preview_data['exposure_sweep']
+    if not isinstance(sweep, dict): _fail('ui_preview.exposure_sweep', '须为映射')
+    sweep = _mapping({'min_us': 500, 'max_us': 30000, 'steps': 10, 'settle_frames': 1, **sweep},
+                     'ui_preview.exposure_sweep', ['min_us', 'max_us', 'steps', 'settle_frames'])
+    sweep['min_us'] = _number(sweep['min_us'], 'ui_preview.exposure_sweep.min_us', True)
+    sweep['max_us'] = _number(sweep['max_us'], 'ui_preview.exposure_sweep.max_us', True)
+    if sweep['max_us'] <= sweep['min_us'] or type(sweep['steps']) is not int or not 2 <= sweep['steps'] <= 100 or type(sweep['settle_frames']) is not int or not 0 <= sweep['settle_frames'] <= 20:
+        _fail('ui_preview.exposure_sweep', '曝光范围须递增，steps 须为 2–100，settle_frames 须为 0–20')
+    preview_data['exposure_sweep'] = sweep
     return Config(
         plc,
         scan,
@@ -661,5 +687,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _string(record["machine_id"], "record.machine_id"),
         camcal,
         UIConfig(**ui_data),
-        mode, ct or {}, preview_data, offset, accuracy,
+        mode, ct or {}, preview_data, offset, accuracy, str(exposure_path), exposure_source,
     )

@@ -6,6 +6,28 @@ from nest_clear.camcal.config import CameraCalibConfig
 from nest_clear.camcal.session import _board
 
 
+def detect_charuco(gray, config):
+    """使用标定板配置检测原图角点，兼容新旧 OpenCV。"""
+    cfg = CameraCalibConfig(**config)
+    if hasattr(cv2.aruco, 'CharucoDetector'):
+        board = _board(cfg)
+    else:
+        dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, cfg.dictionary))
+        board = cv2.aruco.CharucoBoard_create(cfg.cols, cfg.rows, cfg.square_mm, cfg.marker_mm, dictionary)
+    try:
+        if hasattr(cv2.aruco, 'CharucoDetector'):
+            corners, ids, _, _ = cv2.aruco.CharucoDetector(board).detectBoard(gray)
+        else:
+            dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, cfg.dictionary))
+            markers, marker_ids, _ = cv2.aruco.detectMarkers(gray, dictionary)
+            if marker_ids is None:
+                return board, None, None
+            _, corners, ids = cv2.aruco.interpolateCornersCharuco(markers, marker_ids, gray, board)
+    except cv2.error:
+        corners, ids = None, None
+    return board, corners, ids
+
+
 def analyze(image, config, actual_xyz=None):
     cfg = CameraCalibConfig(**config)
     h, w = image.shape[:2]
@@ -17,11 +39,7 @@ def analyze(image, config, actual_xyz=None):
     gray = cv2.cvtColor(view, cv2.COLOR_BGR2GRAY)
     center_crop = gray[height // 3:2 * height // 3, width // 3:2 * width // 3]
     sharpness = float(cv2.Laplacian(center_crop, cv2.CV_64F).var())
-    board = _board(cfg)
-    try:
-        corners, ids, _, _ = cv2.aruco.CharucoDetector(board).detectBoard(gray)
-    except cv2.error:
-        corners, ids = None, None
+    board, corners, ids = detect_charuco(gray, config)
     count = 0 if ids is None else len(ids)
     offset_mm = offset_px = None
     if count:
