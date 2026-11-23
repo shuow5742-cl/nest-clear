@@ -133,15 +133,16 @@ def test_rendered_detection_glare_and_offcenter():
     step=session.add(image,(0,0,110)); assert step.kind=='move' and step.detail['detected_corners']>100
     glare=image.copy(); cv2.ellipse(glare,(320,240),(30,24),0,0,360,255,-1)
     step=CameraCalibrationSession(CFG,nominal,(640,480),(0,0,110)).add(glare,(0,0,110))
-    assert step.code=='CAMCAL-GLARE' and step.detail['bbox']==[290,216,350,264] and step.detail['missing_corners']>=2
+    assert step.kind=='move' and step.detail['bbox']==[290,216,350,264] and step.detail['glare_missing_corners']>=2
     image,nominal=rendered_board(24.); step=CameraCalibrationSession(CFG,nominal,(640,480),(0,0,110)).add(image,(0,0,110))
     assert step.code=='CAMCAL-OFFCENTER'
 
 def test_glare_margin_uses_adjacent_projected_corners():
     cfg = replace(CFG, cols=4, rows=3)
     points = np.array([[0, 0], [10, 0], [20, 0], [0, 20], [10, 20], [20, 20]], float)
-    assert _glare_margin(points, cfg) == 10
-    assert _glare_margin(None, cfg) == 10
+    assert _glare_margin(points, cfg) == 2.5
+    assert _glare_margin(None, cfg) == 2.5
+    assert _glare_margin(points, replace(cfg, glare_corner_margin_px=7)) == 7
 
 def test_edge_glare_does_not_claim_distant_missing_corners():
     image, nominal = rendered_board()
@@ -170,10 +171,11 @@ def test_glare_minimum_lost_corners_is_configurable():
     class Detector:
         def detectBoard(self, gray):
             return corners[keep], ids[keep], None, None
-    for minimum, expected in [(2, None), (1, 'CAMCAL-GLARE')]:
+    for minimum in (1, 2):
         session = CameraCalibrationSession(replace(CFG, glare_blob_min_px=100, glare_min_lost_corners=minimum), nominal, (640, 480), (0, 0, 110))
         session._detector = Detector()
-        assert session.add(image, (0, 0, 110)).code == expected
+        step = session.add(image, (0, 0, 110))
+        assert step.kind == 'move' and int(ids.ravel()[index]) in step.detail['glare_missing_ids']
 
 def test_rendered_multiview_solve():
     board=_board(CFG); tex=(board.generateImage((2100,1600)).astype(float)*.8).astype('uint8')
