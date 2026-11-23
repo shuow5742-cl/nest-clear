@@ -9,10 +9,10 @@ jog_step_mm: 0.2 # 人工点动建议步距；本程序不控制设备
 center_warning_px: 100 # 正面针尖偏离图像中心的警告阈值
 baseline_ui:
   main_target_uv: null # null 使用图像中心，亦可设置 [u, v]
-  main_tol_mm: 0.05
+  main_tol_mm: 0.15  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
   main_um_per_px: 15.2 # 8 mm 镜头估算值，待实测
   aux_um_per_px: 15.2 # 8 mm 镜头估算值，待实测
 quality:
-  max_fit_rms_px: 2.0 # 拟合像素 RMS 上限
-  max_condition: 100.0 # 位移矩阵及联合相机矩阵条件数上限
-  max_residual_mm: 0.03 # 验证时投影残差上限
+  max_fit_rms_px: 5.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 2.0
+  max_condition: 300.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 100.0
+  max_residual_mm: 0.1  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.03

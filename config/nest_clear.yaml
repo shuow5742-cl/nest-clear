@@ -79,8 +79,8 @@ vision:
   dedup_radius_mm: 1.0
   max_targets: 10
   hair_detector:  # 毛检测参数；像素项填写一代参考像素，会按尺度 k 自动换算
-    expected_um_per_px: 23.6  # 名义物方尺度，实际由标定计算
-    scale_tolerance: 0.05  # 标定尺度与期望值的相对容差
+    expected_um_per_px: 26.2  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 23.6
+    scale_tolerance: 0.1  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
     reference_um_per_px: 6.959  # 一代参考尺度，µm/像素
     pick_point:  # 一代粗度和中心评分参数
       mode: thick_central  # 取点模式
@@ -124,23 +124,23 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
       threshold: 127
       min_area: 5
       probe_offset_px: 7  # 像素，距针尖回退测量宽度的位置
-      max_edge_width_px: 6.0  # 像素，清晰边缘过渡宽度上限
+      max_edge_width_px: 10.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 6.0
     side:
       direction: [0, 1]
       threshold: 127
       min_area: 5
       probe_offset_px: 7  # 像素，距针尖回退测量宽度的位置
-      max_edge_width_px: 6.0  # 像素，清晰边缘过渡宽度上限
-  position_tolerance_mm: 0.05  # 运动到位容差，mm
-  tip_tolerance_mm: 0.03  # 针尖对准容差，mm
-  consistency_tolerance_mm: 0.01  # 最终坐标一致性容差，mm
+      max_edge_width_px: 10.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 6.0
+  position_tolerance_mm: 0.1  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
+  tip_tolerance_mm: 0.1  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.03
+  consistency_tolerance_mm: 0.05  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.01
   max_iterations: 10  # 最大偏移次数
   probe_step_mm: 0.2  # 首次测量雅可比的步长
   max_step_mm: 0.5  # 每步任一轴上限
   max_total_mm: 2.0  # 相对 P0 任一轴上限
-  max_residual_mm: 0.03  # 投影残差告警阈值，mm
-  max_condition: 100.0  # 条件数告警阈值
-  z_disagreement_mm: 0.03  # 两视图 Z 分歧告警阈值，mm
+  max_residual_mm: 0.1  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.03
+  max_condition: 300.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 100.0
+  z_disagreement_mm: 0.1  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.03
 
 # 主相机标定，未列出的字段使用 CameraCalibConfig 缺省值
 camera_calibration:
@@ -156,43 +156,43 @@ camera_calibration:
   grid_half_mm: 12.0
   z_outer_mm: 3.0
   z_inner_mm: 1.5
-  position_tolerance_mm: 0.05
-  min_corner_ratio: 0.6
+  position_tolerance_mm: 0.1  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
+  min_corner_ratio: 0.4  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.6
   saturation_level: 250
   max_saturated_fraction: 0.02
   glare_corner_margin_px: null  # null 自动取相邻角点间距的 1/4；整数为像素距离
   glare_blob_min_px: 2000
-  max_rms_px: 0.25
-  max_image_rms_px: 0.5
-  module_repeatability_mm: 0.02  # 用户 11-22 定：暂按 ±0.02mm 预留
+  max_rms_px: 2.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.25
+  max_image_rms_px: 3.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.5
+  module_repeatability_mm: 0.05  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.02
   repeat_drift_margin_mm: 0.01  # 漂移及检测噪声余量
   # max_repeat_px 为旧配置兼容字段，不再参与判定
-  max_axis_scale_error: 0.002
-  min_coverage: 0.9
+  max_axis_scale_error: 0.01  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.002
+  min_coverage: 0.7  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.9
 
 # 工具偏移标定
 tool_offset:
   center_tol_mm: 1.0
-  outlier_mm: 0.1
+  outlier_mm: 0.3  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.1
   min_points: 5
   max_points: 12
-  se_tol_mm: 0.02
-  edge_warn_mm: 0.05
+  se_tol_mm: 0.08  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.02
+  edge_warn_mm: 0.15  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
   card_thickness_mm: 0.10
-  ring_cross_tol_mm: 0.08
+  ring_cross_tol_mm: 0.2  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.08
   settle_window_s: 0.5
   settle_samples: 6
-  jitter_tol_mm: 0.02
+  jitter_tol_mm: 0.06  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.02
   point_order: [T02, T05, T26, T29, T12, T19, T03, T28, T10, T21]
   edge_targets: [T12]
 
 pick_accuracy:
   center_tol_mm: 0.5
-  infield_warn_mm: 0.05
-  const_max_dev_mm: 0.05
-  const_std_mm: 0.025
-  repeat_tol_mm: 0.03
-  verify_tol_mm: 0.05
-  outlier_mm: 0.1
+  infield_warn_mm: 0.15  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
+  const_max_dev_mm: 0.2  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
+  const_std_mm: 0.1  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.025
+  repeat_tol_mm: 0.1  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.03
+  verify_tol_mm: 0.2  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
+  outlier_mm: 0.3  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.1
   max_points: 40
   calib_tool_z_mm: -10.0
