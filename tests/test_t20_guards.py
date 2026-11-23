@@ -45,6 +45,18 @@ def test_readback_mismatch_commits_error():
     assert io.words[contract['reply_func'].address] == 999
     assert io.words[contract['result_id'].address] == 4
 
+def test_pick_tool_readback_mismatch_clears_scalar():
+    contract = load_contract('config/plc_contract.yaml')
+    class BadToolRead(Registers):
+        def read_u16(self, address):
+            return super().read_u16(address) + (address == contract['pick_tool'].address)
+    io = BadToolRead()
+    Handshake(io, contract).write_reply(4, 155, {'pick_tool': 2})
+    assert io.words[contract['pick_tool'].address] == 0
+    assert io.words[contract['reply_func'].address] == 999
+    assert io.words[contract['result_id'].address] == 4
+
+
 def test_task_double_read_retries():
     contract = load_contract('config/plc_contract.yaml')
     class IO:

@@ -141,7 +141,7 @@ class PickAccuracy(ToolOffset):
             except Exception as exc:
                 e.skipped.append({'target':f'T{e.current:02d}', 'stage':e.plan[0], 'reason':f'识别后工具坐标不可达：{exc}'})
                 return self.process_result(e._move_next())
-            e.sent=xyz; s['phase']='wait156'; self.publish('wait_tool','请等待工具前往'); return self.set_reply(155,{f'pick{s["tool"]}_xyz':xyz})
+            e.sent=xyz; s['phase']='wait156'; self.publish('wait_tool','请等待工具前往'); return self.set_reply(155,{f'pick{s["tool"]}_xyz':xyz,'pick_tool':s['tool']})
         if result=='confirm':
             self.stage='confirm'; self.publish('confirm','等待确认覆盖',candidate=e.result()); return Status.RUNNING
         raise ValueError('未知挑取精度阶段')

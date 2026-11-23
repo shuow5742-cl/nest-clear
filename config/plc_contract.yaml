@@ -79,6 +79,11 @@ registers:
   type: UINT16
   direction: PC→PLC
   description: 应答功能码
+- name: pick_tool
+  address: 40935
+  type: UINT16
+  direction: PC→PLC
+  description: 挑取精度标定下发挑取坐标时的工具号（1/2）
 - name: removable_count
   address: 40941
   type: UINT16

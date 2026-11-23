@@ -84,7 +84,7 @@ def test_plc_normal_cycle(rig, accept):
         if code==150:
             rig.plc.actual=coords['scan_xyz']; continue
         assert code==155, (code,rig.events.status.data['pickacc'])
-        assert list(coords)==['pick1_xyz'] and coords['pick1_xyz'][2]==-10
+        assert list(coords)==['pick1_xyz', 'pick_tool'] and coords['pick_tool']==1 and coords['pick1_xyz'][2]==-10
         xyz=coords['pick1_xyz']; rig.plc.actual=(xyz[0]+.08,xyz[1]-.05,xyz[2])
         e=rig.batch.blackboard.read('pickaccuracy_session')['engine']
         if e.plan[0]=='verify': rig.plc.actual=xyz
@@ -136,7 +136,7 @@ def test_discard_and_abort(rig):
     send(rig.root,'pickacc_start',{'tool':2}); rig.until(lambda:2 in rig.plc.replies)
     code,coords=rig.request(3,155); assert code==150
     rig.plc.actual=coords['scan_xyz']
-    code,coords=rig.request(4,155); assert code==155 and list(coords)==['pick2_xyz'] and coords['pick2_xyz'][2]==-10
+    code,coords=rig.request(4,155); assert code==155 and list(coords)==['pick2_xyz', 'pick_tool'] and coords['pick_tool']==2 and coords['pick2_xyz'][2]==-10
     rig.plc.request=(5,156); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='tool_in_place')
     send(rig.root,'pickacc_discard'); rig.until(lambda:5 in rig.plc.replies)
     assert rig.plc.replies[5][0]==156
@@ -175,13 +175,18 @@ def test_production_compensation_hot_load(tmp_path):
 def test_selected_register_writes():
     from nest_clear.comm import Handshake, load_contract
     class IO:
-        def __init__(self): self.writes=[]
-        def write_u16(self,a,v): self.writes.append(a)
-        def write_real32_block(self,a,v): self.writes.append(a)
+        def __init__(self): self.words={}
+        def write_u16(self,a,v): self.words[a]=v
+        def write_real32_block(self,a,v):
+            from nest_clear.comm.codec import encode_real32
+            for i, word in enumerate(sum((encode_real32(x) for x in v), [])): self.words[a+i]=word
     io=IO(); h=Handshake(io,load_contract('config/plc_contract.yaml'),write_readback=False)
     for tool,address in ((1,40960),(2,40966)):
-        io.writes.clear(); h.write_reply(1,155,{f'pick{tool}_xyz':(100,30,-10)})
-        assert io.writes[0]==address and (40966 if tool==1 else 40960) not in io.writes
+        io.words.clear(); h.write_reply(1,155,{f'pick{tool}_xyz':(100,30,-10), 'pick_tool':tool})
+        assert io.words[40935] == tool
+        assert all(a in io.words for a in range(address, address+6))
+        other = 40966 if tool == 1 else 40960
+        assert all(a not in io.words for a in range(other, other+6))
 
 
 def test_pickacc_status_model(tmp_path):
@@ -217,7 +222,7 @@ def test_plc_table_simple_and_constant(rig, scenario):
         code,coords=rig.plc.replies[task]
         if code==150: rig.plc.actual=coords['scan_xyz']; continue
         assert code==155, (code,rig.events.status.data['pickacc'])
-        assert list(coords)==[f'pick{tool}_xyz']
+        assert list(coords)==[f'pick{tool}_xyz', 'pick_tool'] and coords['pick_tool']==tool
         e=rig.batch.blackboard.read('pickaccuracy_session')['engine']; target=e.measured[e.current]; xyz=coords[f'pick{tool}_xyz']
         error=np.array((.08,-.05) if scenario=='constant' else gradient(*target))
         if scenario=='simple': error+=np.array([.02,-.01])

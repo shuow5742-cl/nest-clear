@@ -75,7 +75,7 @@ def test_normal_real_tree(tmp_path):
     save_result(directory / 'tool_offset.yaml', 1, {'offset_xy_mm':[1.,2.], 'n':6})
     old_result = (directory / 'tool_offset.yaml').read_bytes()
     camera_path = directory / 'camera.yaml'; camera_path.write_text('test')
-    cfg = replace(cfg, tool_calibration=replace(cfg.tool_calibration, directory=str(directory)),
+    cfg = replace(cfg, tools=((0., 0., 0.), (0., 0., 0.)), tool_calibration=replace(cfg.tool_calibration, directory=str(directory)),
                   travel=((80,180),(-10,150),(-15,0)),
                   camera_calibration={**cfg.camera_calibration, 'start_xyz':[130.,70.,-5.], 'board_thickness_mm':0.},
                   tool_offset={**cfg.tool_offset, 'settle_window_s':.005, 'min_points':5})
@@ -141,7 +141,7 @@ def rig(tmp_path):
     directory = tmp_path / 'calibration'; directory.mkdir()
     initialize_tools(directory / 'tools.yaml')
     camera_path = directory / 'camera.yaml'; camera_path.write_text('test')
-    cfg = replace(cfg, tool_calibration=replace(cfg.tool_calibration, directory=str(directory)),
+    cfg = replace(cfg, tools=((0., 0., 0.), (0., 0., 0.)), tool_calibration=replace(cfg.tool_calibration, directory=str(directory)),
                   travel=((80,180),(-10,150),(-15,0)),
                   camera_calibration={**cfg.camera_calibration, 'start_xyz':[130.,70.,-5.], 'board_thickness_mm':0.},
                   tool_offset={**cfg.tool_offset, 'settle_window_s':.001, 'min_points':5})

@@ -10,6 +10,7 @@ from .function_codes import REPLY_FUNCTION_NAMES
 from ..guard import GuardError, diagnostic
 
 logger = logging.getLogger("nest_clear.comm")
+SCALAR_NAMES = frozenset(("removable_count", "pick_tool"))
 
 
 class Handshake:
@@ -53,7 +54,7 @@ class Handshake:
         if self._readback_error_task == task_id:
             func_code = 999
             failure = self._readback_error_diagnostic
-            payload = {name: (0 if name == "removable_count" else [0, 0, 0]) for name in (payload or {})}
+            payload = {name: (0 if name in SCALAR_NAMES else [0, 0, 0]) for name in (payload or {})}
         context = f"Task_ID={task_id!r}，功能码={func_code!r}"
         try:
             encode_u16(task_id)
@@ -68,11 +69,11 @@ class Handshake:
         scalar_blocks: list[tuple[int, int]] = []
         for name, values in payload.items():
             where = f"{context}，坐标名={name!r}"
-            if name == "removable_count":
+            if name in SCALAR_NAMES:
                 try:
                     encode_u16(values)
                 except GuardError as exc:
-                    raise GuardError("HANDSHAKE-INVALID", f"可去数量无效：{values!r}", where, "检查目标数量是否为 UINT16。") from exc
+                    raise GuardError("HANDSHAKE-INVALID", f"UINT16 标量 {name} 无效：{values!r}", where, "检查标量是否为 UINT16。") from exc
                 scalar_blocks.append((self.contract[name].address, values))
                 continue
             if name not in ("scan_xyz", "pick1_xyz", "pick2_xyz", "calibration1_xyz", "calibration2_xyz", "camcal_xyz"):
@@ -138,7 +139,7 @@ class Handshake:
             self.events.emit("reply_error", task_id=task_id, reply_func=func_code, **details)
         if self.events and hasattr(self.events, "plc"):
             self.events.plc("reply", task_id=task_id, func=func_code, coordinates=dict(payload),
-                            removable_count=payload.get("removable_count"), readback=readback_result,
+                            removable_count=payload.get("removable_count"), pick_tool=payload.get("pick_tool"), readback=readback_result,
                             elapsed_ms=round((time.monotonic() - started) * 1000, 3),
                             **(details if func_code in (999, 131, 82, 92) else {}))
         logger.info("应答完成：Task_ID=%s，功能码=%s（%s），坐标=%s", task_id, func_code, REPLY_FUNCTION_NAMES.get(func_code, "未知功能码"), dict(payload))
