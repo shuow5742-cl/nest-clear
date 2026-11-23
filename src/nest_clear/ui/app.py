@@ -18,7 +18,7 @@ from nest_clear.paths import live_image_file, main_status_file, supervisor_state
 from .model import (EventTail, camcal_progress, decode_status, display_time, duration,
                     read_json, status_indicators, tooltip_progress, preview_controls, edge_corner_label,
                     pickacc_tray_geometry, pickacc_type, pickacc_stage, pickacc_note, pickacc_infield,
-                    tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time)
+                    tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time, page_for_mode)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -252,7 +252,7 @@ class App:
                     'pickacc': '挑取精度标定', 'pick-accuracy': '挑取精度标定',
                     'baseline': '对刀基准建立', 'toolcal': '换针对刀', 'tooltip': '换针对刀'}
 
-    def __init__(self, root, refresh_ms=300, fullscreen=False, page='主页', screenshot=None, screenshot_after_ms=None, ignore_before_ns=None):
+    def __init__(self, root, refresh_ms=300, fullscreen=False, page=None, screenshot=None, screenshot_after_ms=None, ignore_before_ns=None):
         self.directory = Path(root); self.interval = refresh_ms
         self.started_at_ns = time.time_ns() if ignore_before_ns is None else ignore_before_ns
         self.root = tk.Tk(); self.root.title('Nest Clear 算法状态')
@@ -276,6 +276,7 @@ class App:
             banner.grid(row=0, column=0, sticky='ew', padx=6, pady=(4, 0))
         self.commtest_banner = tk.Label(self.root, text='通信联调模式：下发坐标为假点', bg='#b00020', fg='white', font=self.theme.title, padx=8, pady=4)
         self.tail = EventTail(root); self.pictures = []; self.cache = {}; self.events = []; self.files = {}
+        self.last_mode = read_json(main_status_file(self.directory)).get('mode') if page is not None else None
         self.build_status()
         self.tabs = ttk.Notebook(self.root)
         self.tabs.grid(row=2, column=0, sticky='nsew', padx=6, pady=(0, 6))
@@ -285,7 +286,7 @@ class App:
         self.pickacc = self.new_page('挑取精度标定'); self.build_pickacc()
         self.baseline = self.new_page('对刀基准建立'); self.build_baseline()
         self.tip = self.new_page('换针对刀'); self.build_tip()
-        self.select_page(page)
+        self.select_page(page if page is not None else '主页')
         self.root.after(50, self.refresh)
         self.root.after(50, self.poll_pictures)
         if screenshot is not None and screenshot_after_ms is not None:
@@ -1141,6 +1142,11 @@ class App:
     def refresh(self):
         supervisor = self.file_data(supervisor_state_file(self.directory))
         main = self.file_data(main_status_file(self.directory))
+        mode = main.get('mode')
+        if mode != self.last_mode:
+            self.last_mode = mode
+            page = page_for_mode(main)
+            if page is not None: self.select_page(page)
         if main.get('run_mode') == 'commtest': self.commtest_banner.grid(row=0, column=0, sticky='ew')
         elif hasattr(self.commtest_banner, 'grid_remove'): self.commtest_banner.grid_remove()
         for name, (color, value) in status_indicators(supervisor, main).items():
@@ -1166,9 +1172,6 @@ class App:
         self.tip_ack = main.get('command_seq', 0)
         if self.tip_pending and self.tip_ack >= self.tip_pending: self.tip_pending = 0
         tip_data = tooltip_progress(main)
-        start_id = (tip_data.get('tool'), tip_data.get('start_task_id'), tip_data.get('start_token'))
-        if tip_data.get('start_task_id') and start_id != getattr(self, '_tip_start_id', None):
-            self._tip_start_id = start_id; self.select_page('换针对刀')
         self.update_tip(tip_data)
         self.update_offset(main)
         self.update_pickacc(main)

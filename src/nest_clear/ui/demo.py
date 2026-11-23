@@ -281,7 +281,7 @@ def main():
             time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state); step += 1
     threading.Thread(target=update, daemon=True).start()
     from .app import App
-    app = App(args.root, page=args.page, screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms, ignore_before_ns=0)
+    app = App(args.root, page=args.page or '主页', screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms, ignore_before_ns=0)
     if args.screenshot:
         app.root.attributes('-topmost', True)
     if args.geometry:
