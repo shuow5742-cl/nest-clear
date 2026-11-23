@@ -111,6 +111,9 @@ class VisionWorker(AsyncRequestWorker):
         """检测当前帧并以模组坐标复核待挑目标、过滤本盘已尝试目标。"""
         start = time.perf_counter()
         pose = payload["pose"]
+        cycle = payload.get("cycle")
+        if getattr(cycle, "film_mode", False) and payload.get("work_action") in ("coarse", "fine"):
+            return self._film_detect(payload, start)
         if isinstance(self.detector, HairDetector) and self.detector.calibration is not None:
             self.detector.config = self.detector.for_z(pose[2])
         pixels = self.detector.detect(payload["image"])
@@ -176,6 +179,38 @@ class VisionWorker(AsyncRequestWorker):
             "failed_count": sum(o.status == "failed" for o in observations),
             "elapsed_ms": (time.perf_counter() - start) * 1000,
         }
+
+    def _film_detect(self, payload, start):
+        from nest_clear.tooloffset.detection import detect
+        cycle, pose = payload['cycle'], payload['pose']
+        calibration = getattr(cycle, 'film_calibration', None)
+        non_pickable_labels = getattr(cycle, 'film_non_pickable', None)
+        if calibration is None or non_pickable_labels is None:
+            raise GuardError('FILM-CONFIG', '菲林模式缺少平面标定或不可去目标配置', '菲林目标识别', '检查本盘测试模式配置。')
+        observations = []
+        for film in detect(payload['image']):
+            u, v = film.ring_uv
+            xyz = pixel_to_module(u, v, pose, calibration)
+            marker = np.asarray(film.marker)
+            size = max(8., float(np.linalg.norm(marker[1] - marker[0])) * 2)
+            candidate = HairCandidate((u, v), None, (), (u-size, v-size, u+size, v+size),
+                                      (u, v), 0, 0, None, None, 'film', 'film')
+            non_pickable = film.label in non_pickable_labels
+            obs = Observation(ModuleTarget(PixelTarget(u, v, 1., film), xyz), xyz,
+                              candidate, 0., 1., '不可去' if non_pickable else None,
+                              'rejected' if non_pickable else 'eligible')
+            obs.film_label = film.label
+            observations.append(obs)
+        result = {'observations': observations, 'elapsed_ms': (time.perf_counter()-start)*1000}
+        if payload['work_action'] == 'fine':
+            coarse = cycle.current_target()
+            label = getattr(coarse, 'film_label', None)
+            choices = [o for o in observations if label is not None and getattr(o, 'film_label', None) == label and o.status == 'eligible']
+            selected = min(choices, key=lambda o: math.dist(o.identity[:2], coarse.identity[:2]), default=None)
+            result['fine_result'] = (FineResult('ok', selected.candidate, selected.candidate.pick_uv,
+                                                 selected.target.xyz, identity=selected.identity,
+                                                 box_candidate_count=len(choices)) if selected else FineResult('fine_empty'))
+        return result
 
 
 def owns_target(target: tuple[float, ...], center: tuple[float, ...], centers: list[tuple[float, float]]) -> bool:

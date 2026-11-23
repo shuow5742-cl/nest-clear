@@ -145,6 +145,7 @@ class Config:
     exposure_source: str = "配置"
     white_balance_override_path: str = ""
     white_balance_source: str = "配置"
+    test_mode: dict[str, Any] = field(default_factory=lambda: {"non_pickable": [f"T{i:02d}" for i in range(3, 31, 3)]})
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -323,11 +324,12 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             _fail("run_mode", "通信联调模式已删除，请改用 config/nest_clear.yaml")
         if data.get("run_mode") == "production":
             data.pop("run_mode")
-        data = {"pick_accuracy": {}, "tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, **data}
+        data = {"test_mode": {}, "pick_accuracy": {}, "tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, **data}
     root = _mapping(
         data,
         "根",
         [
+            "test_mode",
             "plc",
             "scan",
             "arrival_tolerance_mm",
@@ -345,6 +347,9 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "ui",
         ],
     )
+    test_mode = _mapping({"non_pickable": [f"T{i:02d}" for i in range(3, 31, 3)], **root["test_mode"]}, "test_mode", ["non_pickable"]) if isinstance(root["test_mode"], dict) else _fail("test_mode", "应为映射")
+    if not isinstance(test_mode["non_pickable"], list) or any(not isinstance(x, str) or len(x) != 3 or x[0] != "T" or not x[1:].isdigit() or not 0 <= int(x[1:]) <= 31 for x in test_mode["non_pickable"]):
+        _fail("test_mode.non_pickable", "须为 T00–T31 列表")
     from nest_clear.tooloffset.session import DEFAULTS as offset_defaults
     if not isinstance(root["tool_offset"], dict):
         _fail("tool_offset", "应为映射")
@@ -690,5 +695,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _string(record["machine_id"], "record.machine_id"),
         camcal,
         UIConfig(**ui_data),
-        preview_data, offset, accuracy, str(exposure_path), exposure_source, str(wb_path), wb_source,
+        preview_data, offset, accuracy, str(exposure_path), exposure_source, str(wb_path), wb_source, test_mode,
     )

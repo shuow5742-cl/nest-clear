@@ -110,6 +110,8 @@ def picking_text(p):
     if not isinstance(p, dict) or not p: return '无数据'
     def val(*keys, default='—'):
         return next((p[k] for k in keys if p.get(k) is not None), default)
+    if p.get('film_mode'):
+        return f"菲林测试 · 可去 {val('removable_count')} · 不可去 {val('non_pickable_count')} · 已下发 {val('sent_count')} · 失败 {val('failed_count')}"
     tray = val('tray_id','tray'); view = val('view_index','view'); total = val('total_views','total')
     if isinstance(view, int) and 'view_index' in p: view += 1
     return f"第 {tray} 盘 · 视野 {view}/{total} · 粗拍 {val('coarse_shots')} 次 · 可去 {val('removable_count', 'n0')} · 红框 {val('red_count')} · 已下发 {val('sent_count', 'attempts')}"

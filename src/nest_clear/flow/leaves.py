@@ -340,6 +340,10 @@ class CommitReply(Instant):
         cycle = bb.read("work_cycle")
         if func == 3 and cycle is not None:
             cycle.mark_reply(bb.read("task_id"), getattr(self.events, "xid", 0), bb.read("reply_coordinates"))
+            if getattr(cycle, "film_mode", False):
+                self.events.emit("work_cycle", film_mode=True, tray_id=cycle.tray, view_index=cycle.view_index,
+                                 sent_count=sum(bool(a["sent"]) for a in cycle.attempts_ledger),
+                                 failed_count=sum(a["outcome"] == "failed" for a in cycle.attempts_ledger))
         elif cycle is not None and bb.read("reply_func") == 3:
             cycle.fine_not_sent("挑取应答未提交")
         details = {}
@@ -380,4 +384,9 @@ class CommitReply(Instant):
                 record_image_error(self.events, "精定位已提交应答叠加图", exc, bb.read("task_id"))
             bb.write("fine_render_data", None, self.name)
         if func in (9, 10):
+            from nest_clear.film_mode import end_tray
+            try:
+                end_tray(self.events.directory)
+            except (OSError, AttributeError):
+                logger.exception("清理菲林盘状态失败")
             self.events.emit("tray_end", task_id=bb.read("task_id"), scans=bb.read("next_index"))

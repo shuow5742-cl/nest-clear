@@ -274,6 +274,8 @@ class App:
             logger.warning(FONT_WARNING)
             banner = tk.Label(self.root, text=FONT_WARNING, bg='#fef0c7', fg='#7a4b00', font=self.theme.status, anchor='w', padx=8, pady=4)
             banner.grid(row=0, column=0, sticky='ew', padx=6, pady=(4, 0))
+        self.film_banner = tk.Label(self.root, text='主流程测试模式（菲林片）：识别菲林片目标，非燕窝挑毛',
+                                    bg='#b00020', fg='white', font=self.theme.status, anchor='center', padx=8, pady=5)
         self.tail = EventTail(root); self.pictures = []; self.cache = {}; self.events = []; self.files = {}
         self.last_mode = read_json(main_status_file(self.directory)).get('mode') if page is not None else None
         self.build_status()
@@ -384,15 +386,18 @@ class App:
         pick = self.card(left, '挑毛进度', 0, 1)
         pick_content = tk.Frame(pick, bg=WHITE)
         pick_content.grid(row=0, column=0, sticky='new')
-        for i in range(3): pick_content.rowconfigure(i, minsize=30)
+        for i in range(4): pick_content.rowconfigure(i, minsize=30)
         self.pick_values = {}
-        for i, title in enumerate(('盘号', '视野', '粗拍次数', '可去数量', '红框数量', '已下发')):
+        for i, title in enumerate(('盘号', '视野', '粗拍次数', '可去数量', '红框数量', '已下发', '不可去', '失败')):
             r, c = divmod(i, 2)
             pick_content.columnconfigure(c * 2 + 1, weight=1)
             label = self.label(pick_content, title + '  ', fg=MUTED)
             label.grid(row=r, column=c * 2, sticky='w')
             value = self.label(pick_content, '—', font=self.theme.mono)
             value.grid(row=r, column=c * 2 + 1, sticky='w'); self.pick_values[title] = value
+        pick.grid_configure(columnspan=2)
+        self.film_button = ttk.Button(pick.master, text='主流程测试模式（菲林片）', command=self.toggle_film_mode)
+        self.film_button.grid(row=0, column=1, sticky='e', padx=(0, 8))
         reply = self.card(left, '最近应答', 2, 0, columnspan=2)
         self.reply_table = self.table_widget(reply, ('时间', 'Task_ID', '功能码', '原因'),
                                              (80, 65, 85, 120), stretch=('原因',), height=5)
@@ -432,7 +437,7 @@ class App:
             row_height = max(22, 30 - (shortage + 3) // 4)
             if current_row != row_height:
                 for index in range(4): device_content.rowconfigure(index, minsize=row_height)
-                for index in range(3): pick_content.rowconfigure(index, minsize=row_height)
+                for index in range(4): pick_content.rowconfigure(index, minsize=row_height)
                 layout_state['row_height'] = row_height
             compact = self.home.winfo_height() < left.winfo_reqheight() + log_height
             if layout_state.get('log_height') != log_height:
@@ -1152,9 +1157,40 @@ class App:
     def val(data, *keys, default='—'):
         return next((data[key] for key in keys if data.get(key) is not None), default)
 
+    def toggle_film_mode(self):
+        from nest_clear.film_mode import may_change_mode, read_mode, write_mode, mode_lock, tray_active
+        from nest_clear.record.events import EventRecorder
+        supervisor = read_json(supervisor_state_file(self.directory))
+        main = read_json(main_status_file(self.directory))
+        try:
+            with mode_lock(self.directory):
+                supervisor = read_json(supervisor_state_file(self.directory))
+                main = read_json(main_status_file(self.directory))
+                if not may_change_mode(supervisor, main) or tray_active(self.directory, supervisor.get('child_pid')):
+                    messagebox.showwarning('无法切换', '仅主程序空闲或未运行时可以切换。', parent=self.root)
+                    return
+                previous = read_mode(self.directory)
+                write_mode(self.directory, not previous)
+            EventRecorder(self.directory, process='ui').emit('film_mode_change', previous_enabled=previous, enabled=not previous)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('切换失败', str(exc), parent=self.root)
+        self.refresh()
+
     def refresh(self):
         supervisor = self.file_data(supervisor_state_file(self.directory))
         main = self.file_data(main_status_file(self.directory))
+        from nest_clear.film_mode import may_change_mode, read_mode, tray_active
+        try:
+            enabled = read_mode(self.directory)
+        except (OSError, ValueError):
+            enabled = False
+        active = enabled or (main.get('mode') == '挑毛中' and main.get('film_mode') is True)
+        if active:
+            self.film_banner.grid(row=0, column=0, sticky='ew', padx=6, pady=(4, 0))
+        else:
+            self.film_banner.grid_remove()
+        self.film_button.config(text='主流程测试模式（菲林片）：' + ('开' if enabled else '关'),
+                                state='normal' if may_change_mode(supervisor, main) and not tray_active(self.directory, supervisor.get('child_pid')) else 'disabled')
         mode = main.get('mode')
         if mode != self.last_mode:
             self.last_mode = mode
@@ -1174,7 +1210,8 @@ class App:
         if isinstance(view, int) and 'view_index' in picking: view += 1
         pick_fields = {'盘号': self.val(picking, 'tray_id', 'tray'), '视野': f"{view}/{self.val(picking, 'total_views', 'total')}",
                        '粗拍次数': self.val(picking, 'coarse_shots'), '可去数量': self.val(picking, 'removable_count', 'n0'),
-                       '红框数量': self.val(picking, 'red_count'), '已下发': self.val(picking, 'sent_count', 'attempts')}
+                       '红框数量': self.val(picking, 'red_count'), '已下发': self.val(picking, 'sent_count', 'attempts'),
+                       '不可去': self.val(picking, 'non_pickable_count'), '失败': self.val(picking, 'failed_count')}
         for name, value in pick_fields.items(): self.pick_values[name].config(text=str(value))
         rows = self.tail.poll()
         self.update_reply(main, rows)

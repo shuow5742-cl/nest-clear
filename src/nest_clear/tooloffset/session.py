@@ -47,16 +47,20 @@ def stats(samples):
     return mean, std, std / math.sqrt(len(x))
 
 
+def film_calibration(calibration, card_thickness_mm, board_thickness_mm):
+    """将相机标定板平面平移到菲林片表面。"""
+    normal = calibration.plane_normal
+    if abs(normal[2]) < 1e-6:
+        raise ValueError('相机标定平面法向近乎水平，无法确定板面上下方向')
+    upward = normal if normal[2] > 0 else -normal
+    shift = card_thickness_mm - board_thickness_mm
+    return replace(calibration, plane_point=calibration.plane_point + shift * upward)
+
+
 class Session:
     def __init__(self, calibration, start, travel, config=None, mode='center', tool=1, board_thickness_mm=0.):
         self.cfg = {**DEFAULTS, **(config or {})}
-        # 标定求解器的平面穿过板面角点。Z 正方向朝上；法向可能反向。
-        normal = calibration.plane_normal
-        if abs(normal[2]) < 1e-6:
-            raise ValueError('相机标定平面法向近乎水平，无法确定板面上下方向')
-        upward = normal if normal[2] > 0 else -normal
-        shift = self.cfg['card_thickness_mm'] - board_thickness_mm
-        self.cal = replace(calibration, plane_point=calibration.plane_point + shift * upward)
+        self.cal = film_calibration(calibration, self.cfg['card_thickness_mm'], board_thickness_mm)
         self.start, self.travel, self.mode, self.tool = tuple(start), travel, mode, tool
         self.nominal = nominal_targets()
         self.phase = 'overview'

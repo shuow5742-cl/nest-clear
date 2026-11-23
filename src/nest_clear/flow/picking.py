@@ -102,7 +102,10 @@ class WorkRequest(Instant):
             calibration = self.ctx.calibration
             def fine_coord(target: tuple[float, float, float], pose: tuple[float, float, float]) -> tuple[float, float, float]:
                 """按标定主点计算精定位拍照坐标。"""
-                xyz = fine_camera_xy(target, pose, calibration)
+                target_calibration = getattr(cycle, "film_calibration", None) if getattr(cycle, "film_mode", False) else calibration
+                if target_calibration is None:
+                    raise GuardError("FILM-CONFIG", "菲林模式缺少平面标定", "精定位拍照坐标", "检查本盘测试模式配置。")
+                xyz = fine_camera_xy(target, pose, target_calibration)
                 guard_position(xyz, self.ctx.config.travel, "精定位拍照坐标")
                 return xyz
             def pick_coords(target: tuple[float, float, float]) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -117,8 +120,32 @@ class WorkRequest(Instant):
                     delta = evaluate(data.get(f'tool{tool}'), xy)
                     used[f'tool{tool}'] = delta
                     return delta
-                result = calculate_pick_coords(target, self.ctx.config.tools, self.ctx.config.pick_depth_z,
-                                               self.ctx.config.travel, task_id=bb.read('task_id'), compensation=compensation)
+                if getattr(cycle, "film_mode", False):
+                    from nest_clear.tooloffset.store import load_pick_z
+                    z_sources = {}
+                    result = []
+                    for tool in (1, 2):
+                        try:
+                            source = load_pick_z(Path(self.ctx.config.tool_calibration.directory) / 'tool_offset.yaml', tool)
+                        except (OSError, ValueError):
+                            source = None
+                        if source is None:
+                            reason = f'工具{tool} 缺少工具偏移标定下针 Z，请先完成工具偏移标定'
+                            cycle.film_failure = reason
+                            raise GuardError('FILM-PICK-Z', reason, '菲林测试挑取坐标', '完成对应工具的工具偏移标定。')
+                        z, samples = source
+                        xyz = calculate_pick_coords(target, self.ctx.config.tools, z - self.ctx.config.tools[tool-1][2],
+                                                    self.ctx.config.travel, task_id=bb.read('task_id'), tool=tool, compensation=compensation)
+                        guard_position(xyz, self.ctx.config.travel, f'菲林测试工具{tool}挑取坐标')
+                        result.append(xyz)
+                        z_sources[f'tool{tool}'] = {'sample_count': len(samples), 'max_z': z}
+                    result = tuple(result)
+                    cycle.film_pending = {'tray': cycle.tray, 'view': cycle.view_index + 1,
+                                          'target': getattr(cycle.current_target(), 'film_label', None), 'pickable': True,
+                                          'target_xy': target[:2], 'pick1_xyz': result[0], 'pick2_xyz': result[1], 'z_sources': z_sources}
+                else:
+                    result = calculate_pick_coords(target, self.ctx.config.tools, self.ctx.config.pick_depth_z,
+                                                   self.ctx.config.travel, task_id=bb.read('task_id'), compensation=compensation)
                 self.ctx.events.emit('pick_compensation_used', task_id=bb.read('task_id'), target_xy=target[:2], compensation=used)
                 return result
             def record(event: str, **fields: Any) -> None:
@@ -126,10 +153,19 @@ class WorkRequest(Instant):
                 fields.setdefault("request_func", bb.read("request_func"))
                 fields.setdefault("xid", getattr(self.ctx.events, "xid", 0))
                 self.ctx.events.emit(event, **fields)
+            from nest_clear.film_mode import start_tray
+            film_mode = start_tray(self.ctx.config.record_directory)
+            self.ctx.events.emit("film_mode_tray", enabled=film_mode, tool_check_disabled=film_mode, tray=getattr(self.ctx.events, "tray_id", None))
             cycle = WorkCycle(self.ctx.path, fine_coord, pick_coords, self.ctx.config.vision,
-                              record=record, tray=getattr(self.ctx.events, "tray_id", None) or "0000")
+                              record=record, tray=getattr(self.ctx.events, "tray_id", None) or "0000", film_mode=film_mode)
+            if film_mode:
+                from nest_clear.tooloffset.session import film_calibration
+                cycle.film_calibration = film_calibration(calibration, self.ctx.config.tool_offset["card_thickness_mm"], self.ctx.config.camera_calibration["board_thickness_mm"])
+                cycle.film_non_pickable = set(self.ctx.config.test_mode["non_pickable"])
             self.ctx.events.active_cycle = cycle
             bb.write("work_cycle", cycle, self.name)
+        if getattr(cycle, "film_mode", False) and getattr(cycle, "film_failure", None):
+            raise GuardError("FILM-PICK-Z", getattr(cycle, "film_failure"), "菲林测试挑取坐标", "完成对应工具的工具偏移标定。")
         action = cycle.expect(bb.read("request_func"))
         bb.write("work_action", action, self.name)
         if action == "start":
@@ -160,7 +196,9 @@ def apply_reply(bb: Any, reply: Any, ctx: FlowContext) -> None:
         logger.warning("视野 %s 粗拍次数超限，强制离开", reply.event.get("view_index"))
         ctx.events.emit("warning", task_id=bb.read("task_id"), reason="粗拍次数超限", scan_index=reply.event.get("view_index"))
     cycle = bb.read("work_cycle")
-    progress = {"state": cycle.state.value, "total_views": len(ctx.path), "tray_id": cycle.tray, "removable_count": cycle.n0, "red_count": cycle.red_count, "sent_count": cycle.attempt_count, **reply.event}
+    progress = {"film_mode": getattr(cycle, "film_mode", False), "non_pickable_count": getattr(cycle, "film_non_pickable_count", 0),
+                "failed_count": sum(a["outcome"] == "failed" for a in cycle.attempts_ledger),
+                "sent_count": sum(bool(a["sent"]) for a in cycle.attempts_ledger), "state": cycle.state.value, "total_views": len(ctx.path), "tray_id": cycle.tray, "removable_count": cycle.n0, "red_count": cycle.red_count, **reply.event}
     ctx.events.emit("work_cycle", task_id=bb.read("task_id"), reply_func=reply.func_code, **progress)
 
 
@@ -225,6 +263,8 @@ class FinishCapture(Instant):
         view = cycle.view_index
         coarse_target = cycle.current_target() if stage == "fine" else None
         if stage == "coarse":
+            if getattr(cycle, "film_mode", False):
+                cycle.film_non_pickable_count = sum(o.status == "rejected" for o in detection["observations"])
             reply = cycle.on_coarse(bb.read("actual"), detection["observations"], bb.read("capture_id"))
         else:
             from dataclasses import replace
@@ -257,7 +297,19 @@ class FinishCapture(Instant):
                             eligible=reply.removable_count if stage == "coarse" else sum(o.status == "eligible" for o in detection.get("observations", [])),
                             failed=sum(o.status == "failed" for o in detection.get("observations", [])),
                             um_per_px=round(scale, 3) if scale is not None else None)
-                if stage == "coarse":
+                if getattr(cycle, "film_mode", False):
+                    import cv2
+                    overlay = bb.read("image").copy()
+                    if overlay.ndim == 2:
+                        overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
+                    selected = detection.get("fine_result")
+                    for obs in detection.get("observations", []):
+                        color = (0, 0, 255) if obs.status == "failed" else (0, 165, 255) if obs.status == "rejected" else (0, 255, 0)
+                        x1, y1, x2, y2 = map(round, obs.candidate.bbox)
+                        highlight = stage == "fine" and selected is not None and selected.candidate is obs.candidate and reply.func_code == 3
+                        cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 255, 255) if highlight else color, 4 if highlight else 2)
+                        cv2.putText(overlay, getattr(obs, "film_label", ""), (x1, max(15, y1-5)), cv2.FONT_HERSHEY_SIMPLEX, .8, color, 2)
+                elif stage == "coarse":
                     overlay = render(bb.read("image"), detection["observations"], None,
                                      self.ctx.config.vision.ignore_regions_px, cycle.targets, info=info,
                                      pick_region=self.ctx.config.vision.pick_region_mm, pose=bb.read("actual"), calibration=self.ctx.calibration)
@@ -284,7 +336,7 @@ class FinishCapture(Instant):
                     overlay = render_fine(bb.read("image"), detection.get("observations", []), result,
                                           bb.read("actual"), self.ctx.calibration, self.ctx.config.vision.fine_box_half_mm,
                                           info=info, coarse_uv=coarse_uv)
-                if stage != "fine" or getattr(self.ctx.events, "run_directory", None) is None:
+                if getattr(cycle, "film_mode", False) or stage != "fine" or getattr(self.ctx.events, "run_directory", None) is None:
                     archive.rendered(overlay, bb.read("next_index"), bb.read("task_id"), bb.read("raw_path"),
                                      self.ctx.config.vision.preview_window,
                                      **({"capture_id": bb.read("capture_id")} if getattr(self.ctx.events, "run_directory", None) is not None else {}))

@@ -197,3 +197,7 @@ pick_accuracy:
   outlier_mm: 0.3  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.1
   max_points: 40
   calib_tool_z_mm: -10.0
+
+# 主流程菲林测试：列出的目标不下发挑取坐标。
+test_mode:
+  non_pickable: [T03, T06, T09, T12, T15, T18, T21, T24, T27, T30]

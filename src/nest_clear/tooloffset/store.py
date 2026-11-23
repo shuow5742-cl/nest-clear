@@ -42,6 +42,28 @@ def load_offset(path, tool):
     return tuple(float(v) for v in xy)
 
 
+def load_pick_z(path, tool):
+    """读取该工具所有人工对准样本的模组 Z，返回最大值与样本列表。
+
+    缺失或损坏的样本不可用于安全坐标；调用方应拒绝下发。
+    """
+    key = _tool_key(tool)
+    result = _read(path).get(key)
+    if not isinstance(result, dict):
+        return None
+    samples = result.get("samples")
+    if not isinstance(samples, list) or not samples:
+        return None
+    values = []
+    for sample in samples:
+        xyz = sample.get("tool_xyz_mm") if isinstance(sample, dict) else None
+        if (not isinstance(xyz, (list, tuple)) or len(xyz) != 3 or
+                type(xyz[2]) not in (int, float) or not math.isfinite(xyz[2])):
+            return None
+        values.append(float(xyz[2]))
+    return max(values), values
+
+
 def save_result(path, tool, result):
     """备份旧文件并原子替换结果，保留另一把工具。返回备份路径或 None。"""
     key = _tool_key(tool)
