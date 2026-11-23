@@ -42,6 +42,7 @@ class EventRecorder:
         self.xid = 0
         self.request_task = None
         self.request_func = None
+        self.request_pending = False
         self.tray_id: str | None = None
         self._lock = threading.RLock()
         self.before_emit: Callable[[dict[str, Any]], None] | None = None
@@ -112,6 +113,7 @@ class EventRecorder:
         with self._lock:
             self.xid += 1
             self.request_task, self.request_func = task_id, request_func
+            self.request_pending = True
             return self.xid
 
     def meta_update(self, **fields: Any) -> None:

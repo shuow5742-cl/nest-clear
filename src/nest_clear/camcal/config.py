@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class CameraCalibConfig:
+    solve_timeout_s: float = 60.0  # 异步 worker 应答时限
     start_xyz: tuple[float, float, float] | None = None
     cols: int = 21
     rows: int = 16

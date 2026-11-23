@@ -1,13 +1,19 @@
 """异步相机标定采样与求解，避免阻塞行为树时钟。"""
 from types import SimpleNamespace
+import logging
+import time
 
-from autoweaver.worker import AsyncRequestWorker
+logger = logging.getLogger(__name__)
+
+from autoweaver.worker import AsyncPoolConfig, AsyncRequestWorker
 
 from nest_clear.record.images import record_image_error
 
 
 class CamcalWorker(AsyncRequestWorker):
     name = 'camcal'
+    # 求解线程若卡住，不得耗尽 PLC 所用的共享线程池。
+    async_pool_config = AsyncPoolConfig(mode='dedicated', max_workers=1)
     max_retained_results = 2
 
     def execute(self, payload):
@@ -47,7 +53,21 @@ class CamcalWorker(AsyncRequestWorker):
                                          **ctx.config.camera_calibration})
             session['cfg'] = cfg
             session['engine'] = factory(cfg, ctx.calibration, (image.shape[1], image.shape[0]), session['start'])
-        step = session['engine'].add(image, tuple(actual))
+        engine = session['engine']
+        final = bool(getattr(engine, 'plan', [])) and session['shots'] == len(engine.plan) + 1
+        started = time.monotonic()
+        if final:
+            logger.info("相机标定最后一张开始求解 Task_ID=%s sequence=%s elapsed_s=0", task_id, session['shots'])
+            ctx.events.emit('camcal_solve_start', task_id=task_id, sequence=session['shots'], elapsed_s=0.0)
+        try:
+            step = engine.add(image, tuple(actual))
+        finally:
+            if final:
+                elapsed = time.monotonic() - started
+                logger.info("相机标定最后一张求解结束 Task_ID=%s sequence=%s elapsed_s=%.3f", task_id, session['shots'], elapsed)
+                ctx.events.emit('camcal_solve_end', task_id=task_id, sequence=session['shots'], elapsed_s=elapsed)
+        if session.get('timed_out'):
+            return {'step': step, 'raw_path': raw}
         if step.overlay is not None:
             from nest_clear.record.live import write_live
             write_live(ctx.events.directory, "camcal_latest", step.overlay)
