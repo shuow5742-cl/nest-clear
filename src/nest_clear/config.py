@@ -488,6 +488,8 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     exposure_path = Path(v['calibration'])
     if not exposure_path.is_absolute():
         exposure_path = Path(path).resolve().parent / exposure_path
+    from nest_clear.calibration_bootstrap import ensure_calibration_files
+    ensure_calibration_files(exposure_path.parent)
     exposure_path = exposure_path.parent / 'camera_exposure.yaml'
     exposure_source = '配置'
     if exposure_path.exists():
@@ -630,6 +632,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _number(tc["max_step_mm"], "tool_calibration.max_step_mm", True),
         _number(tc["max_total_mm"], "tool_calibration.max_total_mm", True),
     )
+    ensure_calibration_files(directory)
     tools_path = Path(directory) / "tools.yaml"
     try:
         if not require_tools and not tools_path.exists():

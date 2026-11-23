@@ -190,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
         events = EventRecorder(app.record_directory, process="tool")
         events.emit("tooltip_start", tool=args.tool, verify=args.verify, replay=args.replay)
         calibration = Path(args.calibration_dir)
+        from nest_clear.calibration_bootstrap import ensure_calibration_files
+        ensure_calibration_files(calibration)
         baseline_path = calibration / f"tool{args.tool}_baseline.yaml"
         if args.replay:
             directory = Path(args.replay)

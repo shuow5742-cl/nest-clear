@@ -17,6 +17,8 @@ def main():
         with open(args.config,encoding='utf-8') as f: data=yaml.safe_load(f) or {}
         data=data.get('camera_calibration',data)
     cfg=CameraCalibConfig(**{k:v for k,v in data.items() if k in {x.name for x in fields(CameraCalibConfig)}})
+    from nest_clear.calibration_bootstrap import ensure_calibration_files
+    ensure_calibration_files(Path(args.nominal).parent)
     result=solve_offline(record,cfg,load_calibration(args.nominal),tuple(record['image_size']))
     print('相机标定报告：'); print(json.dumps(result.report,ensure_ascii=False,indent=2))
     if args.out:

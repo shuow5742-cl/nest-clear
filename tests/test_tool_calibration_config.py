@@ -10,14 +10,14 @@ from nest_clear.guard import GuardError
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_missing_tools_fails_with_baseline_hint(tmp_path: Path) -> None:
-    """缺少补偿文件时明确提示建立基准。"""
+def test_missing_tools_uses_placeholder_template(tmp_path: Path) -> None:
+    """缺少补偿文件时引导复制占位模板。"""
     data = yaml.safe_load((ROOT / "config/nest_clear.yaml").read_text())
     data["tool_calibration"]["directory"] = str(tmp_path)
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(data))
-    with pytest.raises(GuardError, match="tooltip_baseline"):
-        load_config(path)
+    load_config(path)
+    assert (tmp_path / "tools.yaml").read_bytes() == (ROOT / "config/calibration/examples/tools.yaml").read_bytes()
 
 
 @pytest.mark.parametrize("field,value", [("max_iterations", 0), ("tip_tolerance_mm", -1), ("max_condition", 0.5)])
