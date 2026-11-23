@@ -56,11 +56,13 @@ class WorkCycle:
 
     def __init__(self, views: list[XYZ], fine_coord: Callable[[XYZ, XYZ], XYZ],
                  pick_coords: Callable[[XYZ], tuple[XYZ, XYZ]], params: Any,
-                 record: Callable[..., None] | None = None, tray: str = "0000", film_mode: bool = False) -> None:
+                 record: Callable[..., None] | None = None, tray: str = "0000", film_mode: bool = False,
+                 reachable: Callable[[XYZ], bool] | None = None) -> None:
         if not views:
             raise ValueError("视野列表不能为空")
         self._views = tuple(tuple(v) for v in views)
         self._fine_coord, self._pick_coords, self._params = fine_coord, pick_coords, params
+        self._reachable = reachable
         self._state = State.IDLE
         self._view_index = -1
         self._attempted: list[Attempt] = []
@@ -207,7 +209,7 @@ class WorkCycle:
         attempt = self.active_attempt
         if attempt and attempt["outcome"] is None:
             attempt.update(sent=True, reply_task_id=task_id, reply_xid=xid, coordinates=coordinates)
-            if getattr(self, "film_mode", False) and getattr(self, "film_pending", None):
+            if getattr(self, "film_pending", None):
                 self.record("film_pick_sent", **getattr(self, "film_pending"))
                 self.film_pending = None
             self.record("reply_sent", attempt_id=attempt["attempt_id"], target_id=attempt["target_id"],
@@ -251,12 +253,15 @@ class WorkCycle:
         region = getattr(self._params, "pick_region_mm", None)
         return region is None or all(low <= value <= high for value, (low, high) in zip(xyz[:2], region))
 
+    def can_reach(self, xyz: XYZ) -> bool:
+        return self.in_pick_region(xyz) and (self._reachable is None or self._reachable(xyz))
+
     def on_coarse(self, pose: XYZ, observations: list[Any], capture_id: str | None = None) -> Reply:
         self._require(State.WAIT_COARSE, 20)
         self._coarse_shots += 1
         self._coarse_pose = pose
         for obs in observations:
-            if obs.status != "other_view" and not self.in_pick_region(getattr(obs, "identity", obs.target.xyz)):
+            if obs.status != "other_view" and (not self.in_pick_region(getattr(obs, "identity", obs.target.xyz)) or not self.can_reach(obs.target.xyz)):
                 obs.status = "out_of_range"
         self.match_observations(observations, capture_id)
         matched = {getattr(o, "target_id", None): o for o in observations if o.status != "other_view"}
@@ -271,9 +276,14 @@ class WorkCycle:
             obs.capture_id = capture_id
             if obs.status in ("eligible", "rejected", "failed", "attempted") and self.is_attempted(getattr(obs, "identity", obs.target.xyz)):
                 guard_red_count += 1
-                attempts = [a for a in self.attempts_ledger if (math.dist(a["identity"][:2], getattr(obs, "identity", obs.target.xyz)[:2]) <= self._params.skip_radius_mm if getattr(self, "film_mode", False) else a["target_id"] == getattr(obs, "target_id", None))]
+                attempts = [a for a in self.attempts_ledger if a["target_id"] == getattr(obs, "target_id", None)]
+                if not attempts and self.film_mode:
+                    attempts = [a for a in self.attempts_ledger
+                                if math.dist(a["identity"][:2], getattr(obs, "identity", obs.target.xyz)[:2]) <= self._params.skip_radius_mm]
                 outcome = attempts[-1]["outcome"] if attempts else None
-                obs.status = "failed" if outcome == "failed" else "fine_failed" if outcome == "not_sent" else "attempted"
+                obs.status = ("failed" if outcome == "failed" else
+                              "out_of_range" if outcome == "not_sent" and attempts[-1].get("fine_result") == "fine_out_of_range" else
+                              "fine_failed" if outcome == "not_sent" else "attempted")
         self._red_count = guard_red_count + sum(o.status in ("failed", "attempted") for o in observations if not self.is_attempted(getattr(o, "identity", o.target.xyz)))
         eligible = sorted((o for o in observations if o.status == "eligible" and o.reason is None),
                           key=lambda o: o.area, reverse=True)
@@ -281,7 +291,7 @@ class WorkCycle:
         if self._n0 is None:
             self._n0 = count
             self._allowed = math.ceil(self._params.cap_ratio * count)
-        exceeded = not getattr(self, "film_mode", False) and self._coarse_shots > self._params.max_coarse_shots_per_view
+        exceeded = self._coarse_shots > self._params.max_coarse_shots_per_view
         reason = "coarse_limit" if exceeded else "cap" if self._final_check else "empty" if count == 0 else None
         self._targets = eligible[:self._params.max_fine_targets] if reason is None else []
         self._target_index = 0
@@ -292,12 +302,12 @@ class WorkCycle:
                  "red_xyz": [o.target.xyz for o in observations if o.status in ("failed", "attempted")],
                  "match_radius_mm": self._params.skip_radius_mm}
         if reason is not None:
-            change = (not getattr(self, "film_mode", False) and self._attempts >= self._params.tool_check_min_attempts and
+            change = (self._attempts >= self._params.tool_check_min_attempts and
                       self._red_count + count > self._params.tool_check_ratio * self._n0)
             event.update(reason=reason, tool_change=change, tool_check_total=self._red_count + count,
                          tool_check_threshold=self._params.tool_check_ratio * self._n0,
                          tool_check_min_attempts=self._params.tool_check_min_attempts,
-                         warning=exceeded, tool_check_disabled=getattr(self, "film_mode", False))
+                         warning=exceeded)
             if change:
                 self._state = State.TOOL_CHANGE
                 return Reply(10, removable_count=count, event=event)
@@ -319,7 +329,7 @@ class WorkCycle:
         fine = tuple(result.target_xyz) if result.status == "ok" and result.target_xyz is not None else None
         if result.status == "ok" and fine is None:
             raise ValueError("精定位成功时缺少 target_xyz")
-        if fine is not None and not self.in_pick_region(fine):
+        if fine is not None and not self.can_reach(fine):
             from dataclasses import replace
             result = replace(result, status="fine_out_of_range")
             fine = None
@@ -345,7 +355,7 @@ class WorkCycle:
             self._state = State.WAIT_PICK
             event.update(tool1_xyz=tools[0], tool2_xyz=tools[1])
             return Reply(3, tool1_xyz=tools[0], tool2_xyz=tools[1], event=event)
-        self._final_check = not getattr(self, "film_mode", False) and self._attempts >= self._allowed
+        self._final_check = self._attempts >= self._allowed
         self._targets = []
         self._state = State.WAIT_COARSE
         return Reply(1, scan_xyz=self._views[self._view_index], event=event)
@@ -357,9 +367,6 @@ class WorkCycle:
 
     def on_next(self) -> Reply:
         self._require(State.WAIT_NEXT, 1)
-        if getattr(self, "film_mode", False):
-            self._state = State.WAIT_COARSE
-            return Reply(1, scan_xyz=self._views[self._view_index], event={"type": "picked", "reason": "review", "view_index": self._view_index})
         if self._attempts >= self._allowed:
             self._final_check = True
             reason = "cap"

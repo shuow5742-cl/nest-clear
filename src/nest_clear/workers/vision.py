@@ -190,6 +190,9 @@ class VisionWorker(AsyncRequestWorker):
         observations = []
         for film in detect(payload['image']):
             u, v = film.ring_uv
+            if self.config is not None and any(a <= u <= c and b <= v <= d
+                                               for a, b, c, d in self.config.ignore_regions_px):
+                continue
             xyz = pixel_to_module(u, v, pose, calibration)
             marker = np.asarray(film.marker)
             size = max(8., float(np.linalg.norm(marker[1] - marker[0])) * 2)
@@ -201,11 +204,24 @@ class VisionWorker(AsyncRequestWorker):
                               'rejected' if non_pickable else 'eligible')
             obs.film_label = film.label
             observations.append(obs)
+        path, scan = payload.get('scan_path'), payload.get('scan')
+        if (payload['work_action'] == 'coarse' and self.config is not None and
+                self.config.responsibility_zone and path and scan is not None):
+            center = pixel_to_module(calibration.K[0, 2], calibration.K[1, 2], pose, calibration)
+            centers = [(center[0] + point[0] - scan[0], center[1] + point[1] - scan[1]) for point in path]
+            for observation in observations:
+                if observation.status == 'eligible' and not owns_target(observation.target.xyz[:2], center[:2], centers):
+                    observation.status = 'other_view'
         result = {'observations': observations, 'elapsed_ms': (time.perf_counter()-start)*1000}
         if payload['work_action'] == 'fine':
             coarse = cycle.current_target()
             label = getattr(coarse, 'film_label', None)
             choices = [o for o in observations if label is not None and getattr(o, 'film_label', None) == label and o.status == 'eligible']
+            if self.config is not None:
+                center = pixel_to_module(calibration.K[0, 2], calibration.K[1, 2], pose, calibration)
+                choices = [o for o in choices if not cycle.is_attempted(o.identity) and
+                           all(abs(o.identity[axis] - center[axis]) <= self.config.fine_box_half_mm
+                               for axis in (0, 1))]
             selected = min(choices, key=lambda o: math.dist(o.identity[:2], coarse.identity[:2]), default=None)
             result['fine_result'] = (FineResult('ok', selected.candidate, selected.candidate.pick_uv,
                                                  selected.target.xyz, identity=selected.identity,

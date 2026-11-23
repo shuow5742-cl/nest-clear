@@ -210,3 +210,19 @@ def test_picked_ack_then_next_target_and_exhausted():
 def test_daily_report_counts_pick_ack():
     from nest_clear.record.report import _work_stats
     assert _work_stats([{"event": "reply", "func": 60}])["replies"][60] == 1
+
+
+def test_reachability_filters_coarse_and_fine():
+    from nest_clear.vision.fine import FineResult
+    c = cycle()
+    c._reachable = lambda xyz: xyz[0] < 5
+    c.start()
+    bad = obs(10)
+    good = obs(1)
+    c.on_coarse((0, 0, 0), [bad, good])
+    assert bad.status == 'out_of_range'
+    reply = c.on_fine((0, 0, 0), FineResult('ok', target_xyz=(10, 0, 0)))
+    assert reply.event['reason'] == 'fine_out_of_range' and reply.tool1_xyz is None
+    review = obs(1)
+    c.on_coarse((0, 0, 0), [review])
+    assert review.status == 'out_of_range'

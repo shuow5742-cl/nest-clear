@@ -55,7 +55,34 @@ def test_film_worker_detects_whole_image_and_matches_label(monkeypatch):
     assert result['fine_result'].target_xyz == (30.,40.,0.)
 
 
-def test_film_review_and_neighbor_dedup_and_no_tool_change():
+def test_film_worker_applies_production_view_and_fine_filters(monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    import numpy as np
+    from nest_clear.config import load_config
+    from nest_clear.vision.geometry import Calibration
+    from nest_clear.workers.vision import VisionWorker
+
+    films = [SimpleNamespace(ring_uv=(x, 0.), marker=[[x, 0], [x+4, 0], [x+4, 4], [x, 4]], label='T02')
+             for x in (2., 8., 20.)]
+    monkeypatch.setattr('nest_clear.tooloffset.detection.detect', lambda image: films)
+    monkeypatch.setattr('nest_clear.workers.vision.pixel_to_module', lambda u, v, pose, cal: (u, v, 0.))
+    config = replace(load_config('config/nest_clear.yaml').vision, responsibility_zone=True,
+                     ignore_regions_px=((19., -1., 21., 1.),), fine_box_half_mm=4.)
+    cal = Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)
+    cycle = SimpleNamespace(film_mode=True, film_calibration=cal, film_non_pickable=set(),
+                            current_target=lambda: SimpleNamespace(film_label='T02', identity=(2., 0., 0.)),
+                            is_attempted=lambda xyz: xyz[0] == 2.)
+    worker = VisionWorker(None, cal, 1, 10, config)
+    payload = {'image': np.zeros((40, 40), np.uint8), 'pose': (0, 0, 0), 'cycle': cycle,
+               'scan': (0, 0, 0), 'scan_path': [(0, 0, 0), (10, 0, 0)]}
+    result = worker.execute({**payload, 'work_action': 'coarse'})
+    assert [obs.status for obs in result['observations']] == ['eligible', 'other_view']
+    result = worker.execute({**payload, 'work_action': 'fine'})
+    assert result['fine_result'].status == 'fine_empty'
+
+
+def test_film_review_marks_failed_and_triggers_tool_change():
     from types import SimpleNamespace
     from nest_clear.flow.work_cycle import WorkCycle
     from nest_clear.vision.fine import FineResult
@@ -66,11 +93,113 @@ def test_film_review_and_neighbor_dedup_and_no_tool_change():
     c.start(); c.on_coarse((0,0,0), [obs()]); c.begin_fine('fine')
     assert c.on_fine((0,0,0), FineResult('ok', target_xyz=(1.,2.,0.), identity=(1.,2.,0.))).func_code == 3
     c.mark_reply(1,1,{}); c.mark_done(1,1); c.on_picked()
-    assert c.on_next().event['reason'] == 'review'
+    assert c.on_next().event['reason'] == 'cap'
     review = obs(); reply = c.on_coarse((0,0,0), [review])
-    assert review.status == 'failed' and reply.func_code == 1 and reply.event['tool_check_disabled']
-    neighbor = obs(); reply = c.on_coarse((10,0,0), [neighbor])
-    assert neighbor.status == 'failed' and reply.func_code == 9
+    assert review.status == 'failed' and reply.func_code == 10
+    assert reply.event['tool_change'] and 'tool_check_disabled' not in reply.event
+
+
+def test_film_failed_target_stays_red_in_neighbor_view():
+    from types import SimpleNamespace
+    from nest_clear.flow.work_cycle import WorkCycle
+    from nest_clear.vision.fine import FineResult
+    params = SimpleNamespace(skip_radius_mm=.5, max_fine_targets=10, cap_ratio=1,
+                             tool_check_min_attempts=99, tool_check_ratio=.1,
+                             max_coarse_shots_per_view=30)
+    cycle = WorkCycle([(0, 0, 0), (10, 0, 0)], lambda target, pose: pose,
+                      lambda target: (target, target), params, film_mode=True)
+    def obs():
+        return SimpleNamespace(target=SimpleNamespace(xyz=(1., 2., 0.)), identity=(1., 2., 0.),
+                               status='eligible', reason=None, area=1., film_label='T02')
+    cycle.start(); cycle.on_coarse((0, 0, 0), [obs()])
+    cycle.on_fine((0, 0, 0), FineResult('ok', target_xyz=(1., 2., 0.)))
+    cycle.mark_reply(1, 1, {}); cycle.mark_done(1, 1); cycle.on_picked(); cycle.on_next()
+    review = obs(); assert cycle.on_coarse((0, 0, 0), [review]).func_code == 1
+    neighbor = obs(); assert cycle.on_coarse((10, 0, 0), [neighbor]).func_code == 9
+    assert review.status == neighbor.status == 'failed'
+    assert len(cycle.attempts_ledger) == 1
+
+
+def test_film_and_production_share_queue_cap_and_tool_check():
+    from types import SimpleNamespace
+    from nest_clear.flow.work_cycle import WorkCycle
+    from nest_clear.vision.fine import FineResult
+
+    def run(film_mode, cap_ratio, coarse_limit, fine_status):
+        params = SimpleNamespace(skip_radius_mm=.5, max_fine_targets=10, cap_ratio=cap_ratio,
+                                 tool_check_min_attempts=1, tool_check_ratio=.1,
+                                 max_coarse_shots_per_view=coarse_limit)
+        cycle = WorkCycle([(0, 0, 0)], lambda target, pose: pose, lambda target: (target, target),
+                          params, film_mode=film_mode)
+        def observations():
+            return [SimpleNamespace(target=SimpleNamespace(xyz=(x, 0, 0)), identity=(x, 0, 0),
+                                    status='eligible', reason=None, area=1.) for x in (1., 3.)]
+        cycle.start()
+        coarse = cycle.on_coarse((0, 0, 0), observations())
+        fine = cycle.on_fine((0, 0, 0), FineResult(fine_status, target_xyz=(1., 0, 0)
+                                                   if fine_status == 'ok' else None))
+        if fine.func_code == 3:
+            cycle.mark_reply(1, 1, {}); cycle.mark_done(1, 1); cycle.on_picked()
+            next_reply = cycle.on_next()
+            if next_reply.event['reason'] == 'next_target':
+                fine = cycle.on_fine((0, 0, 0), FineResult('ok', target_xyz=(3., 0, 0)))
+                cycle.mark_reply(2, 2, {}); cycle.mark_done(2, 2); cycle.on_picked()
+                next_after_second = cycle.on_next()
+            else:
+                next_after_second = None
+        else:
+            next_reply = next_after_second = None
+        review = observations()
+        final = cycle.on_coarse((0, 0, 0), review)
+        return (coarse.func_code, fine.func_code,
+                next_reply.event['reason'] if next_reply else None,
+                next_after_second.event['reason'] if next_after_second else None,
+                final.func_code, final.event['reason'], final.event['tool_change'],
+                [item.status for item in review])
+
+    for args in ((.5, 30, 'ok'), (2., 1, 'ok'), (.5, 30, 'fine_empty')):
+        assert run(True, *args) == run(False, *args)
+    assert run(True, .5, 30, 'ok')[2:7] == ('cap', None, 10, 'cap', True)
+    assert run(True, 2., 1, 'ok')[2:7] == ('next_target', 'list_exhausted', 10, 'coarse_limit', True)
+    assert run(True, .5, 30, 'fine_empty')[4:7] == (10, 'cap', True)
+
+
+def test_film_fine_out_of_range_overlay_is_blue():
+    from types import SimpleNamespace
+    import numpy as np
+    from nest_clear.config import load_config
+    from nest_clear.flow.context import FlowContext, RequestTracker
+    from nest_clear.flow.picking import FinishCapture
+    from nest_clear.flow.work_cycle import WorkCycle
+    from nest_clear.vision.fine import FineResult
+    from nest_clear.vision.geometry import Calibration
+    from test_hair_integration import Board, Events
+
+    config = load_config('config/nest_clear.yaml')
+    cycle = WorkCycle([(100., 50., -3.)], lambda target, pose: pose,
+                      lambda target: (target, target), config.vision,
+                      film_mode=True, reachable=lambda target: target[0] < 5)
+    candidate = SimpleNamespace(bbox=(20, 20, 40, 40), pick_uv=(30, 30), identity_uv=(30, 30),
+                                gray_ratio=None, dark_frac=None)
+    def observation(x):
+        return SimpleNamespace(target=SimpleNamespace(xyz=(x, 0., 0.)), identity=(x, 0., 0.),
+                               candidate=candidate, status='eligible', reason=None,
+                               area=1., length=1., film_label='T02')
+    cycle.start(); cycle.on_coarse((100., 50., -3.), [observation(1.)])
+    fine_obs = observation(10.)
+    detection = {'observations': [fine_obs],
+                 'fine_result': FineResult('ok', candidate=candidate, target_xyz=(10., 0., 0.))}
+    class Archive:
+        def rendered(self, image, *args, **kwargs): self.image = image
+    events = Events(); events.archive = Archive(); events.run_directory = None
+    calibration = Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)
+    ctx = FlowContext(None, config, [(100., 50., -3.)], RequestTracker(0), events, calibration)
+    board = Board(work_cycle=cycle, work_action='fine', detection=detection, actual=(100., 50., -3.),
+                  image=np.zeros((80, 80, 3), np.uint8), task_id=1, next_index=1)
+    finish = FinishCapture(ctx); finish._blackboard = board; finish.perform()
+    assert detection['fine_result'].status == 'fine_out_of_range'
+    assert fine_obs.status == 'out_of_range' and tuple(events.archive.image[20, 20]) == (255, 0, 0)
+    assert board.read('reply_func') == 1
 
 
 def test_mode_can_change_only_when_idle():
@@ -233,11 +362,9 @@ def test_synthetic_film_through_cycle_and_fake_plc():
     cycle.mark_reply(1,1,{'pick1_xyz':plc[-1].tool1_xyz,'pick2_xyz':plc[-1].tool2_xyz})
     cycle.mark_done(2,2); plc.append(cycle.on_picked()); plc.append(cycle.on_next())
     review=capture('coarse')['observations']; plc.append(cycle.on_coarse((0,0,0),review))
-    neighbor=capture('coarse')['observations']; plc.append(cycle.on_coarse((0,0,0),neighbor))
-    assert [r.func_code for r in plc] == [1,1,3,60,1,1,9]
+    assert [r.func_code for r in plc] == [1,1,3,60,1,10]
     assert next(o for o in review if o.film_label == 'T02').status == 'failed'
-    assert next(o for o in neighbor if o.film_label == 'T02').status == 'failed'
-    assert next(o for o in neighbor if o.film_label == 'T03').status == 'rejected'
+    assert next(o for o in review if o.film_label == 'T03').status == 'rejected'
 
 
 def test_incomplete_film_configuration_fails_closed():
@@ -250,3 +377,106 @@ def test_incomplete_film_configuration_fails_closed():
     with pytest.raises(GuardError, match='菲林模式缺少平面标定或不可去目标配置'):
         worker.execute({'cycle': SimpleNamespace(film_mode=True), 'work_action': 'coarse',
                         'image': np.zeros((10, 10), dtype='uint8'), 'pose': (0, 0, 0)})
+
+
+def test_site_geometry_full_tray_filters_unreachable(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    import numpy as np
+    from nest_clear.config import load_config
+    from nest_clear.film_mode import write_mode
+    from nest_clear.flow.context import FlowContext, RequestTracker
+    from nest_clear.flow.picking import WorkRequest
+    from nest_clear.vision.fine import FineResult
+    from nest_clear.vision.geometry import Calibration
+    from test_hair_integration import Board, Events
+
+    travel = ((80., 180.), (-10., 150.), (-15., 0.))
+    config = load_config('config/nest_clear.yaml')
+    config = replace(config, record_directory=str(tmp_path), travel=travel,
+                     tools=((29.330, 24.322, 0.), (30.092, -25.283, 0.)),
+                     tool_calibration=replace(config.tool_calibration, directory=str(tmp_path)))
+    (tmp_path / 'tool_offset.yaml').write_text(yaml.safe_dump({
+        'tool1': {'samples': [{'tool_xyz_mm': [0, 0, -15]}]},
+        'tool2': {'samples': [{'tool_xyz_mm': [0, 0, 0]}]}}))
+    write_mode(tmp_path, True)
+    monkeypatch.setattr('nest_clear.flow.picking.fine_camera_xy',
+                        lambda target, pose, cal: (target[0] + .86, target[1] + .92, pose[2]))
+    events = Events()
+    ctx = FlowContext(None, config, [(100., 50., -3.)], RequestTracker(0), events,
+                      Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 10))
+    bb = Board(work_cycle=None, request_func=1, task_id=1)
+    req = WorkRequest(ctx); req._blackboard = bb; req.perform()
+    cycle = bb.read('work_cycle')
+    assert bb.read('scan') == (100., 50., -3.)
+    points = [(49.1 + 30 * (i // 8), -14.2 + 30 * (i % 8), 0.) for i in range(32)]
+    non_pickable = {i for i in range(32) if f'T{i:02}' in config.test_mode['non_pickable']}
+    def observations():
+        return [SimpleNamespace(target=SimpleNamespace(xyz=p), identity=p,
+                                status='rejected' if i in non_pickable else 'eligible',
+                                reason=None, area=1., film_label=f'T{i:02}')
+                for i, p in enumerate(points)]
+    def inside(xyz):
+        return all(lo <= v <= hi for v, (lo, hi) in zip(xyz, travel))
+    reachable = {p for p in points if all(
+        inside(q) for q in ((p[0]+.86, p[1]+.92, -3.),
+                            (p[0]+29.330, p[1]+24.322, -15.),
+                            (p[0]+30.092, p[1]-25.283, 0.)))}
+    expected = {p for i, p in enumerate(points) if i not in non_pickable and p in reachable}
+    sent = []
+    reviewed = False
+    while True:
+        obs = observations()
+        reply = cycle.on_coarse((100., 50., -3.), obs)
+        assert cycle.can_reach((109.1, 15.6, 0.))
+        assert not cycle.can_reach((109.1, 15.4, 0.))
+        for i, o in enumerate(obs):
+            if points[i] not in reachable:
+                assert o.status == 'out_of_range'
+        if reply.scan_xyz: assert inside(reply.scan_xyz)
+        if sent:
+            reviewed = True
+            assert all(o.status == 'failed' for o in obs if o.target.xyz in sent)
+        if reply.func_code in (9, 10): break
+        while cycle.state.value == 'WAIT_FINE':
+            point = cycle.current_target().target.xyz
+            assert point in expected and point not in sent
+            reply = cycle.on_fine(reply.scan_xyz, FineResult('ok', target_xyz=point, identity=point))
+            assert reply.func_code == 3
+            assert inside(reply.tool1_xyz) and inside(reply.tool2_xyz)
+            sent.append(point)
+            cycle.mark_reply(1, 1, {}); cycle.mark_done(1, 1)
+            cycle.on_picked(); reply = cycle.on_next()
+            assert inside(reply.scan_xyz)
+    assert sent and reviewed and len(sent) == len(set(sent))
+
+
+def test_production_work_request_filters_tool_and_camera_limits(tmp_path, monkeypatch):
+    import pytest
+    from dataclasses import replace
+    from types import SimpleNamespace
+    import numpy as np
+    from nest_clear.config import load_config
+    from nest_clear.flow.context import FlowContext, RequestTracker
+    from nest_clear.flow.picking import WorkRequest
+    from nest_clear.vision.geometry import Calibration
+    from test_hair_integration import Board, Events
+    cfg = load_config('config/nest_clear.yaml')
+    cfg = replace(cfg, record_directory=str(tmp_path), travel=((80., 180.), (-10., 150.), (-15., 0.)),
+                  tools=((29.330, 24.322, 0.), (30.092, -25.283, 0.)), pick_depth_z=-5.,
+                  tool_calibration=replace(cfg.tool_calibration, directory=str(tmp_path)))
+    (tmp_path / 'pick_compensation.yaml').write_text(yaml.safe_dump(
+        {'tool2': {'type': 'constant', 'constant_xy': [0., -1.]}}))
+    monkeypatch.setattr('nest_clear.flow.picking.fine_camera_xy',
+                        lambda target, pose, cal: (target[0]+.86, target[1]+.92, pose[2]))
+    ctx = FlowContext(None, cfg, [(100., 50., -3.)], RequestTracker(0), Events(),
+                      Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 10))
+    bb = Board(work_cycle=None, request_func=1, task_id=1)
+    req = WorkRequest(ctx); req._blackboard = bb; req.perform()
+    cycle = bb.read('work_cycle')
+    def obs(p):
+        return SimpleNamespace(target=SimpleNamespace(xyz=p), identity=p, status='eligible', reason=None, area=1.)
+    camera_bad, tool_bad, good = obs((49.1, 45.8, 0.)), obs((109.1, 15.8, 0.)), obs((109.1, 45.8, 0.))
+    reply = cycle.on_coarse((100., 50., -3.), [camera_bad, tool_bad, good])
+    assert [o.status for o in (camera_bad, tool_bad, good)] == ['out_of_range', 'out_of_range', 'eligible']
+    assert reply.scan_xyz == pytest.approx((109.96, 46.72, -3.))

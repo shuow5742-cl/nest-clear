@@ -31,6 +31,8 @@ def test_render_color(calibration):
     assert tuple(img[0,0]) == (0,255,0)
     o.status = 'failed'
     assert tuple(render(np.zeros((30,30,3), np.uint8), [o])[0,0]) == (0,0,255)
+    o.status = 'out_of_range'
+    assert tuple(render(np.zeros((30,30,3), np.uint8), [o])[0,0]) == (255,0,0)
 
 class Board:
     def __init__(self, **data): self.data = data

@@ -148,6 +148,37 @@ class WorkRequest(Instant):
                                                    self.ctx.config.travel, task_id=bb.read('task_id'), compensation=compensation)
                 self.ctx.events.emit('pick_compensation_used', task_id=bb.read('task_id'), target_xy=target[:2], compensation=used)
                 return result
+            def reachable(target: tuple[float, float, float]) -> bool:
+                # 与实际下发使用同一标定和补偿，但不写事件或 film_pending。
+                from pathlib import Path
+                from nest_clear.pickaccuracy.store import evaluate, read
+                from nest_clear.tooloffset.store import load_pick_z
+                cfg = self.ctx.config
+                cal = getattr(cycle, "film_calibration", None) if cycle.film_mode else calibration
+                if cal is None:
+                    return True  # 交给原有配置错误守卫处理
+                camera = fine_camera_xy(target, cycle._coarse_pose, cal)
+                def inside(xyz):
+                    return all(math.isfinite(value) and low + margin <= value <= high - margin
+                               for value, (low, high), margin in zip(xyz, cfg.travel, (0.2, 0.2, 0.0)))
+                if not inside(camera):
+                    return False
+                data = read(Path(cfg.tool_calibration.directory) / 'pick_compensation.yaml')
+                for tool, offset in enumerate(cfg.tools, 1):
+                    delta = evaluate(data.get(f'tool{tool}'), target[:2])
+                    z = cfg.pick_depth_z + offset[2]
+                    if cycle.film_mode:
+                        try:
+                            source = load_pick_z(Path(cfg.tool_calibration.directory) / 'tool_offset.yaml', tool)
+                        except (OSError, ValueError):
+                            source = None
+                        if source is None:
+                            return True  # 保留缺少标定时原有的明确异常应答
+                        z = source[0]
+                    if not inside((target[0] + offset[0] + delta[0],
+                                   target[1] + offset[1] + delta[1], z)):
+                        return False
+                return True
             def record(event: str, **fields: Any) -> None:
                 fields.setdefault("task_id", bb.read("task_id"))
                 fields.setdefault("request_func", bb.read("request_func"))
@@ -155,9 +186,9 @@ class WorkRequest(Instant):
                 self.ctx.events.emit(event, **fields)
             from nest_clear.film_mode import start_tray
             film_mode = start_tray(self.ctx.config.record_directory)
-            self.ctx.events.emit("film_mode_tray", enabled=film_mode, tool_check_disabled=film_mode, tray=getattr(self.ctx.events, "tray_id", None))
+            self.ctx.events.emit("film_mode_tray", enabled=film_mode, tray=getattr(self.ctx.events, "tray_id", None))
             cycle = WorkCycle(self.ctx.path, fine_coord, pick_coords, self.ctx.config.vision,
-                              record=record, tray=getattr(self.ctx.events, "tray_id", None) or "0000", film_mode=film_mode)
+                              record=record, tray=getattr(self.ctx.events, "tray_id", None) or "0000", film_mode=film_mode, reachable=reachable)
             if film_mode:
                 from nest_clear.tooloffset.session import film_calibration
                 cycle.film_calibration = film_calibration(calibration, self.ctx.config.tool_offset["card_thickness_mm"], self.ctx.config.camera_calibration["board_thickness_mm"])
@@ -269,9 +300,13 @@ class FinishCapture(Instant):
         else:
             from dataclasses import replace
             result = detection["fine_result"]
-            if result.status == "ok" and result.target_xyz is not None and not cycle.in_pick_region(result.target_xyz):
+            if result.status == "ok" and result.target_xyz is not None and not cycle.can_reach(result.target_xyz):
                 result = replace(result, status="fine_out_of_range")
                 detection["fine_result"] = result
+            if result.status == "fine_out_of_range":
+                for observation in detection.get("observations", []):
+                    if observation.candidate is result.candidate and result.candidate is not None:
+                        observation.status = "out_of_range"
             reply = cycle.on_fine(bb.read("actual"), result)
         record_detection(self.ctx, bb, cycle, detection, stage, view, coarse_target)
         # 状态转移和应答不受可选画面处理的异常影响。
@@ -304,7 +339,11 @@ class FinishCapture(Instant):
                         overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
                     selected = detection.get("fine_result")
                     for obs in detection.get("observations", []):
-                        color = (0, 0, 255) if obs.status == "failed" else (0, 165, 255) if obs.status == "rejected" else (0, 255, 0)
+                        color = ((0, 0, 255) if obs.status == "failed" else
+                                 (255, 0, 0) if obs.status == "out_of_range" else
+                                 (128, 128, 128) if obs.status == "other_view" else
+                                 (255, 255, 0) if obs.status == "attempted" else
+                                 (0, 165, 255) if obs.status in ("rejected", "fine_failed") else (0, 255, 0))
                         x1, y1, x2, y2 = map(round, obs.candidate.bbox)
                         highlight = stage == "fine" and selected is not None and selected.candidate is obs.candidate and reply.func_code == 3
                         cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 255, 255) if highlight else color, 4 if highlight else 2)
