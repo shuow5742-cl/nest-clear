@@ -361,6 +361,9 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             _fail("tool_offset." + key, "须为不小于 2 的整数")
     if offset["max_points"] < offset["min_points"]:
         _fail("tool_offset.max_points", "不能小于 min_points")
+    if not isinstance(offset["prior_offset_mm"], (list, tuple)) or len(offset["prior_offset_mm"]) != 2:
+        _fail("tool_offset.prior_offset_mm", "须为两个有限数字")
+    offset["prior_offset_mm"] = [_number(v, "tool_offset.prior_offset_mm") for v in offset["prior_offset_mm"]]
     for key in ("point_order", "edge_targets"):
         if not isinstance(offset[key], list) or not offset[key] or any(not isinstance(v, str) or len(v) != 3 or v[0] != "T" or not v[1:].isdigit() or int(v[1:]) > 31 for v in offset[key]):
             _fail("tool_offset." + key, "须为 T00–T31 列表")

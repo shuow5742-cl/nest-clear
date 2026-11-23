@@ -78,7 +78,7 @@ def test_normal_real_tree(tmp_path):
     cfg = replace(cfg, tool_calibration=replace(cfg.tool_calibration, directory=str(directory)),
                   travel=((80,180),(-10,150),(-15,0)),
                   camera_calibration={**cfg.camera_calibration, 'start_xyz':[130.,70.,-5.], 'board_thickness_mm':0.},
-                  tool_offset={**cfg.tool_offset, 'settle_window_s':.005})
+                  tool_offset={**cfg.tool_offset, 'settle_window_s':.005, 'min_points':5})
     cal = Calibration(np.array([[2000.,0,2000],[0,2000.,1500],[0,0,1]]), np.zeros(5), np.diag([1.,-1.,-1.]), np.zeros(3), -105.)
     events = EventRecorder(tmp_path, run=True); board = WorldBoard(); plc = PLC(); clock = BTClock(board)
     for w in (plc, Camera(plc), ToolOffsetWorker()): clock.attach_worker(w)
@@ -144,7 +144,7 @@ def rig(tmp_path):
     cfg = replace(cfg, tool_calibration=replace(cfg.tool_calibration, directory=str(directory)),
                   travel=((80,180),(-10,150),(-15,0)),
                   camera_calibration={**cfg.camera_calibration, 'start_xyz':[130.,70.,-5.], 'board_thickness_mm':0.},
-                  tool_offset={**cfg.tool_offset, 'settle_window_s':.001})
+                  tool_offset={**cfg.tool_offset, 'settle_window_s':.001, 'min_points':5})
     cal = Calibration(np.array([[2000.,0,2000],[0,2000.,1500],[0,0,1]]), np.zeros(5), np.diag([1.,-1.,-1.]), np.zeros(3), -105.)
     events = EventRecorder(tmp_path, run=True); board = WorldBoard(); plc = PLC(); clock = BTClock(board)
     camera = Camera(plc)

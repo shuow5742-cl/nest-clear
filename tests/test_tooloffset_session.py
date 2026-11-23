@@ -54,7 +54,7 @@ def test_outlier_remeasured_and_converges():
     while step != 'confirm':
         step = measure(sess,world)
         assert step != 'failed', sess.failure
-    assert [s['target'] for s in sess.samples].count('T05') == 2
+    assert [s['target'] for s in sess.samples].count(sess.samples[1]['target']) == 2
     assert sess.result()['n'] >= 5
     assert sess.result()['offset_xy_mm'] == pytest.approx([2.2,-1.3], abs=.01)
 
@@ -115,3 +115,62 @@ def test_card_plane_height_at_image_edges(board, card, camera_z, normal_sign):
         actual = pixel_to_module(*uv, (0,0,camera_z), sess.cal)
         expected = pixel_to_module(*uv, (0,0,camera_z), truth)
         assert np.linalg.norm(np.asarray(actual)-expected) < .005
+
+
+def test_selection_margin_spread_and_three_points():
+    sess, world, step = ready(cfg={'min_points':3, 'prior_offset_mm':[29.3,24.2]})
+    first = sess.current
+    def margin(i):
+        x, y = sess.predicted[i] + [29.3,24.2]
+        return min(x-80, 180-x, y+10, 150-y)
+    accessible = [i for i in sess.predicted if i not in {int(s['target'][1:]) for s in sess.skipped}]
+    assert margin(first) == pytest.approx(max(map(margin, accessible)))
+    step = measure(sess, world)
+    second = sess.current
+    remaining = [i for i in sess.predicted if i != first and i not in {int(s['target'][1:]) for s in sess.skipped}]
+    assert np.linalg.norm(sess.predicted[second]-sess.predicted[first]) == pytest.approx(max(np.linalg.norm(sess.predicted[i]-sess.predicted[first]) for i in remaining))
+    assert measure(sess, world) == 'continue'
+    assert measure(sess, world) == 'confirm'
+    assert sess.result()['n'] == 3
+
+
+def test_clamped_camera_and_actual_pixel():
+    sess, world, _ = ready(cfg={'min_points':5})
+    index = 0
+    world[index] = np.array([75., 70.])
+    sess.predicted = {index: world[index]}
+    sess.samples = []; sess.skipped = []; sess.measured = {}; sess.pending_retests = set()
+    assert sess._move_next() == 'continue'
+    assert sess.camera_clamped and sess.target_pose[0] == 80
+    pose = sess.target_pose
+    assert sess.image([target(index,world[index],pose)], pose, (4000,3000)) == 'tool'
+    assert sess.measured[index] == pytest.approx(world[index])
+    sess.add_sample((world[index][0]+2.2,world[index][1]-1.3,-5))
+    assert sess.samples[0]['camera_clamped']
+    assert sess.samples[0]['target_uv'] == pytest.approx(world_to_uv(world[index],pose))
+
+
+def test_insufficient_targets_message():
+    sess, world, _ = ready(cfg={'min_points':3})
+    sess.predicted = {0: np.array([-1000., -1000.])}
+    sess.samples = []; sess.skipped = []
+    assert sess._move_next() == 'failed'
+    assert '可用目标不足：已测有效 0 个，需 3 个' in sess.failure
+    assert sess.skipped[0]['reason'] == '相机不可达'
+
+
+def test_field_offset_finds_five():
+    sess = Session(calibration(), (130.,70.,-5.), ((80,180),(-10,150),(-15,0)), {'min_points':5, 'prior_offset_mm':[29.3,24.2]})
+    world = {i: np.array([100.,0.]) + p for i,p in nominal_targets().items()}
+    old = [2,5,26,29,12,19,3,28,10,21]
+    assert sum(sess._within((world[i][0]+29.3, world[i][1]+24.2,-5)) and sess._within(sess._pose_for(world[i], (2000,1500))) for i in old) <= 3
+    step = sess.image([target(i,world[i],sess.start) for i in (2,5)],sess.start,(4000,3000))
+    while step == 'continue':
+        i, pose = sess.current, sess.target_pose
+        assert sess.image([target(i,world[i],pose)],pose,(4000,3000)) == 'tool'
+        p = sess.measured[i]
+        actual = (p[0]+29.3,p[1]+24.2,-5)
+        assert sess._within(actual)
+        step = sess.add_sample(actual)
+    assert step == 'confirm', sess.failure
+    assert sess.result()['n'] >= 5

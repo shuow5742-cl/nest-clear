@@ -175,7 +175,7 @@ camera_calibration:
 tool_offset:
   center_tol_mm: 1.0
   outlier_mm: 0.3  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.1
-  min_points: 5
+  min_points: 3  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 5
   max_points: 12
   se_tol_mm: 0.08  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.02
   edge_warn_mm: 0.15  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
@@ -184,7 +184,8 @@ tool_offset:
   settle_window_s: 0.5
   settle_samples: 6
   jitter_tol_mm: 0.06  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.02
-  point_order: [T02, T05, T26, T29, T12, T19, T03, T28, T10, T21]
+  prior_offset_mm: [29.3, 24.2]  # 11-23 工具1现场粗测值，仅用于排序选首点，不用于排除
+  point_order: [T02, T05, T26, T29, T12, T19, T03, T28, T10, T21]  # T60 起自动从 32 点选取，此项不再使用
   edge_targets: [T12]
 
 pick_accuracy:

@@ -8,12 +8,13 @@ import subprocess
 import time
 
 import numpy as np
+import yaml
 from autoweaver.motion_policy.nodes.node import Status, TreeNode
 
 from nest_clear.guard import GuardError, diagnostic
 from nest_clear.tooloffset.commands import CommandReader
 from nest_clear.tooloffset.session import Session, stats
-from nest_clear.tooloffset.store import save_confirmed
+from nest_clear.tooloffset.store import load_offset, save_confirmed
 from .calibration import change_mode
 from .leaves import CallWorker
 from .modes import Mode
@@ -235,7 +236,11 @@ class ToolOffset(TreeNode):
                 if type(tool) is not int or tool not in (1,2) or mode not in ('center','center_edge'):
                     self.publish('select', '工具或模式无效')
                     return Status.RUNNING
-                s.update(tool=tool, mode=mode, engine=Session(ctx.calibration, s['start'], s['travel'], ctx.config.tool_offset, mode, tool, board_thickness_mm=ctx.config.camera_calibration['board_thickness_mm']), phase='wait95')
+                try:
+                    prior = load_offset(s['path'], tool)
+                except (ValueError, OSError, yaml.YAMLError):
+                    prior = None
+                s.update(tool=tool, mode=mode, engine=Session(ctx.calibration, s['start'], s['travel'], ctx.config.tool_offset, mode, tool, board_thickness_mm=ctx.config.camera_calibration['board_thickness_mm'], prior_offset=prior), phase='wait95')
                 self.publish('moving', '相机移动至起始位置')
                 return self.set_reply(90, {'camcal_xyz':s['start']})
             if self.stage.startswith('settle_'):
