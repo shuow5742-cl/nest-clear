@@ -83,6 +83,7 @@ class Supervisor:
         self.preview_mode = None
         self.preview_xyz = None
         self._preview_command_stamp = None
+        self._preview_command_error = None
         self._preview_xyz_next = 0.0
         try:
             self._preview_command_stamp = ui_command_file(config.record_directory).stat().st_mtime_ns
@@ -236,12 +237,18 @@ class Supervisor:
             self.preview_process = None
         path = ui_command_file(self.config.record_directory)
         try:
-            stamp = path.stat().st_mtime_ns
-            if stamp == self._preview_command_stamp:
+            try:
+                stamp = path.stat().st_mtime_ns
+                if stamp == self._preview_command_stamp:
+                    self._preview_command_error = None
+                    return
+                command = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                self._preview_command_error = None
                 return
-            command = json.loads(path.read_text(encoding="utf-8"))
             seq, wanted = command['seq'], command['preview']
             mode = command.get('mode', 'preview')
+            self._preview_command_error = None
             if mode not in ('preview', 'focus'):
                 return
             if type(seq) is not int or type(wanted) is not bool:
@@ -263,7 +270,10 @@ class Supervisor:
                 self.preview_mode = mode
                 self.events.emit('preview_start', pid=self.preview_process.pid)
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            logger.warning("读取预览命令失败：%s", exc)
+            error = (type(exc), str(exc))
+            if error != self._preview_command_error:
+                logger.warning("读取预览命令失败：%s", exc)
+                self._preview_command_error = error
 
     def _start(self) -> None:
         """清除旧活性点并启动配置的命令，失败后等待下一条边沿。"""
