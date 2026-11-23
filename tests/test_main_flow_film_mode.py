@@ -82,7 +82,7 @@ def test_film_worker_applies_production_view_and_fine_filters(monkeypatch):
     assert result['fine_result'].status == 'fine_empty'
 
 
-def test_film_review_marks_failed_and_triggers_tool_change():
+def test_film_review_marks_failed_and_moves_to_next_view():
     from types import SimpleNamespace
     from nest_clear.flow.work_cycle import WorkCycle
     from nest_clear.vision.fine import FineResult
@@ -95,8 +95,8 @@ def test_film_review_marks_failed_and_triggers_tool_change():
     c.mark_reply(1,1,{}); c.mark_done(1,1); c.on_picked()
     assert c.on_next().event['reason'] == 'cap'
     review = obs(); reply = c.on_coarse((0,0,0), [review])
-    assert review.status == 'failed' and reply.func_code == 10
-    assert reply.event['tool_change'] and 'tool_check_disabled' not in reply.event
+    assert review.status == 'failed' and reply.func_code == 1
+    assert not reply.event['tool_change'] and reply.event['tool_check_disabled']
 
 
 def test_film_failed_target_stays_red_in_neighbor_view():
@@ -120,7 +120,7 @@ def test_film_failed_target_stays_red_in_neighbor_view():
     assert len(cycle.attempts_ledger) == 1
 
 
-def test_film_and_production_share_queue_cap_and_tool_check():
+def test_film_and_production_share_queue_and_cap():
     from types import SimpleNamespace
     from nest_clear.flow.work_cycle import WorkCycle
     from nest_clear.vision.fine import FineResult
@@ -158,10 +158,13 @@ def test_film_and_production_share_queue_cap_and_tool_check():
                 [item.status for item in review])
 
     for args in ((.5, 30, 'ok'), (2., 1, 'ok'), (.5, 30, 'fine_empty')):
-        assert run(True, *args) == run(False, *args)
-    assert run(True, .5, 30, 'ok')[2:7] == ('cap', None, 10, 'cap', True)
-    assert run(True, 2., 1, 'ok')[2:7] == ('next_target', 'list_exhausted', 10, 'coarse_limit', True)
-    assert run(True, .5, 30, 'fine_empty')[4:7] == (10, 'cap', True)
+        film, production = run(True, *args), run(False, *args)
+        assert film[:4] == production[:4] and film[5] == production[5] and film[7] == production[7]
+        assert (film[4], film[6]) == (9, False)
+        assert (production[4], production[6]) == (10, True)
+    assert run(True, .5, 30, 'ok')[2:7] == ('cap', None, 9, 'cap', False)
+    assert run(True, 2., 1, 'ok')[2:7] == ('next_target', 'list_exhausted', 9, 'coarse_limit', False)
+    assert run(True, .5, 30, 'fine_empty')[4:7] == (9, 'cap', False)
 
 
 def test_film_fine_out_of_range_overlay_is_blue():
@@ -362,7 +365,7 @@ def test_synthetic_film_through_cycle_and_fake_plc():
     cycle.mark_reply(1,1,{'pick1_xyz':plc[-1].tool1_xyz,'pick2_xyz':plc[-1].tool2_xyz})
     cycle.mark_done(2,2); plc.append(cycle.on_picked()); plc.append(cycle.on_next())
     review=capture('coarse')['observations']; plc.append(cycle.on_coarse((0,0,0),review))
-    assert [r.func_code for r in plc] == [1,1,3,60,1,10]
+    assert [r.func_code for r in plc] == [1,1,3,60,1,1]
     assert next(o for o in review if o.film_label == 'T02').status == 'failed'
     assert next(o for o in review if o.film_label == 'T03').status == 'rejected'
 
@@ -437,7 +440,8 @@ def test_site_geometry_full_tray_filters_unreachable(tmp_path, monkeypatch):
         if sent:
             reviewed = True
             assert all(o.status == 'failed' for o in obs if o.target.xyz in sent)
-        if reply.func_code in (9, 10): break
+        assert reply.func_code != 10
+        if reply.func_code == 9: break
         while cycle.state.value == 'WAIT_FINE':
             point = cycle.current_target().target.xyz
             assert point in expected and point not in sent
@@ -448,7 +452,7 @@ def test_site_geometry_full_tray_filters_unreachable(tmp_path, monkeypatch):
             cycle.mark_reply(1, 1, {}); cycle.mark_done(1, 1)
             cycle.on_picked(); reply = cycle.on_next()
             assert inside(reply.scan_xyz)
-    assert sent and reviewed and len(sent) == len(set(sent))
+    assert reply.func_code == 9 and reviewed and set(sent) == expected and len(sent) == len(set(sent))
 
 
 def test_production_work_request_filters_tool_and_camera_limits(tmp_path, monkeypatch):

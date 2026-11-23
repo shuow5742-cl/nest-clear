@@ -186,7 +186,7 @@ class WorkRequest(Instant):
                 self.ctx.events.emit(event, **fields)
             from nest_clear.film_mode import start_tray
             film_mode = start_tray(self.ctx.config.record_directory)
-            self.ctx.events.emit("film_mode_tray", enabled=film_mode, tray=getattr(self.ctx.events, "tray_id", None))
+            self.ctx.events.emit("film_mode_tray", enabled=film_mode, tool_check_disabled=film_mode, tray=getattr(self.ctx.events, "tray_id", None))
             cycle = WorkCycle(self.ctx.path, fine_coord, pick_coords, self.ctx.config.vision,
                               record=record, tray=getattr(self.ctx.events, "tray_id", None) or "0000", film_mode=film_mode, reachable=reachable)
             if film_mode:

@@ -91,6 +91,19 @@ def test_tool_check(min_attempts, red, expected):
     assert r.event["tool_check_total"] == int(red)
 
 
+@pytest.mark.parametrize("film_mode, expected", [(False, 10), (True, 9)])
+def test_tool_check_disabled_only_in_film_mode(film_mode, expected):
+    c = cycle(tool_check_min_attempts=1, cap_ratio=1)
+    c.film_mode = film_mode
+    c.start(); c.on_coarse((0, 0, 5), [obs(1)])
+    fine(c, 1); c.on_picked(); c.on_next()
+    reply = c.on_coarse((0, 0, 5), [obs(1)])
+    assert reply.func_code == expected
+    assert reply.event["tool_check_disabled"] is film_mode
+    assert reply.event["tool_change"] is (not film_mode)
+    assert reply.event["tool_check_total"] == 1
+
+
 @pytest.mark.parametrize("status, reason, expected_status, red, code", [
     ("other_view", None, "other_view", 0, 9),
     ("rejected", "small", "attempted", 1, 10),

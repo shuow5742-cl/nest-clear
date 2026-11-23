@@ -302,9 +302,9 @@ class WorkCycle:
                  "red_xyz": [o.target.xyz for o in observations if o.status in ("failed", "attempted")],
                  "match_radius_mm": self._params.skip_radius_mm}
         if reason is not None:
-            change = (self._attempts >= self._params.tool_check_min_attempts and
+            change = (not self.film_mode and self._attempts >= self._params.tool_check_min_attempts and
                       self._red_count + count > self._params.tool_check_ratio * self._n0)
-            event.update(reason=reason, tool_change=change, tool_check_total=self._red_count + count,
+            event.update(reason=reason, tool_change=change, tool_check_disabled=bool(self.film_mode), tool_check_total=self._red_count + count,
                          tool_check_threshold=self._params.tool_check_ratio * self._n0,
                          tool_check_min_attempts=self._params.tool_check_min_attempts,
                          warning=exceeded)
