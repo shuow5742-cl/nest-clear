@@ -84,7 +84,7 @@ def pickacc_demo(state, stamp):
                         'tool2':{'type':'table','time':stamp,'verification':[{}],'stale':True}}, 'candidate':candidate}
 
 
-def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None, focus_state=None, camcal_state=None, wb_state=None):
+def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None, focus_state=None, camcal_state=None, wb_state=None, temporary_exposure=False):
     root = Path(root)
     now = datetime.now().astimezone(); stamp = now.isoformat()
     start = (now - timedelta(hours=2, minutes=18)).isoformat()
@@ -223,6 +223,8 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
         write_demo._focus_history = [(t, v) for t, v in write_demo._focus_history if now_s-t <= 30]
         data.update(mode='focus', on=True, seq=1, fps=6, exposure_us=10000, gain_db=0,
                     analysis_time=now_s, demo_history=write_demo._focus_history)
+        if temporary_exposure:
+            data.update(exposure_us=20000, exposure_source='临时', temporary_exposure={'state': 'done', 'message': '曝光回读 20000 us'})
         if wb_state:
             metrics = {'r_g': 1.002, 'b_g': .998, 'warnings': []}
             data['white_balance'] = {'state': wb_state, 'balance_ratio': [1.2, 1.0, 1.4], 'metrics': metrics, 'reason': '画面过亮或饱和（疑似白纸），请用 18% 灰卡做白平衡'}
@@ -265,6 +267,7 @@ def generate(root):
 def main():
     from .__main__ import add_view_arguments, validate_view_arguments
     parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm')); parser.add_argument('--tooltip-state', choices=('idle','probe','confirm_move','in_range','done','fail')); add_view_arguments(parser)
+    parser.add_argument('--temporary-exposure', action='store_true')
     parser.add_argument('--wb-state', choices=('running','success','fail'), default=None)
     parser.add_argument('--focus-state', choices=('off','live','exposure'), default=None)
     parser.add_argument('--camcal-state', choices=('running', 'failed', 'preview'), default=None)
@@ -279,11 +282,11 @@ def main():
     elif args.focus_state in ('live', 'exposure'):
         args.preview_state = 'on'
     # 先同步生成第一帧，让短延迟截图也有完整内容。
-    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state, wb_state=args.wb_state)
+    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state, wb_state=args.wb_state, temporary_exposure=args.temporary_exposure)
     def update():
         step = 1
         while True:
-            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state, wb_state=args.wb_state); step += 1
+            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state, wb_state=args.wb_state, temporary_exposure=args.temporary_exposure); step += 1
     threading.Thread(target=update, daemon=True).start()
     from .app import App
     app = App(args.root, page=args.page or '主页', screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms, ignore_before_ns=0)

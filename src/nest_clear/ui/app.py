@@ -494,9 +494,17 @@ class App:
         self.focus_summary.grid(row=0, column=1, sticky='ew')
         self.focus_bar = tk.Canvas(self.focus_panel, height=16, bg='#e4e7ec', highlightthickness=0)
         self.focus_bar.grid(row=1, column=0, sticky='ew')
-        self.focus_details = self.label(self.focus_panel, '', font=self.theme.table)
+        details_frame = tk.Frame(self.focus_panel, bg=WHITE); details_frame.grid(row=2, column=0, sticky='ew')
+        self.focus_details = self.label(details_frame, '', font=self.theme.table)
         self.focus_details.config(justify='left', anchor='nw')
-        self.focus_details.grid(row=2, column=0, sticky='ew')
+        self.focus_details.grid(row=0, column=0, sticky='ew')
+        manual = tk.Frame(details_frame, bg=WHITE); manual.grid(row=1, column=0, sticky='ew')
+        self.label(manual, '曝光 us').grid(row=0, column=0)
+        self.temporary_entry = ttk.Entry(manual, width=8); self.temporary_entry.grid(row=0, column=1)
+        self.temporary_set = ttk.Button(manual, text='设置曝光', command=lambda: self.change_temporary_exposure(False)); self.temporary_set.grid(row=0, column=2)
+        self.temporary_restore = ttk.Button(manual, text='恢复配置曝光', command=lambda: self.change_temporary_exposure(True)); self.temporary_restore.grid(row=0, column=3)
+        self.temporary_message = self.label(manual, '', font=self.theme.table); self.temporary_message.grid(row=1, column=0, columnspan=4, sticky='w')
+        self.temporary_pending = False; self.sweep_pending = False
         self.focus_alert = self.label(self.focus_panel, '', font=self.theme.table)
         self.focus_alert.config(justify='left', anchor='nw', fg='#b54708', wraplength=430)
         self.focus_alert.grid(row=3, column=0, sticky='ew')
@@ -1338,11 +1346,28 @@ class App:
         os.replace(tmp, path)
         return json.loads(path.read_text(encoding='utf-8'))['seq']
 
+    def change_temporary_exposure(self, restore):
+        self.temporary_pending = True
+        self.temporary_set.config(state='disabled'); self.temporary_restore.config(state='disabled')
+        self.temporary_message.config(text='设置中…')
+        self.temporary_request = self.focus_action('restore_exposure' if restore else 'set_exposure', exposure_us=self.temporary_entry.get())
+
+    def update_temporary_exposure(self, p):
+        result = p.get('temporary_exposure') or {}
+        if result.get('request_seq') == getattr(self, 'temporary_request', None) and result.get('state'):
+            self.temporary_pending = False
+        busy = (p.get('white_balance') or {}).get('state') == 'running' or (p.get('exposure_sweep') or {}).get('state') == 'running' or self.wb_pending or self.sweep_pending or self.temporary_pending
+        self.temporary_set.config(state='disabled' if busy else 'normal')
+        self.temporary_restore.config(state='disabled' if busy else 'normal')
+        if result.get('state') and not self.temporary_pending:
+            self.temporary_message.config(text=result.get('message', ''), fg=COLORS['red'] if result['state'] == 'error' else INK)
+
     def start_white_balance(self):
         from tkinter import messagebox
         if messagebox.askokcancel('白平衡', '请在视野中央放置 18% 灰卡并保持光源与标定/挑毛时一致'):
             self.wb_pending = True
             self.wb_button.config(state='disabled', text='白平衡中…')
+            self.temporary_set.config(state='disabled'); self.temporary_restore.config(state='disabled')
             self.wb_message.config(text='白平衡中…', fg=INK)
             self.wb_request = self.focus_action('white_balance')
 
@@ -1370,6 +1395,8 @@ class App:
         else:
             mode = 'brightness' if self.exposure_mode.get() == '亮度目标' else 'calibration'
             self.exposure_cache = None
+            self.sweep_pending = True
+            self.temporary_set.config(state='disabled'); self.temporary_restore.config(state='disabled')
             self.focus_action('exposure_sweep', mode=mode)
             self.exposure_message.config(text='正在启动曝光自测…')
             self.show_exposure_results()
@@ -1397,6 +1424,7 @@ class App:
     def update_exposure(self, p):
         sweep = p.get('exposure_sweep') or {}
         running = sweep.get('state') == 'running'
+        if running: self.sweep_pending = False
         self.exposure_button.config(text='取消' if running else '曝光自测', state='disabled' if (p.get('white_balance') or {}).get('state') == 'running' or self.wb_pending else 'normal')
         self.exposure_mode.config(state='disabled' if running else 'readonly')
         if (running or (p.get('demo_exposure') and self.exposure_cache is None)) and not self.exposure_visible: self.show_exposure_results()
@@ -1456,6 +1484,7 @@ class App:
         self.focus_bar.create_rectangle(0, 0, w * min(pct, 100) / 100, 16, fill=color, outline='')
         self.update_exposure(p)
         self.update_white_balance(p)
+        self.update_temporary_exposure(p)
         self.focus_details.config(text=(f"曝光 {p.get('exposure_us')} us（{p.get('exposure_source', '配置')}）  增益 {p.get('gain_db')} dB  白平衡 {p.get('white_balance_source', '配置')}\n"
             f"均值 {p['mean']:.1f}  P1/P99 {p['p1']:.0f}/{p['p99']:.0f}  饱和 {p['saturated_pct']:.2f}%  过暗 {p['dark_pct']:.2f}%"))
         self.focus_alert.config(text='  '.join(x for x in (p.get('exposure_hint'), p.get('tilt')) if x),

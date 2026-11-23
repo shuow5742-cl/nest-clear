@@ -44,6 +44,7 @@ def run_preview(config, mode="preview"):
         last_action = None
     reset_pending = False
     sweep_result = None
+    exposure_source = config.exposure_source
     started = time.monotonic()
     frames = 0
     try:
@@ -84,9 +85,20 @@ def run_preview(config, mode="preview"):
                             except Exception as exc:
                                 values['exposure_sweep'] = {'state': 'error', 'reason': str(exc), 'rows': []}
                             try:
-                                last_action = json.loads(action_path.read_text(encoding='utf-8')).get('seq')
+                                pending = json.loads(action_path.read_text(encoding='utf-8'))
+                                if pending.get('seq') != request_seq and pending.get('action') in ('set_exposure', 'restore_exposure'):
+                                    from nest_clear.preview.temporary_exposure import change_exposure
+                                    values['temporary_exposure'] = dict(change_exposure(worker, pending, config.exposure_us, settings['exposure_sweep'], root, busy=True), request_seq=pending['seq'])
+                                last_action = pending.get('seq')
                             except (OSError, ValueError):
                                 pass
+                        elif action.get('action') in ('set_exposure', 'restore_exposure'):
+                            from nest_clear.preview.temporary_exposure import change_exposure
+                            result = change_exposure(worker, action, config.exposure_us, settings['exposure_sweep'], root)
+                            values['temporary_exposure'] = dict(result, request_seq=last_action)
+                            if result['state'] == 'done':
+                                exposure_source = '临时' if action['action'] == 'set_exposure' else config.exposure_source
+                            values.update(exposure_us=worker.readback.get('exposure_us'), exposure_source=exposure_source)
                         elif action.get('action') == 'white_balance':
                             from nest_clear.preview.white_balance import run_white_balance
                             def publish_wb(result):
@@ -95,6 +107,14 @@ def run_preview(config, mode="preview"):
                                 atomic_write(status_path, json.dumps(snapshot, ensure_ascii=False).encode())
                             run_white_balance(worker, settings['white_balance'], config.camera_calibration,
                                               config.white_balance_override_path, root, publish_wb)
+                            try:
+                                pending = json.loads(action_path.read_text(encoding='utf-8'))
+                                if pending.get('seq') != last_action and pending.get('action') in ('set_exposure', 'restore_exposure'):
+                                    from nest_clear.preview.temporary_exposure import change_exposure
+                                    values['temporary_exposure'] = dict(change_exposure(worker, pending, config.exposure_us, settings['exposure_sweep'], root, busy=True), request_seq=pending['seq'])
+                                    last_action = pending['seq']
+                            except (OSError, ValueError):
+                                pass
                         elif action.get('action') == 'apply_exposure':
                             try:
                                 from nest_clear.preview.exposure import save_exposure
@@ -115,7 +135,7 @@ def run_preview(config, mode="preview"):
                             if do_reset:
                                 focus_session.reset()
                             result = focus_session.update(frame)
-                            result.update(exposure_us=frame_exposure, exposure_source=config.exposure_source, white_balance_source=(('自测 ' + values['white_balance']['time']) if values.get('white_balance', {}).get('state') == 'success' else config.white_balance_source), gain_db=config.gain_db, analysis_time=time.time())
+                            result.update(white_balance_source=(('自测 ' + values['white_balance']['time']) if values.get('white_balance', {}).get('state') == 'success' else config.white_balance_source), gain_db=config.gain_db, analysis_time=time.time())
                             values.update(result)
                         except Exception:
                             import logging
@@ -145,6 +165,8 @@ def run_preview(config, mode="preview"):
             h, w = view.shape[:2]
             cv2.line(view, (w//2, 0), (w//2, h-1), (255,255,0), 1)
             cv2.line(view, (0, h//2), (w-1, h//2), (255,255,0), 1)
+            if mode == 'focus':
+                values.update(exposure_us=worker.readback.get('exposure_us'), exposure_source=exposure_source)
             snapshot = dict(values, actual_xyz=xyz)
             lines = [] if mode == 'focus' else [f'XYZ: {xyz if xyz is not None else "--"}',
                      f'Sharpness: {snapshot.get("sharpness")}  Corners: {snapshot.get("corners")}',
