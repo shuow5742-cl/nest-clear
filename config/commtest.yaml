@@ -163,6 +163,9 @@ tool_calibration:
   tip_tolerance_mm: 0.03
   consistency_tolerance_mm: 0.01
   max_iterations: 10
+  probe_step_mm: 0.2
+  max_step_mm: 0.5
+  max_total_mm: 2.0
   max_residual_mm: 0.03
   max_condition: 100.0
   z_disagreement_mm: 0.03

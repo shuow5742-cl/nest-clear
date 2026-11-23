@@ -105,6 +105,9 @@ class ToolCalibrationConfig:
     quality_hard_fail: bool = True
     unreliable_action: str = "fail"
     click_timeout_s: float = 120.0
+    probe_step_mm: float = 0.2
+    max_step_mm: float = 0.5
+    max_total_mm: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -551,11 +554,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         scan = replace(scan, fov_mm=tuple(vision.hair_detector.expected_um_per_px * n / 1000 for n in (4024, 3036)))
     tc_data = root["tool_calibration"]
     if isinstance(tc_data, dict):
-        tc_data = {"enabled": True, "quality_hard_fail": True, "unreliable_action": "fail", "click_timeout_s": 120.0, **tc_data}
+        tc_data = {"enabled": True, "quality_hard_fail": True, "unreliable_action": "fail", "click_timeout_s": 120.0, "probe_step_mm": .2, "max_step_mm": .5, "max_total_mm": 2., **tc_data}
     tc = _mapping(tc_data, "tool_calibration", [
         "directory", "cameras", "detection", "position_tolerance_mm", "tip_tolerance_mm",
         "consistency_tolerance_mm", "max_iterations", "max_residual_mm", "max_condition",
-        "z_disagreement_mm", "enabled", "quality_hard_fail", "unreliable_action", "click_timeout_s",
+        "z_disagreement_mm", "enabled", "quality_hard_fail", "unreliable_action", "click_timeout_s", "probe_step_mm", "max_step_mm", "max_total_mm",
     ])
     if type(tc["enabled"]) is not bool or type(tc["quality_hard_fail"]) is not bool:
         _fail("tool_calibration.enabled", "应为布尔值")
@@ -607,6 +610,9 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         max_condition,
         _number(tc["z_disagreement_mm"], "tool_calibration.z_disagreement_mm", True),
         tc["enabled"], tc["quality_hard_fail"], tc["unreliable_action"], click_timeout,
+        _number(tc["probe_step_mm"], "tool_calibration.probe_step_mm", True),
+        _number(tc["max_step_mm"], "tool_calibration.max_step_mm", True),
+        _number(tc["max_total_mm"], "tool_calibration.max_total_mm", True),
     )
     tools_path = Path(directory) / "tools.yaml"
     try:

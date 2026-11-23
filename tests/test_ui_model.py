@@ -1,5 +1,6 @@
 import json
 import math
+import pytest
 from datetime import date
 from nest_clear.ui.model import decode_status, status_indicators, classify_event, EventTail, read_json, camcal_progress, tooltip_progress
 
@@ -102,3 +103,72 @@ def test_pickacc_demo_uses_real_plans_and_geometry():
     p=table['predicted']
     assert abs(math.dist(p['T02'],p['T03'])-30.15)<1e-6
     assert abs(math.dist(p['T02'],p['T10'])-30.15)<1e-6
+
+
+def test_tooltip_display_formatting():
+    from nest_clear.ui.model import tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time
+    assert tooltip_vector([.12,-.08,.04], signed=True, labels='XYZ') == 'X +0.120 Y -0.080 Z +0.040'
+    assert tooltip_vector(None) == '—'
+    assert tooltip_vector([125.12, 73., 110.04], compact=True) == '125.120 73.000 110.040'
+    assert tooltip_vector([float('nan'),0,0]) == '—'
+    text = tooltip_deviation({'front':[.061,.03], 'side':[-.03,.03]})
+    assert text == '主相机 横向 +0.061 竖向 +0.030 mm；辅相机 横向 -0.030 竖向 +0.030 mm'
+    assert tooltip_deviation(None) == '—'
+    assert tooltip_pixels({'front':[320,241], 'side':[321,242]}) == '320,241 / 321,242'
+    assert tooltip_deviation({'front':[-.00001,.007], 'side':[-.0,.007]}, compact=True) == '主 +0.000/+0.007 辅 +0.000/+0.007'
+    assert tooltip_vector([.2,-.00001,-0.0], signed=True, compact=True) == '+0.200 +0.000 +0.000'
+    assert tooltip_vector([-.00001,-0.0,1], signed=False) == '0.000 / 0.000 / 1.000'
+    assert tooltip_quality('未测', {'rms_px':{'front':.2,'side':.3},'condition_number':1.4}) == '未测'
+    assert tooltip_quality('已存', {'rms_px':{'front':.2,'side':.3},'condition_number':1.4}) == '已存（RMS 主 0.20px 辅 0.30px，条件数 1.4）'
+    assert tooltip_time('2026-11-22T12:34:56.123456-08:00') == '12:34:56'
+    assert tooltip_time(None) == '—'
+
+
+def test_tooltip_demo_states_use_detection_and_consistent_measurements(tmp_path):
+    import json
+    import math
+    from nest_clear.tools.tooltip_demo_image import main
+    from nest_clear.paths import live_image_file
+    states = {}
+    for state in ('idle','probe','confirm_move','in_range','done','fail'):
+        root = tmp_path/state
+        main(root, state)
+        states[state] = json.loads((root/'tooltip_demo.json').read_text())
+        assert all(live_image_file(root, f'calib_{view}_latest').exists() for view in ('front','side'))
+        if state != 'idle':
+            for view, point in states[state]['pixels'].items():
+                assert states[state]['deviation_mm'][view] == pytest.approx([(point[0]-320)*.0152,(point[1]-242)*.0152])
+    assert states['idle']['rounds'] == [] and states['idle']['tool'] is None
+    assert states['probe']['rounds'][0]['stage'] == '探测' and states['probe']['jacobian_quality'] is None
+    assert math.hypot(*states['confirm_move']['deviation_mm']['front']) > .05
+    assert all(math.hypot(*p) < .05 for p in states['in_range']['deviation_mm'].values())
+    assert states['done']['new_compensation'] and states['done']['compensation_difference']
+    assert '质量不合格' in states['fail']['message']
+
+
+def test_tooltip_overlay_marks_baseline_even_when_detection_fails_and_manual_is_purple():
+    import numpy as np
+    from nest_clear.tooltip.overlay import render_tooltip
+    raw = np.full((480,640), 245, np.uint8)
+    missing = render_tooltip(raw, (320,240), None)
+    assert not np.array_equal(missing[240,320], [245,245,245])
+    manual = render_tooltip(raw, (320,240), (400,300), manual=True)
+    auto = render_tooltip(raw, (320,240), (400,300), manual=False)
+    # OpenCV BGR：紫色有高蓝和红，橙色以红绿为主。
+    assert manual[300,400,0] > 150 and auto[300,400,0] < 30
+
+
+def test_tooltip_overlay_displays_no_negative_zero(monkeypatch):
+    import numpy as np
+    from nest_clear.tooltip import overlay
+    draw_original = overlay.ImageDraw.Draw
+    texts = []
+    class CapturingDraw:
+        def __init__(self, image): self.draw = draw_original(image)
+        def text(self, xy, text, **kwargs):
+            texts.append(text)
+            self.draw.text(xy, text, **kwargs)
+    monkeypatch.setattr(overlay.ImageDraw, 'Draw', CapturingDraw)
+    overlay.render_tooltip(np.full((480,640),245,np.uint8), (320,240), (319.99999,239.99999))
+    assert any('横向 +0.000 mm  竖向 +0.000 mm' in text for text in texts)
+    assert all('-0.000' not in text for text in texts)

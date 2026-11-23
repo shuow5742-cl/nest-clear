@@ -132,6 +132,9 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
   tip_tolerance_mm: 0.03  # 针尖对准容差，mm
   consistency_tolerance_mm: 0.01  # 最终坐标一致性容差，mm
   max_iterations: 10  # 最大偏移次数
+  probe_step_mm: 0.2  # 首次测量雅可比的步长
+  max_step_mm: 0.5  # 每步任一轴上限
+  max_total_mm: 2.0  # 相对 P0 任一轴上限
   max_residual_mm: 0.03  # 投影残差告警阈值，mm
   max_condition: 100.0  # 条件数告警阈值
   z_disagreement_mm: 0.03  # 两视图 Z 分歧告警阈值，mm

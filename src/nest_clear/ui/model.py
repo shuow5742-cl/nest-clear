@@ -3,6 +3,7 @@ import json
 import math
 from datetime import date, datetime, timezone
 from pathlib import Path
+from nest_clear.display import format_number
 
 BITS = ('手动模式','自动模式','循环启动','循环暂停','循环停止','上电完成','急停中','初始化中','初始化完成','信息提示','一般报警','严重故障')
 
@@ -168,3 +169,60 @@ def preview_controls(status, age_s):
 def edge_corner_label(corner):
     # session 中 2 是左下，3 是右下；不能按顺时针序号直接索引。
     return {0: '左上', 1: '右上', 2: '左下', 3: '右下'}.get(corner, str(corner))
+
+
+def tooltip_vector(value, *, signed=False, labels=None, digits=3, compact=False):
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        return '—'
+    try:
+        nums = [float(v) for v in value]
+        if not all(math.isfinite(v) for v in nums): return '—'
+    except (TypeError, ValueError):
+        return '—'
+    if labels:
+        return ' '.join(f'{axis} {format_number(v, digits, signed=signed)}' for axis, v in zip(labels, nums))
+    parts = [format_number(v, digits, signed=signed) for v in nums]
+    return (' ' if compact else ' / ').join(parts)
+
+
+def tooltip_deviation(value, *, compact=False):
+    if not isinstance(value, dict): return '—'
+    parts = []
+    for name, label, short in (('front', '主相机', '主'), ('side', '辅相机', '辅')):
+        pair = value.get(name)
+        try:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2: raise ValueError
+            u, v = map(float, pair)
+            if not math.isfinite(u) or not math.isfinite(v): raise ValueError
+            u_text, v_text = (format_number(n, signed=True) for n in (u, v))
+            parts.append(f'{short} {u_text}/{v_text}' if compact else f'{label} 横向 {u_text} 竖向 {v_text} mm')
+        except (ValueError, TypeError):
+            parts.append(f'{short} —' if compact else f'{label} —')
+    return ' '.join(parts) if compact else '；'.join(parts)
+
+
+def tooltip_pixels(value):
+    if not isinstance(value, dict): return '—'
+    def pair(name):
+        try:
+            p = value[name]
+            if len(p) != 2: return '—'
+            return ','.join(format_number(x, 0) for x in p)
+        except (KeyError, TypeError, ValueError): return '—'
+    return pair('front') + ' / ' + pair('side')
+
+
+def tooltip_quality(status, quality):
+    status = status if status in ('未测', '本次测得', '已存') else '未测'
+    if status == '未测' or not isinstance(quality, dict): return status
+    rms = quality.get('rms_px') or {}
+    try:
+        front, side, condition = float(rms['front']), float(rms['side']), float(quality['condition_number'])
+        if not all(math.isfinite(x) for x in (front, side, condition)): raise ValueError
+        return f'{status}（RMS 主 {format_number(front, 2)}px 辅 {format_number(side, 2)}px，条件数 {format_number(condition, 1)}）'
+    except (TypeError, ValueError, KeyError): return status
+
+
+def tooltip_time(value):
+    dt = parse_time(value)
+    return dt.strftime('%H:%M:%S') if dt else '—'

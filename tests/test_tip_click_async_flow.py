@@ -62,8 +62,15 @@ class CoarseDetector:
 
 def test_delayed_click_does_not_block_ticks_or_heartbeat(tmp_path, monkeypatch, caplog):
     import nest_clear.flow.calibration as flow
+    from nest_clear.tooloffset.commands import send
     monkeypatch.setattr(flow, '_click_process', delayed_click)
     monkeypatch.setattr(flow, 'SilhouetteTipDetector', CoarseDetector)
+    publish = flow.ConfirmCalibration.publish
+    def auto_confirm(node, phase, message, **fields):
+        publish(node, phase, message, **fields)
+        if phase == 'limit': send(node.ctx.events.directory, 'tooltip_click')
+        elif phase == 'in_range': send(node.ctx.events.directory, 'tooltip_confirm_result')
+    monkeypatch.setattr(flow.ConfirmCalibration, 'publish', auto_confirm)
     views = [ViewCalib('front', (0, 0), ((10, 0, 0), (0, 0, 10))),
              ViewCalib('side', (0, 0), ((0, 10, 0), (0, 0, 10)))]
     save_baseline(ToolTipBaseline('tool1', (0, 0, 0), views), tmp_path / 'tool1_baseline.yaml', tool=1, source='test')

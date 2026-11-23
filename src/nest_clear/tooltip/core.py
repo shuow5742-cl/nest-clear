@@ -72,6 +72,8 @@ class ToolTipBaseline:
     timestamp: str = ""  # caller-defined timestamp
     note: str = ""  # caller-defined note
     jacobian_pending: bool = False
+    jacobian_measured_at: str = ""
+    jacobian_session: str = ""
 
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""
@@ -92,6 +94,8 @@ class ToolTipBaseline:
             raise _error("timestamp and note must be strings", locals())
         if type(self.jacobian_pending) is not bool:
             raise _error("jacobian_pending must be a boolean", locals())
+        if not isinstance(self.jacobian_measured_at, str) or not isinstance(self.jacobian_session, str):
+            raise _error("jacobian measurement metadata must be strings", locals())
 
 
 @dataclass(frozen=True)

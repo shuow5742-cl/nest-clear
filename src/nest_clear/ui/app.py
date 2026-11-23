@@ -17,7 +17,8 @@ from PIL import Image, ImageGrab, ImageTk
 from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file, ui_command_file
 from .model import (EventTail, camcal_progress, decode_status, display_time, duration,
                     read_json, status_indicators, tooltip_progress, preview_controls, edge_corner_label,
-                    pickacc_tray_geometry, pickacc_type, pickacc_stage, pickacc_note, pickacc_infield)
+                    pickacc_tray_geometry, pickacc_type, pickacc_stage, pickacc_note, pickacc_infield,
+                    tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -882,18 +883,36 @@ class App:
 
     def build_tip(self):
         self.tip.columnconfigure(0, weight=1, uniform='tipcols'); self.tip.columnconfigure(1, weight=1, uniform='tipcols')
-        self.tip.rowconfigure(0, weight=55, uniform='tiprows'); self.tip.rowconfigure(1, weight=45, uniform='tiprows')
-        self.picture(self.card(self.tip, '正面相机 · 点击放大', 0, 0), 'calib_front_latest')
-        self.picture(self.card(self.tip, '侧面相机 · 点击放大', 0, 1), 'calib_side_latest')
-        iterations = self.card(self.tip, '对刀迭代', 1, 0)
-        cols = ('轮次', 'Δx', 'Δy', 'Δz', '正面宽度/清晰', '侧面宽度/清晰', '可靠性')
-        self.tiptable = self.table_widget(iterations, cols, (50, 65, 65, 65, 135, 135, 95),
-                                          stretch=('正面宽度/清晰', '侧面宽度/清晰', '可靠性'))
-        result = self.card(self.tip, '对刀结果', 1, 1)
-        self.tip_result = KeyValueGrid(result, ('工具号', '迭代次数', '状态', '原因', '补偿'), self.theme)
-        self.tip_result.grid(row=0, column=0, sticky='new')
-        self.tip_stale = tk.Label(result, text='', bg=WHITE, fg=COLORS['red'], font=self.theme.body, wraplength=600, justify='left')
-        self.tip_stale.grid(row=1, column=0, sticky='ew')
+        self.tip.rowconfigure(1, weight=6); self.tip.rowconfigure(2, weight=3)
+        head = tk.Frame(self.tip, bg=WHITE); head.grid(row=0, column=0, columnspan=2, sticky='ew')
+        self.tip_heading = tk.Label(head, text='等待 PLC 100/101', bg=COLORS['gray'], fg=WHITE, font=self.theme.large, padx=12)
+        self.tip_heading.grid(row=0, column=0, padx=4, pady=4)
+        self.tip_message = tk.Label(head, text='等待 PLC 100/101', bg=WHITE, fg=INK, font=self.theme.large, wraplength=850, justify='left')
+        self.tip_message.grid(row=0, column=1, columnspan=4, padx=8, sticky='w')
+        self.tip_buttons = {}
+        for column, (text, name) in enumerate((('确认移动','tooltip_confirm_move'), ('确认对刀结果','tooltip_confirm_result'), ('识别不准，手动点击','tooltip_click'), ('放弃对刀','tooltip_abort'))):
+            button = ttk.Button(head, text=text, style='OffsetPlace.TButton' if name in ('tooltip_confirm_move','tooltip_confirm_result') else 'TButton', command=lambda n=name:self.tip_command(n))
+            button.grid(row=1, column=column, padx=3, pady=2, sticky='w'); self.tip_buttons[name] = button
+        self.tip_pending = 0; self.tip_ack = 0
+        self.picture(self.card(self.tip, '主相机 · 点击放大', 1, 0), 'calib_front_latest')
+        self.picture(self.card(self.tip, '辅助相机 · 点击放大', 1, 1), 'calib_side_latest')
+        iterations = self.card(self.tip, '本次会话迭代', 2, 0)
+        cols = ('轮次', '阶段', '主/辅针尖像素', '偏差 mm', 'Δxyz', '下发坐标', '点击', '确认时间')
+        self.tiptable = self.table_widget(iterations, cols, (55, 55, 180, 295, 220, 225, 55, 105), stretch=('主/辅针尖像素', '偏差 mm', 'Δxyz', '下发坐标'))
+        ttk.Style(self.root).configure('Tip.Treeview', font=self.theme.body)
+        ttk.Style(self.root).configure('Tip.Treeview.Heading', font=self.theme.body)
+        self.tiptable.configure(style='Tip.Treeview')
+        tip_scroll = ttk.Scrollbar(iterations, orient='horizontal', command=lambda *args: self.tiptable.xview(*args))
+        tip_scroll.grid(row=1, column=0, sticky='ew'); self.tiptable.configure(xscrollcommand=tip_scroll.set)
+        result = self.card(self.tip, '本次计算与补偿', 2, 1)
+        self.tip_details = tk.Label(result, text='等待 PLC 请求', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.body, wraplength=620)
+        self.tip_details.grid(row=0, column=0, sticky='nsew')
+
+    def tip_command(self, name):
+        from nest_clear.tooloffset.commands import send
+        if not self.tip_pending:
+            try: self.tip_pending = send(self.directory, name, acknowledged=self.tip_ack)
+            except OSError: logger.exception('写对刀命令失败')
 
     def build_placeholder(self, parent, title):
         parent.columnconfigure(0, weight=1); parent.columnconfigure(1, weight=1)
@@ -972,7 +991,13 @@ class App:
         self.update_reply(main, rows)
         self.update_cam(camcal_progress(main))
         self.update_preview(supervisor)
-        self.update_tip(tooltip_progress(main))
+        self.tip_ack = main.get('command_seq', 0)
+        if self.tip_pending and self.tip_ack >= self.tip_pending: self.tip_pending = 0
+        tip_data = tooltip_progress(main)
+        start_id = (tip_data.get('tool'), tip_data.get('start_task_id'), tip_data.get('start_token'))
+        if tip_data.get('start_task_id') and start_id != getattr(self, '_tip_start_id', None):
+            self._tip_start_id = start_id; self.select_page('换针对刀')
+        self.update_tip(tip_data)
         self.update_offset(main)
         self.update_pickacc(main)
         self.update_baseline(main)
@@ -1088,27 +1113,33 @@ class App:
                            '提示': '偏移接近 0 且清晰度最大处即为推荐起始位'})
 
     def update_tip(self, data):
-        key = json.dumps(data, ensure_ascii=False, default=str)
+        key = json.dumps([data, self.tip_pending], ensure_ascii=False, default=str)
         if key == self.cache.get('tip'): return
         self.cache['tip'] = key
         self.tiptable.delete(*self.tiptable.get_children())
-        current = None
-        for row in data.get('history', []):
-            if row.get('event') == 'tooltip_detect':
-                focus = row.get('focus') or {}; delta = row.get('delta') or [None, None, None]
-                delta = list(delta)[:3] + [None] * max(0, 3-len(delta))
-                def view(name):
-                    item = focus.get(name) or {}
-                    return f"{item.get('edge_width_px', '—')} px / {'清晰' if item.get('focused') else '不清晰'}"
-                current = self.tiptable.insert('', 'end', values=(len(self.tiptable.get_children()) + 1,
-                    *[str(v) if v is not None else '—' for v in delta], view('front'), view('side'), '—'))
-            elif current and row.get('event') == 'tooltip_reliability':
-                values = list(self.tiptable.item(current, 'values'))
-                values[-1] = ('可靠' if row.get('reliable') else '不可靠') + ' ' + '；'.join(row.get('reasons') or [])
-                self.tiptable.item(current, values=values)
-        states = {'tooltip_aligned': '对刀完成', 'tooltip_failed': '对刀失败', 'tooltip_detect': '检测中', 'tooltip_offset': '调整中', 'tooltip_reliability': '可靠性检查'}
-        state = states.get(data.get('event'), '进行中' if data else '无数据')
-        self.tip_result.set({'工具号': data.get('tool'), '迭代次数': data.get('iteration', data.get('iterations')), '状态': state, '原因': data.get('reason') or '—', '补偿': data.get('new_compensation', data.get('new'))})
+        for row in data.get('rounds', []):
+            self.tiptable.insert('', 'end', values=(row.get('iteration') or '—', row.get('stage') or '—', tooltip_pixels(row.get('pixels')), tooltip_deviation(row.get('deviation_mm'), compact=True), tooltip_vector(row.get('delta'), signed=True, compact=True), tooltip_vector(row.get('target'), compact=True), '是' if row.get('click') else '否', tooltip_time(row.get('confirmed_at'))))
+        phase = data.get('phase', 'idle'); tool = data.get('tool')
+        self.tip_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else COLORS['gray'])
+        self.tip_message.config(text=data.get('message') or '等待 PLC 100/101', fg=COLORS['red'] if phase in ('limit','fail') else COLORS['green'] if phase == 'done' else INK)
+        for name, button in self.tip_buttons.items():
+            enabled = (name == 'tooltip_confirm_move' and phase in ('probe','confirm_move') or name == 'tooltip_confirm_result' and phase == 'in_range' or name in ('tooltip_click','tooltip_abort') and phase in ('probe','confirm_move','in_range','limit','click_failed'))
+            button.config(state='normal' if enabled and not self.tip_pending else 'disabled')
+        rounds = data.get('rounds') or []
+        waiting = phase in ('starting', 'probe', 'confirm_move', 'in_range', 'limit', 'clicking', 'click_failed')
+        number = len(rounds) + int(waiting) if rounds or waiting else None
+        xyz = lambda value, signed=False: tooltip_vector(value, signed=signed, labels='XYZ')
+        heading = (f'第 {number or len(rounds) + 1} 轮（已失败）' if phase == 'fail'
+                   else f'第 {number} 轮' if number else '等待会话')
+        self.tip_details.config(text=(heading + '\n') +
+            f"{tooltip_deviation(data.get('deviation_mm'))}\n"
+            f"Δ {xyz(data.get('delta'), True)} mm　目标 {xyz(data.get('target'))}\n"
+            f"累计相对 P0：{xyz(data.get('cumulative'), True)} mm　手动点击：{'是' if data.get('click') is True else '否' if data.get('click') is False else '—'}\n"
+            f"雅可比：{tooltip_quality(data.get('jacobian_status'), data.get('jacobian_quality'))}\n"
+            f"旧补偿：{xyz(data.get('old_compensation'), True)} mm\n"
+            f"新补偿：{xyz(data.get('new_compensation'), True)} mm\n"
+            f"补偿差值：{xyz(data.get('compensation_difference'), True)} mm")
+
 
     def draw_plan(self, points, count, origin_z=None):
         key = (str(points), count, origin_z, self.plan.winfo_width(), self.plan.winfo_height())

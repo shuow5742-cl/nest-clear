@@ -74,6 +74,16 @@ class FakePLC:
         if not self._ready.wait(5):
             raise TimeoutError("模拟 PLC 启动超时")
         if self._error:
+            # pymodbus 会将监听权限错误折叠成通用 RuntimeError；恢复系统诊断，
+            # 让调用方能够区分沙箱禁网和其他服务启动故障。
+            import socket
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                    probe.bind((self.host, self.port))
+            except PermissionError as exc:
+                raise exc from self._error
+            except OSError:
+                pass
             raise RuntimeError("模拟 PLC 启动失败") from self._error
         self.io = PLCClient(self.host, self.port, 1, self.contract)
         return self

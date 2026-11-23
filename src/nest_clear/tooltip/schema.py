@@ -58,7 +58,7 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
         _fields(
             raw,
             {"version", "tool_name", "p0", "offset_xyz", "views"},
-            {"timestamp", "note", "jacobian_pending"},
+            {"timestamp", "note", "jacobian_pending", "jacobian_measured_at", "jacobian_session"},
             "baseline",
         )
         if type(raw["version"]) is not int or raw["version"] != 1:
@@ -80,6 +80,8 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
             raw.get("timestamp", ""),
             raw.get("note", ""),
             raw.get("jacobian_pending", False),
+            raw.get("jacobian_measured_at", ""),
+            raw.get("jacobian_session", ""),
         )
     except (yaml.YAMLError, GuardError, ValueError, TypeError, OSError) as exc:
         raise ToolCalSchemaError(f"{path}: {exc}") from exc
@@ -96,6 +98,8 @@ def save_baseline(baseline: ToolTipBaseline, path: str | Path) -> None:
         "timestamp": baseline.timestamp,
         "note": baseline.note,
         **({"jacobian_pending": True} if baseline.jacobian_pending else {}),
+        **({"jacobian_measured_at": baseline.jacobian_measured_at} if baseline.jacobian_measured_at else {}),
+        **({"jacobian_session": baseline.jacobian_session} if baseline.jacobian_session else {}),
         "views": [
             {
                 "name": v.name,

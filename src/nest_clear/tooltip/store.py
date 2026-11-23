@@ -136,6 +136,8 @@ def save_baseline(
         "timestamp": baseline.timestamp,
         "note": baseline.note,
         **({"jacobian_pending": True} if baseline.jacobian_pending else {}),
+        **({"jacobian_measured_at": baseline.jacobian_measured_at} if baseline.jacobian_measured_at else {}),
+        **({"jacobian_session": baseline.jacobian_session} if baseline.jacobian_session else {}),
         "views": [
             {
                 "name": view.name,

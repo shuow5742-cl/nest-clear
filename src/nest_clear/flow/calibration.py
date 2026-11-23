@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import logging
+import json
 import math
 import multiprocessing as mp
 import time
@@ -16,7 +17,7 @@ from autoweaver.motion_policy.nodes.node import TreeNode, Status
 from nest_clear.guard import GuardError, diagnostic
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.summary import write_tooltip_summary
-from nest_clear.tooltip import SilhouetteTipDetector, check_quality, compute_compensation, is_aligned, solve_correction
+from nest_clear.tooltip import SilhouetteTipDetector, check_quality, compute_compensation, is_aligned, solve_correction, fit_view_jacobian
 from nest_clear.tooltip.store import load_baseline, save_tools
 from nest_clear.tooltip.click import confirm_tip, _DISPLAY_ERROR
 from .context import FlowContext
@@ -24,6 +25,20 @@ from .leaves import CallWorker, Instant
 from .modes import Mode, transition
 
 logger = logging.getLogger("nest_clear.flow.calibration")
+
+
+def save_session_record(ctx, session, result, reason=None):
+    directory = getattr(ctx.events, 'run_directory', None)
+    if directory is None:
+        return
+    path = Path(directory) / 'tooltip' / str(session['task_ids'][0]) / 'session_record.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({**session, 'result': result, 'reason': reason}, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+
+
+def view_settings():
+    from nest_clear.baseline.session import settings
+    return settings(Path(__file__).resolve().parents[3] / 'config' / 'tooltip_baseline.yaml')
 
 
 def fail(reason: str, hint: str = "检查对刀基准、相机和设备位置。") -> None:
@@ -98,6 +113,9 @@ class SaveCompensation(Instant):
         self.ctx.events.emit("tooltip_compensation", task_id=bb.read("task_id"), tool=tool,
                              old=old, new=new, delta=delta)
         session.update(delta=delta, old_compensation=list(old), new_compensation=list(new))
+        self.ctx.events.emit('tooltip_state', phase='done', message='完成', tool=tool,
+                             old_compensation=list(old), new_compensation=list(new), compensation_difference=[n-o for n, o in zip(new, old)], rounds=session.get('rounds', []))
+        save_session_record(self.ctx, session, '成功')
         write_tooltip_summary(self.ctx.events, session, "成功")
         change_mode(bb, self.ctx, Mode.IDLE, self.name)
         bb.write("tooltip_session", None, self.name)
@@ -130,7 +148,8 @@ class StartCalibration(Instant):
     def perform(self) -> None:
         bb = self._blackboard
         tool = 1 if bb.read("request_func") == 100 else 2
-        self.ctx.events.emit("tooltip_start", task_id=bb.read("task_id"), tool=tool)
+        self.ctx.events.emit("tooltip_start", task_id=bb.read("task_id"), start_task_id=bb.read("task_id"),
+                             start_token=self.ctx.events.clock().isoformat(), tool=tool, phase='starting', message='检查基准和到位')
         session = {"tool": tool, "iterations": 0, "offset": False, "last_position": None,
                    "ended": False, "start_time": self.ctx.events.clock().isoformat(),
                    "task_ids": [bb.read("task_id")], "images": [], "delta": None,
@@ -145,8 +164,9 @@ class StartCalibration(Instant):
         baseline = load_baseline(path)
         if baseline.tool_name != f"tool{tool}" or {v.name for v in baseline.views} != {"front", "side"}:
             fail(f"工具 {tool} 基准工具号或视图不匹配")
-        if any(v.jacobian is None for v in baseline.views):
-            fail("对刀基准缺少点动测量数据（雅可比），待换针对刀方案确定")
+        session['probing'] = any(v.jacobian is None for v in baseline.views)
+        session['probe_samples'] = []
+        session['rounds'] = []
         bb.write("tooltip_baseline", baseline, self.name)
         session["last_position"] = baseline.p0
         bb.write("tooltip_session", session, self.name)
@@ -237,9 +257,12 @@ class DetectTips(Instant):
         archive = getattr(self.ctx.events, "archive", None)
         targets = {view.name: view.target_uv for view in bb.read("tooltip_baseline").views}
         for view in ("front", "side"):
+            visual = view_settings()
             paths["overlay"][view] = archive.calibration(
                 images[view], session["tool"], bb.read("task_id"), paths["iteration"], view,
-                points[view], targets[view], paths["raw"].get(view), focus=focus) if archive else None
+                points[view], targets[view], paths["raw"].get(view), focus=focus,
+                um_per_px=visual['main_um_per_px' if view == 'front' else 'aux_um_per_px'],
+                radius_mm=visual['main_tol_mm'], threshold=self.ctx.config.tool_calibration.detection[view]['threshold']) if archive else None
         bb.write("tooltip_points", points, self.name)
 
 
@@ -474,6 +497,8 @@ class CalibrationFailed(Instant):
                              images=session["images"] if session else [],
                              request_func=bb.read("request_func"), reason=reason)
         if session:
+            self.ctx.events.emit('tooltip_state', phase='fail', message=str(reason), tool=session['tool'], rounds=session.get('rounds', []))
+            save_session_record(self.ctx, session, '失败', str(reason))
             write_tooltip_summary(self.ctx.events, session, "失败", str(reason))
         change_mode(bb, self.ctx, Mode.IDLE, self.name)
         bb.write("tooltip_session", None, self.name)
@@ -482,6 +507,210 @@ class CalibrationFailed(Instant):
         bb.write("reply_func", 131, self.name)
         bb.write("reply_coordinates", {}, self.name)
         bb.write("reply_tool", None, self.name)
+
+
+class ConfirmCalibration(TreeNode):
+    """每个 PLC 请求持续运行到操作员确认；不会在等待期间写坐标。"""
+    def __init__(self, ctx):
+        super().__init__('等待对刀人工确认')
+        self.ctx = ctx
+        self.process = None
+
+    def on_start(self):
+        self.process = None
+        self.manual = False
+        try:
+            node = DetectTips(self.ctx); node._blackboard = self._blackboard; node.perform()
+            bb = self._blackboard
+            self.ctx.events.emit('tooltip_observation', task_id=bb.read('task_id'), tool=bb.read('tooltip_session')['tool'],
+                                 stage='探测' if bb.read('tooltip_session')['probing'] else '对准',
+                                 pixels=bb.read('tooltip_points'), focus=bb.read('tooltip_focus'),
+                                 images=bb.read('tooltip_session')['images'][-1], click=False)
+            return self.prepare()
+        except Exception as exc:
+            self._blackboard.write('error', str(exc), self.name)
+            return Status.FAILURE
+
+    def publish(self, phase, message, **fields):
+        from .tool_offset import reader
+        bb = self._blackboard
+        session = bb.read('tooltip_session')
+        self.ctx.events.emit('tooltip_state', phase=phase, message=message, tool=session['tool'],
+                             command_seq=reader(self.ctx).last_seq, rounds=session['rounds'],
+                             jacobian_status=session.get('jacobian_status', '未测' if session['probing'] else '已存'),
+                             jacobian_quality=session.get('jacobian_quality'), **fields)
+
+    def fit_probe(self):
+        bb = self._blackboard; session = bb.read('tooltip_session'); baseline = bb.read('tooltip_baseline')
+        samples = session['probe_samples'] + [{'actual': list(bb.read('actual')), 'points': dict(bb.read('tooltip_points'))}]
+        try:
+            quality_path = Path(__file__).resolve().parents[3] / 'config' / 'tooltip_baseline.yaml'
+            quality_config = (yaml.safe_load(quality_path.read_text(encoding='utf-8')) or {}).get('quality', {})
+            max_fit_rms = float(quality_config.get('max_fit_rms_px', 2.0))
+            if not math.isfinite(max_fit_rms) or max_fit_rms <= 0:
+                raise ValueError('拟合残差阈值无效')
+            x = np.asarray([s['actual'] for s in samples], dtype=float)
+            x -= x.mean(axis=0)
+            views = []; rms = {}
+            for view in baseline.views:
+                y = np.asarray([s['points'][view.name] for s in samples], dtype=float)
+                y -= y.mean(axis=0)
+                fit = fit_view_jacobian(list(zip(x, y)))
+                if fit.rms_px > max_fit_rms or fit.condition_number > self.ctx.config.tool_calibration.max_condition:
+                    raise ValueError('拟合残差或位移矩阵条件数超限')
+                rms[view.name] = float(fit.rms_px)
+                views.append(replace(view, jacobian=fit.jacobian.tolist()))
+            matrix = np.vstack([v.jacobian for v in views])
+            condition = float(np.linalg.cond(matrix))
+            if np.linalg.matrix_rank(matrix) < 3 or not math.isfinite(condition) or condition > self.ctx.config.tool_calibration.max_condition or np.linalg.norm(np.asarray(views[0 if views[0].name == 'front' else 1].jacobian)[:, 2]) < 1e-6:
+                raise ValueError('联合雅可比降秩或条件数超限')
+            measured = replace(baseline, views=tuple(views), jacobian_pending=False,
+                               jacobian_measured_at=self.ctx.events.clock().isoformat(),
+                               jacobian_session=str(session['task_ids'][0]))
+            from nest_clear.baseline.session import baseline_mapping
+            from nest_clear.tooloffset.store import save_mapping
+            mapping = baseline_mapping(measured)
+            mapping['jacobian_pending'] = False
+            for item, view in zip(mapping['views'], measured.views):
+                item['jacobian'] = [list(row) for row in view.jacobian]
+            mapping['jacobian_measured_at'] = measured.jacobian_measured_at
+            mapping['jacobian_session'] = measured.jacobian_session
+            path = Path(self.ctx.config.tool_calibration.directory) / f"tool{session['tool']}_baseline.yaml"
+            save_mapping(path, mapping, f"tool{session['tool']}_baseline")
+            bb.write('tooltip_baseline', measured, self.name)
+            session.update(probing=False, probe_samples=samples, jacobian_status='本次测得', jacobian_quality={'rms_px': rms, 'condition_number': condition})
+            self.ctx.events.emit('tooltip_jacobian', tool=session['tool'], quality=session['jacobian_quality'], samples=samples)
+        except Exception as exc:
+            fail('雅可比测量质量不合格：检查针尖识别/对焦', str(exc))
+
+    def prepare(self):
+        bb = self._blackboard; session = bb.read('tooltip_session'); cfg = self.ctx.config.tool_calibration
+        points = bb.read('tooltip_points')
+        if any(points[v] is None for v in ('front', 'side')):
+            if not session['probing']:
+                solve = SolveTips(self.ctx); solve._blackboard = bb; solve.perform()
+            fail('相机无法识别针尖：检查针尖识别/对焦')
+        if session['probing']:
+            focus = bb.read('tooltip_focus')
+            if any(focus[v]['coarse'] or not focus[v]['focused'] for v in ('front', 'side')):
+                self.aligned = False; self.too_large = True
+                self.publish('limit', '探测识别不可靠，请手动点击或放弃')
+                return Status.RUNNING
+        if session['probing'] and len(session['probe_samples']) == 4:
+            self.fit_probe()
+        baseline = bb.read('tooltip_baseline'); actual = np.asarray(bb.read('actual'), dtype=float)
+        if session['probing']:
+            index = len(session['probe_samples']); p0 = np.asarray(baseline.p0)
+            target = p0.copy()
+            if index < 3: target[index] += cfg.probe_step_mm
+            delta = target - actual; aligned = False
+            message = f'探测中 第{index + 1}/4步：' + (f'探测移动 +{cfg.probe_step_mm:g}mm {"XYZ"[index]}，用于测量相机像素与模组移动关系' if index < 3 else '返回 P0')
+            stage = '探测'
+        else:
+            solve = SolveTips(self.ctx); solve._blackboard = bb
+            try:
+                solve.perform()
+            except GuardError as exc:
+                self.aligned = False; self.too_large = True
+                self.publish('limit', str(exc) + '，请手动点击或放弃')
+                return Status.RUNNING
+            result = bb.read('tooltip_result'); delta = np.asarray(result.delta_xyz)
+            aligned = is_aligned(result, cfg.tip_tolerance_mm)
+            target = actual + delta
+            message = '已在范围内，请确认' if aligned else '等待确认移动'
+            stage = '对准'
+            if not aligned and session['iterations'] >= cfg.max_iterations:
+                fail(f"对刀偏移超过最大次数 {session['iterations']}")
+        too_large = bool(np.any(np.abs(delta) > cfg.max_step_mm + 1e-9) or np.any(np.abs(target - baseline.p0) > cfg.max_total_mm + 1e-9))
+        if not aligned and not too_large:
+            guard_position(tuple(target), self.ctx.config.travel, f"对刀工具 {session['tool']}")
+        if too_large:
+            message = '修正量过大，疑似识别错误，请手动点击或放弃'
+        self.aligned, self.too_large, self.target, self.delta, self.stage = aligned, too_large, target, delta, stage
+        self.sample = {'actual': actual.tolist(), 'points': {k: list(v) for k, v in points.items()}}
+        visual = view_settings()
+        deviations = {v.name: ((np.asarray(points[v.name]) - v.target_uv) * visual['main_um_per_px' if v.name == 'front' else 'aux_um_per_px'] / 1000).tolist() for v in baseline.views}
+        session['pending'] = {'stage': stage, 'pixels': self.sample['points'], 'deviation_mm': deviations,
+                              'delta': delta.tolist(), 'target': target.tolist(), 'cumulative': (target-baseline.p0).tolist(),
+                              'click': self.manual, 'images': session['images'][-1]}
+        save_session_record(self.ctx, session, '进行中')
+        phase = 'limit' if too_large else 'in_range' if aligned else 'probe' if session['probing'] else 'confirm_move'
+        self.publish(phase, message, pixels=self.sample['points'], deviation_mm=deviations,
+                     delta=delta.tolist(), target=target.tolist(), cumulative=(target - baseline.p0).tolist(), click=self.manual)
+        return Status.RUNNING
+
+    def on_running(self):
+        bb = self._blackboard; session = bb.read('tooltip_session')
+        try:
+            if self.process is not None:
+                if not self.connection.poll():
+                    if self.process.is_alive(): return Status.RUNNING
+                    fail('人工点击窗口失败')
+                result = self.connection.recv(); self.process.join(timeout=.1); self.connection.close(); self.process = None
+                if not isinstance(result, dict) or len(result) != 2 or any(r.point_uv is None for r in result.values()):
+                    self.publish('click_failed', '人工点击取消，请重试或放弃')
+                    return Status.RUNNING
+                points = bb.read('tooltip_points'); focus = bb.read('tooltip_focus')
+                for view, r in result.items():
+                    correction = float(np.linalg.norm(np.asarray(r.point_uv) - points[view])) if points[view] is not None else None
+                    scale = view_settings()['main_um_per_px' if view == 'front' else 'aux_um_per_px'] / 1000
+                    info = dict(camera=view, tool=session['tool'], auto_point=points[view], manual_point=r.point_uv,
+                                correction_px=correction, correction_mm=correction * scale if correction is not None else None,
+                                source=r.source, elapsed_s=r.elapsed_s)
+                    self.ctx.events.emit('tip_click', task_id=bb.read('task_id'), **info)
+                    session.setdefault('tip_clicks', []).append(info)
+                    points[view] = r.point_uv; focus[view].update(coarse=False, focused=True, width_px=None)
+                bb.write('tooltip_points', points, self.name); bb.write('tooltip_focus', focus, self.name)
+                archive = getattr(self.ctx.events, 'archive', None)
+                if archive:
+                    visual = view_settings(); paths = session['images'][-1]
+                    for view in bb.read('tooltip_baseline').views:
+                        paths['overlay'][view.name] = archive.calibration(bb.read('tooltip_images')[view.name], session['tool'], bb.read('task_id'), paths['iteration'], view.name,
+                                            points[view.name], view.target_uv, paths['raw'].get(view.name), focus=focus,
+                                            um_per_px=visual['main_um_per_px' if view.name == 'front' else 'aux_um_per_px'], radius_mm=visual['main_tol_mm'], manual=True,
+                                            threshold=self.ctx.config.tool_calibration.detection[view.name]['threshold'])
+                self.manual = True
+                return self.prepare()
+            from .tool_offset import reader
+            allowed = {'tooltip_abort', 'tooltip_click'}
+            if not self.too_large: allowed.add('tooltip_confirm_result' if self.aligned else 'tooltip_confirm_move')
+            command = reader(self.ctx).poll(allowed)
+            if not command: return Status.RUNNING
+            name, _ = command
+            if name == 'tooltip_abort': fail('用户放弃')
+            if name == 'tooltip_click':
+                parent, child = mp.get_context('spawn').Pipe(False); self.connection = parent
+                self.process = mp.get_context('spawn').Process(target=_click_process, args=(child, bb.read('tooltip_images'), bb.read('tooltip_points'), session['tool']))
+                self.process.start(); child.close(); self.publish('clicking', '请依次点选两台相机的针尖'); return Status.RUNNING
+            now = self.ctx.events.clock().isoformat()
+            row = dict(session.pop('pending'), iteration=len(session['rounds']) + 1, confirmed_at=now)
+            if self.aligned:
+                row['target'] = None
+            session['rounds'].append(row)
+            save_session_record(self.ctx, session, '进行中')
+            self.ctx.events.emit('tooltip_confirmed', task_id=bb.read('task_id'), tool=session['tool'], **row)
+            if self.aligned:
+                session['ended'] = True; func = 111 if session['tool'] == 1 else 121; coords = {}
+                self.ctx.events.emit('tooltip_aligned', task_id=bb.read('task_id'), tool=session['tool'], iterations=session['iterations'])
+                self.publish('wait130', '等待 PLC 130')
+            else:
+                if session['probing']: session['probe_samples'].append(self.sample)
+                else: session['iterations'] += 1
+                func = (110 if session['tool'] == 1 else 120) if session['offset'] else (100 if session['tool'] == 1 else 101)
+                target = tuple(float(v) for v in self.target)
+                session.update(offset=True, last_position=target)
+                coords = {f"calibration{session['tool']}_xyz": target}
+                self.ctx.events.emit('tooltip_offset', task_id=bb.read('task_id'), tool=session['tool'], coordinates=target, iteration=session['iterations'])
+                self.publish('wait_plc', '等待 PLC 到位')
+            bb.write('reply_func', func, self.name); bb.write('reply_coordinates', coords, self.name); bb.write('reply_tool', session['tool'], self.name)
+            return Status.SUCCESS
+        except Exception as exc:
+            bb.write('error', str(exc), self.name); return Status.FAILURE
+
+    def on_halted(self):
+        if self.process is not None:
+            if self.process.is_alive(): self.process.terminate()
+            self.process.join(timeout=.1); self.connection.close(); self.process = None
 
 
 def calibration_branch(ctx: FlowContext, start: bool) -> TreeNode:
@@ -498,7 +727,7 @@ def calibration_branch(ctx: FlowContext, start: bool) -> TreeNode:
                    "request_func": bb.read("request_func"), "actual": bb.read("actual"),
                    "target": bb.read("tooltip_session")["last_position"],
                    "iteration": len(bb.read("tooltip_session")["images"]) + 1}, "tooltip_images", name="采集对刀双视图"),
-        ArchiveTips(ctx), ReliableTips(ctx), PrepareCalibrationReply(ctx),
+        ArchiveTips(ctx), ConfirmCalibration(ctx),
     ])
     return Fallback([Sequence(steps, name="对刀迭代"), CalibrationFailed(ctx)], name="对刀业务或 131")
 

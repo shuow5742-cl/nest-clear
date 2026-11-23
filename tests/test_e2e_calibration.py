@@ -24,12 +24,24 @@ VIEWS = (
 
 
 @pytest.fixture
-def rig(tmp_path: Path):
+def rig(tmp_path: Path, monkeypatch):
     """建立可用基准，并让模拟相机根据 PLC 实时坐标生成剪影。"""
     for tool in (1, 2):
         save_baseline(ToolTipBaseline(f"tool{tool}", P0, VIEWS, (1.0, 2.0, 3.0) if tool == 1 else (0.0, 0.0, 0.0)), tmp_path / f"tool{tool}_baseline.yaml", tool=tool, source="test")
     initialize_tools(tmp_path / "tools.yaml")
     save_tools(tmp_path / "tools.yaml", 1, (1.0, 2.0, 3.0), source="test")
+    from nest_clear.flow.calibration import ConfirmCalibration
+    from nest_clear.tooloffset.commands import send
+    publish = ConfirmCalibration.publish
+    def auto_confirm(node, phase, message, **fields):
+        publish(node, phase, message, **fields)
+        if phase in ('probe', 'confirm_move'):
+            send(node.ctx.events.directory, 'tooltip_confirm_move')
+        elif phase == 'in_range':
+            send(node.ctx.events.directory, 'tooltip_confirm_result')
+        elif phase == 'limit':
+            send(node.ctx.events.directory, 'tooltip_abort')
+    monkeypatch.setattr(ConfirmCalibration, 'publish', auto_confirm)
     with FakePLC() as plc:
         config = load_config(ROOT / "config/nest_clear.yaml")
         tc = replace(config.tool_calibration, directory=str(tmp_path), cameras={"front": {"backend": "mock"}, "side": {"backend": "mock"}})
@@ -330,6 +342,4 @@ def test_calibration_quality_limits(rig, monkeypatch, kind, hard):
     rows = [json.loads(line) for line in next((path / 'runs').glob('*/*/events.jsonl')).read_text().splitlines()]
     assert any(r['event'] == 'tooltip_quality_warning' and r['task_id'] == task for r in rows)
     if hard:
-        reason = next(r['reason'] for r in rows if r['event'] == 'tooltip_failed' and r['task_id'] == task)
-        actual, limit = {'residual': (residual, cfg.max_residual_mm), 'condition': (condition, cfg.max_condition), 'z': (disagreement, cfg.z_disagreement_mm)}[kind]
-        assert str(actual) in reason and str(limit) in reason
+        assert any(r['event'] == 'tooltip_state' and r.get('phase') == 'limit' for r in rows)

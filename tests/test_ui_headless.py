@@ -179,7 +179,23 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert ui.baseline_tools[0].options['state'] == 'disabled'
         assert ui.baseline_tools[0].options['style'] == 'OffsetSelected.TButton'
         assert len(ui.table.rows) == 3
-        assert len(ui.tiptable.rows) == 2
+        ui.update_tip({'phase':'confirm_move', 'tool':1, 'rounds':[{'iteration':1, 'stage':'对准', 'pixels':{}, 'delta':[.1,0,0], 'target':[1,2,3]}]})
+        assert len(ui.tiptable.rows) == 1
+        assert ui.tip_buttons['tooltip_confirm_move'].options['state'] == 'normal'
+        assert ui.tip_buttons['tooltip_confirm_result'].options['state'] == 'disabled'
+        ui.update_tip({'phase':'limit', 'tool':1, 'message':'修正量过大'})
+        assert ui.tip_buttons['tooltip_confirm_move'].options['state'] == 'disabled'
+        assert ui.tip_buttons['tooltip_click'].options['state'] == 'normal'
+        ui.update_tip({'phase':'done', 'tool':1, 'rounds':[{'iteration':2,'stage':'对准', 'pixels':{'front':[320,241],'side':[321,242]}, 'deviation_mm':{'front':[.01,.02],'side':[-.03,.04]}, 'delta':[.01,.02,.03], 'target':None, 'confirmed_at':'2026-11-22T12:34:56.123456-08:00'}], 'jacobian_status':'已存', 'old_compensation':[1,2,3], 'new_compensation':[1.1,2,3], 'compensation_difference':[.1,0,0]})
+        values = ui.tiptable.rows['0']['values']
+        assert values[3] == '主 +0.010/+0.020 辅 -0.030/+0.040'
+        assert values[5] == '—' and values[7] == '12:34:56'
+        assert ui.tip_message.options['fg'] == app.COLORS['green']
+        assert ui.tip_message.options['font'] == ui.tip_heading.options['font']
+        assert 'None' not in ui.tip_details.options['text'] and '[' not in ui.tip_details.options['text'] and '{' not in ui.tip_details.options['text']
+        ui.update_tip({'phase':'fail', 'tool':1, 'message':'检测失败', 'rounds':[]})
+        assert ui.tip_details.options['text'].startswith('第 1 轮（已失败）')
+        ui.update_tip({'phase':'limit', 'tool':1, 'message':'修正量过大'})
         assert ui.process_table.options['height'] == 2
         assert ui.pick_values['视野'].options['text'] == '11/24'
         assert ui.cam_step.values_data['检出角点'] == '35/40'
@@ -196,7 +212,7 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert {'Z0', 'Z-5', 'Z-2.5', 'Z+2.5', 'Z+5'} == {t.split(' · ')[0] for t in plan_titles if t and t.startswith('Z')}
         assert ui.reply_table.options['height'] == 5
         assert len(ui.reply_table.rows) == 5
-        assert ui.tip_result.values_data['迭代次数'] == 2
+        assert ui.tip_message.options['text'] == '修正量过大'
         target = tmp_path / 'screen' / (page + '.png')
         class Capture:
             def save(self, path): path.write_bytes(b'screenshot')

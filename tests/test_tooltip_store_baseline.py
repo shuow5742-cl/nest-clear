@@ -49,7 +49,25 @@ def test_pending_jacobian_roundtrip(tmp_path):
         assert store.load_baseline(path) == baseline
 
 
-def test_pending_jacobian_rejected_before_calibration(tmp_path, monkeypatch):
+def test_jacobian_measurement_metadata_roundtrip(tmp_path):
+    from nest_clear.tooltip import schema
+
+    baseline = ToolTipBaseline(
+        "tool1", [1, 2, 3],
+        [ViewCalib("front", [10, 20], [[1, 0, 0], [0, 0, 1]])],
+        jacobian_measured_at="2026-11-22T12:00:00-08:00",
+        jacobian_session="session-42",
+    )
+    for name in ("schema", "store"):
+        path = tmp_path / (name + ".yaml")
+        if name == "schema":
+            schema.save_baseline(baseline, path)
+        else:
+            store.save_baseline(baseline, path, tool=1, source="test")
+        assert store.load_baseline(path) == baseline
+
+
+def test_pending_jacobian_starts_probe(tmp_path, monkeypatch):
     from datetime import datetime
     from types import SimpleNamespace
     from nest_clear.flow.calibration import StartCalibration, CalibrationFailed
@@ -69,12 +87,8 @@ def test_pending_jacobian_rejected_before_calibration(tmp_path, monkeypatch):
                              tool_calibration=SimpleNamespace(enabled=True, directory=tmp_path))
     node = StartCalibration(SimpleNamespace(events=events, config=config))
     node._blackboard = Blackboard()
-    assert node.on_start() == Status.FAILURE
-    monkeypatch.setattr('nest_clear.flow.calibration.write_tooltip_summary', lambda *args: None)
-    failed = CalibrationFailed(SimpleNamespace(events=events)); failed._blackboard = node._blackboard
-    failed.perform()
-    assert node._blackboard.read('reply_func') == 131
-    assert '对刀基准缺少点动测量数据（雅可比），待换针对刀方案确定' in node._blackboard.read('error')
+    assert node.on_start() == Status.SUCCESS
+    assert node._blackboard.read('tooltip_session')['probing'] is True
 
 
 @pytest.mark.parametrize("kind", ["baseline", "tools"])
