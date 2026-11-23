@@ -546,6 +546,12 @@ class App:
         exposure_controls.columnconfigure(0, weight=1)
         self.exposure_button = ttk.Button(exposure_controls, text='曝光自测', command=self.toggle_exposure_sweep)
         self.exposure_button.grid(row=0, column=1, sticky='e')
+        self.wb_button = ttk.Button(exposure_controls, text='白平衡', command=self.start_white_balance)
+        self.wb_button.grid(row=0, column=2, sticky='e')
+        self.wb_message = self.label(self.focus_panel, '', font=self.theme.table)
+        self.wb_message.config(justify='left', anchor='w', wraplength=430)
+        self.wb_message.grid(row=10, column=0, sticky='ew')
+        self.wb_pending = False
         actions = tk.Frame(self.focus_panel, bg=WHITE); actions.grid(row=9, column=0, sticky='ew')
         ttk.Button(actions, text='重置峰值', command=self.reset_focus).grid(row=0, column=0)
         self.label(actions, '备注').grid(row=0, column=1, padx=(5, 2))
@@ -1302,6 +1308,8 @@ class App:
                 for row, weight in enumerate((3, 3, 3, 5, 2)): self.cam_right.rowconfigure(row, weight=weight)
         if focus_on:
             self.update_focus(self.preview_data)
+            if not controls['white_balance_enabled']:
+                self.wb_button.config(state='disabled')
         self.focus_was_on = focus_on
         text = ('不可用：' + controls['reason'] if controls['reason'] else
                 f"预览中 {self.preview_data.get('fps', 0)} fps" if controls['on'] else
@@ -1328,6 +1336,32 @@ class App:
         tmp = path.with_suffix('.tmp')
         tmp.write_text(json.dumps({'seq': time.time_ns(), 'action': action, **fields}), encoding='utf-8')
         os.replace(tmp, path)
+        return json.loads(path.read_text(encoding='utf-8'))['seq']
+
+    def start_white_balance(self):
+        from tkinter import messagebox
+        if messagebox.askokcancel('白平衡', '请在视野中央放置 18% 灰卡并保持光源与标定/挑毛时一致'):
+            self.wb_pending = True
+            self.wb_button.config(state='disabled', text='白平衡中…')
+            self.wb_message.config(text='白平衡中…', fg=INK)
+            self.wb_request = self.focus_action('white_balance')
+
+    def update_white_balance(self, p):
+        wb = p.get('white_balance') or {}
+        state = wb.get('state')
+        if wb.get('request_seq') == getattr(self, 'wb_request', None) and state: self.wb_pending = False
+        running = state == 'running' or self.wb_pending
+        sweep_running = (p.get('exposure_sweep') or {}).get('state') == 'running'
+        self.wb_button.config(state='disabled' if running or sweep_running else 'normal', text='白平衡中…' if running else '白平衡')
+        if running:
+            self.wb_message.config(text='白平衡中…', fg=INK)
+        elif state == 'success':
+            r, g, b = wb['balance_ratio']; m = wb['metrics']
+            message = f"白平衡成功 R={r:.3f} G={g:.3f} B={b:.3f}，偏色 R/G {m['r_g']:.3f} B/G {m['b_g']:.3f}，已保存，主程序下次启动生效"
+            warnings = m.get('warnings') or []
+            self.wb_message.config(text=message + ('\n警告：' + '；'.join(warnings) if warnings else ''), fg='#b54708' if warnings else '#168448')
+        elif state == 'fail':
+            self.wb_message.config(text='白平衡失败：' + wb.get('reason', ''), fg=COLORS['red'])
 
     def toggle_exposure_sweep(self):
         sweep = self.preview_data.get('exposure_sweep') or {}
@@ -1363,7 +1397,7 @@ class App:
     def update_exposure(self, p):
         sweep = p.get('exposure_sweep') or {}
         running = sweep.get('state') == 'running'
-        self.exposure_button.config(text='取消' if running else '曝光自测')
+        self.exposure_button.config(text='取消' if running else '曝光自测', state='disabled' if (p.get('white_balance') or {}).get('state') == 'running' or self.wb_pending else 'normal')
         self.exposure_mode.config(state='disabled' if running else 'readonly')
         if (running or (p.get('demo_exposure') and self.exposure_cache is None)) and not self.exposure_visible: self.show_exposure_results()
         if not sweep: return
@@ -1421,7 +1455,8 @@ class App:
         self.focus_bar.delete('all'); w = max(self.focus_bar.winfo_width(), 100)
         self.focus_bar.create_rectangle(0, 0, w * min(pct, 100) / 100, 16, fill=color, outline='')
         self.update_exposure(p)
-        self.focus_details.config(text=(f"曝光 {p.get('exposure_us')} us（{p.get('exposure_source', '配置')}）  增益 {p.get('gain_db')} dB\n"
+        self.update_white_balance(p)
+        self.focus_details.config(text=(f"曝光 {p.get('exposure_us')} us（{p.get('exposure_source', '配置')}）  增益 {p.get('gain_db')} dB  白平衡 {p.get('white_balance_source', '配置')}\n"
             f"均值 {p['mean']:.1f}  P1/P99 {p['p1']:.0f}/{p['p99']:.0f}  饱和 {p['saturated_pct']:.2f}%  过暗 {p['dark_pct']:.2f}%"))
         self.focus_alert.config(text='  '.join(x for x in (p.get('exposure_hint'), p.get('tilt')) if x),
                                 fg=COLORS['red'] if p.get('saturated_pct', 0) > .5 else '#b54708')

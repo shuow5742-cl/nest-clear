@@ -87,6 +87,14 @@ def run_preview(config, mode="preview"):
                                 last_action = json.loads(action_path.read_text(encoding='utf-8')).get('seq')
                             except (OSError, ValueError):
                                 pass
+                        elif action.get('action') == 'white_balance':
+                            from nest_clear.preview.white_balance import run_white_balance
+                            def publish_wb(result):
+                                values['white_balance'] = dict(result, request_seq=last_action)
+                                snapshot = dict(values, mode=mode, frames=frames, error=None)
+                                atomic_write(status_path, json.dumps(snapshot, ensure_ascii=False).encode())
+                            run_white_balance(worker, settings['white_balance'], config.camera_calibration,
+                                              config.white_balance_override_path, root, publish_wb)
                         elif action.get('action') == 'apply_exposure':
                             try:
                                 from nest_clear.preview.exposure import save_exposure
@@ -107,7 +115,7 @@ def run_preview(config, mode="preview"):
                             if do_reset:
                                 focus_session.reset()
                             result = focus_session.update(frame)
-                            result.update(exposure_us=frame_exposure, exposure_source=config.exposure_source, gain_db=config.gain_db, analysis_time=time.time())
+                            result.update(exposure_us=frame_exposure, exposure_source=config.exposure_source, white_balance_source=(('自测 ' + values['white_balance']['time']) if values.get('white_balance', {}).get('state') == 'success' else config.white_balance_source), gain_db=config.gain_db, analysis_time=time.time())
                             values.update(result)
                         except Exception:
                             import logging

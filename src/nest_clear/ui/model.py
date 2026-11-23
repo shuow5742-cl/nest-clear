@@ -181,7 +181,7 @@ def preview_controls(status, age_s):
     on = bool(preview.get('on'))
     mode = preview.get('mode', 'preview')
     enabled = live and not running
-    return {'enabled': enabled, 'on': on, 'mode': mode, 'preview_enabled': enabled and (not on or mode == 'preview'), 'focus_enabled': enabled and (not on or mode == 'focus'), 'reason': reason}
+    return {'enabled': enabled, 'on': on, 'mode': mode, 'preview_enabled': enabled and (not on or mode == 'preview'), 'focus_enabled': enabled and (not on or mode == 'focus'), 'white_balance_enabled': enabled and on and mode == 'focus', 'reason': reason}
 
 
 def edge_corner_label(corner):

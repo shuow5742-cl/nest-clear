@@ -143,6 +143,8 @@ class Config:
     pick_accuracy: dict[str, Any] = field(default_factory=dict)
     exposure_override_path: str = ""
     exposure_source: str = "配置"
+    white_balance_override_path: str = ""
+    white_balance_source: str = "配置"
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -493,6 +495,20 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             exposure_source = '自测 ' + str(override.get('time') or '时间未知')
         except (OSError, yaml.YAMLError, ValueError) as exc:
             _fail('camera_exposure', str(exc))
+    wb_path = exposure_path.parent / 'camera_white_balance.yaml'
+    wb_source = '配置'
+    if wb_path.exists():
+        try:
+            with wb_path.open(encoding='utf-8') as f:
+                override = yaml.safe_load(f)
+            if not isinstance(override, dict):
+                raise ValueError('白平衡覆盖文件须为映射')
+            balance = _vector(override.get('balance_ratio'), 'camera_white_balance.balance_ratio', 3)
+            if any(x <= 0 for x in balance):
+                raise ValueError('白平衡参数须为正数')
+            wb_source = '自测 ' + str(override.get('time') or '时间未知')
+        except (OSError, yaml.YAMLError, ValueError) as exc:
+            _fail('camera_white_balance', str(exc))
     if not isinstance(v["pixels"], list):
         _fail("vision.pixels", "应为 [u, v, score] 列表")
     pixels = tuple(_vector(item, "vision.pixels", 3) for item in v["pixels"])
@@ -629,7 +645,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _fail("ui", "开关须为布尔值，刷新间隔须为不小于 50 的整数")
     if not isinstance(root["ui_preview"], dict):
         _fail("ui_preview", "应为映射")
-    preview_data = _mapping({"interval_s": .15, "width": 960, "jpeg_quality": 75, "analysis_interval_s": 1.0, "exposure_sweep": {}, **root["ui_preview"]}, "ui_preview", ["interval_s", "width", "jpeg_quality", "analysis_interval_s", "exposure_sweep"])
+    preview_data = _mapping({"interval_s": .15, "width": 960, "jpeg_quality": 75, "analysis_interval_s": 1.0, "exposure_sweep": {}, "white_balance": {}, **root["ui_preview"]}, "ui_preview", ["interval_s", "width", "jpeg_quality", "analysis_interval_s", "exposure_sweep", "white_balance"])
     preview_data["interval_s"] = _number(preview_data["interval_s"], "ui_preview.interval_s", True)
     preview_data["analysis_interval_s"] = _number(preview_data["analysis_interval_s"], "ui_preview.analysis_interval_s", True)
     if type(preview_data["width"]) is not int or preview_data["width"] < 100 or type(preview_data["jpeg_quality"]) is not int or not 1 <= preview_data["jpeg_quality"] <= 100:
@@ -643,6 +659,15 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     if sweep['max_us'] <= sweep['min_us'] or type(sweep['steps']) is not int or not 2 <= sweep['steps'] <= 100 or type(sweep['settle_frames']) is not int or not 0 <= sweep['settle_frames'] <= 20:
         _fail('ui_preview.exposure_sweep', '曝光范围须递增，steps 须为 2–100，settle_frames 须为 0–20')
     preview_data['exposure_sweep'] = sweep
+    from nest_clear.preview.white_balance import DEFAULTS
+    wb = preview_data['white_balance']
+    if not isinstance(wb, dict): _fail('ui_preview.white_balance', '须为映射')
+    wb = _mapping({**DEFAULTS, **wb}, 'ui_preview.white_balance', list(DEFAULTS))
+    for key in wb:
+        wb[key] = _number(wb[key], 'ui_preview.white_balance.' + key, True)
+    if not (wb['roi_fraction'] <= 1 and wb['max_saturated_fraction'] <= 1 and wb['min_green'] < wb['max_green'] <= 255 and wb['max_p99'] <= 255):
+        _fail('ui_preview.white_balance', '阈值范围无效')
+    preview_data['white_balance'] = wb
     return Config(
         plc,
         scan,
@@ -665,5 +690,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _string(record["machine_id"], "record.machine_id"),
         camcal,
         UIConfig(**ui_data),
-        preview_data, offset, accuracy, str(exposure_path), exposure_source,
+        preview_data, offset, accuracy, str(exposure_path), exposure_source, str(wb_path), wb_source,
     )
