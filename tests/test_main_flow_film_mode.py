@@ -208,10 +208,70 @@ def test_film_fine_out_of_range_overlay_is_blue():
 def test_mode_can_change_only_when_idle():
     from nest_clear.film_mode import may_change_mode
     assert may_change_mode({'pid': 1, 'child_state': '未启动'}, {})
-    assert may_change_mode({'pid': 1, 'child_pid': 2}, {'mode': '空闲'})
+    assert may_change_mode({'pid': 1, 'child_pid': 2}, {'mode': '空闲'}, False)
+    assert not may_change_mode({'pid': 1, 'child_pid': 2}, {'mode': '空闲'}, True)
     assert not may_change_mode({'pid': 1, 'child_pid': 2}, {'mode': '挑毛中'})
+    assert may_change_mode({'pid': 1, 'child_pid': 2}, {'mode': '挑毛中'}, False)
+    assert not may_change_mode({'pid': 1, 'child_pid': 2}, {'mode': '相机标定中'}, False)
     assert not may_change_mode({'pid': 1, 'child_state': '启动中'}, {})
     assert not may_change_mode({}, {})
+
+
+def test_terminal_replies_release_switch(tmp_path):
+    import os
+    import time
+    from nest_clear.film_mode import start_tray, tray_active, may_change_mode
+    from nest_clear.flow.leaves import CommitReply
+    from nest_clear.flow.modes import Mode
+    from nest_clear.record.events import EventRecorder
+    from test_hair_integration import Board
+    events = EventRecorder(tmp_path, run=True)
+    supervisor = {'pid': 1, 'child_pid': os.getpid()}
+    for code in (9, 10):
+        start_tray(tmp_path)
+        events.status.observe({'event': 'mode_change', 'mode': '挑毛中'})
+        assert not may_change_mode(supervisor, events.status.data, tray_active(tmp_path, os.getpid()))
+        board = Board(committed_func=code, reply_func=code, mode=Mode.PICKING,
+                      started=time.monotonic(), task_id=1, request_func=20, next_index=1)
+        leaf = CommitReply(events); leaf._blackboard = board; leaf.perform()
+        assert not tray_active(tmp_path, os.getpid())
+        assert events.status.data['mode'] == '挑毛中'
+        assert may_change_mode(supervisor, events.status.data, tray_active(tmp_path, os.getpid()))
+        assert board.read('mode') == Mode.PICKING
+        start_tray(tmp_path)
+        assert not may_change_mode(supervisor, events.status.data, tray_active(tmp_path, os.getpid()))
+
+
+def test_main_start_clears_stale_tray(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    from nest_clear import main
+    state = tmp_path / 'state'; state.mkdir()
+    marker = state / 'film_tray.pid'; marker.write_text('-1')
+    monkeypatch.setattr(main, 'load_config', lambda path: SimpleNamespace(record_directory=tmp_path))
+    def construct(*args, **kwargs):
+        assert not marker.exists()
+        raise RuntimeError('stop after startup check')
+    monkeypatch.setattr(main, 'Application', construct)
+    with pytest.raises(RuntimeError, match='startup check'):
+        main.run()
+
+
+def test_main_exception_cleans_tray_even_if_close_fails(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    from nest_clear import main
+    from nest_clear.film_mode import start_tray, tray_active
+    import os
+    monkeypatch.setattr(main, 'load_config', lambda path: SimpleNamespace(record_directory=tmp_path))
+    class Application:
+        def __init__(self, *args, **kwargs): start_tray(tmp_path)
+        def step(self, gate): raise RuntimeError('interrupted')
+        def close(self): raise RuntimeError('close failed')
+    monkeypatch.setattr(main, 'Application', Application)
+    with pytest.raises(RuntimeError, match='close failed'):
+        main.run()
+    assert not tray_active(tmp_path, os.getpid())
 
 
 def test_film_work_request_independent_z_and_missing_z_raises(tmp_path):

@@ -21,8 +21,8 @@ class Widget:
     def winfo_rooty(self): return 7
     def rowconfigure(self, index, **kwargs): self.row_options.setdefault(index, {}).update(kwargs)
     def columnconfigure(self, *args, **kwargs): pass
-    def grid(self, *args, **kwargs): pass
-    def grid_remove(self): pass
+    def grid(self, *args, **kwargs): self.visible = True
+    def grid_remove(self): self.visible = False
     def tkraise(self): pass
     def grid_configure(self, **kwargs): self.options.update(kwargs)
     def grid_propagate(self, *args): pass
@@ -101,7 +101,7 @@ def test_demo_images_use_camera_aspect_ratio(tmp_path):
 def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     from nest_clear.ui import app
     write_demo(tmp_path, initial=True)
-    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text'):
+    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
         monkeypatch.setattr(app.tk, name, Widget)
     for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox'):
         monkeypatch.setattr(app.ttk, name, Widget)
@@ -278,6 +278,41 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
             assert ui.tabs.selected == 1
             ui.file_data = original_file_data
             ui.refresh()
+        with patch('nest_clear.film_mode.read_mode', return_value=True):
+            ui.refresh()
+            assert ui.film_banner.visible
+            assert ui.film_button.options['fg'] == '#b00020'
+        original_file_data = ui.file_data
+        ui.file_data = lambda path: ({'mode': '挑毛中', 'film_mode': True} if path.name == 'main_status.json' else original_file_data(path))
+        with patch('nest_clear.film_mode.read_mode', return_value=False):
+            ui.refresh()
+            assert not ui.film_banner.visible
+        import os
+        from nest_clear.film_mode import start_tray, end_tray, read_mode
+        supervisor = {'pid': 1, 'child_pid': os.getpid()}
+        main = {'mode': '挑毛中', 'film_mode': True}
+        ui.file_data = lambda path: main if path.name == 'main_status.json' else supervisor
+        end_tray(tmp_path)
+        ui.refresh()
+        assert ui.film_button.options['state'] == 'normal'
+        with patch.object(app, 'read_json', side_effect=lambda path: main if path.name == 'main_status.json' else supervisor):
+            previous = read_mode(tmp_path)
+            ui.toggle_film_mode()
+            assert read_mode(tmp_path) is not previous
+            start_tray(tmp_path)
+            with patch.object(app.messagebox, 'showwarning') as warning:
+                ui.toggle_film_mode()
+                warning.assert_called_once()
+            assert read_mode(tmp_path) is not previous
+        ui.refresh()
+        assert ui.film_button.options['state'] == 'disabled'
+        assert ui.film_reason.options['text'] == '挑毛进行中，本盘结束后可切换'
+        end_tray(tmp_path)
+        main['mode'] = '相机标定中'
+        ui.refresh()
+        assert ui.film_button.options['state'] == 'disabled'
+        assert ui.film_reason.options['text'] == '主程序正在执行其他任务，空闲后可切换'
+        ui.file_data = original_file_data
         target = tmp_path / 'screen' / (page + '.png')
         class Capture:
             def save(self, path): path.write_bytes(b'screenshot')
@@ -432,7 +467,7 @@ def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
     }), encoding='utf-8')
     os.utime(sup_file, ns=(old_ns, old_ns))
 
-    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text'):
+    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
         monkeypatch.setattr(app.tk, name, Widget)
     for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox'):
         monkeypatch.setattr(app.ttk, name, Widget)

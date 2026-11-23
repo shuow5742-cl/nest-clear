@@ -34,12 +34,12 @@ def write_mode(root, enabled):
             temporary.unlink(missing_ok=True)
 
 
-def may_change_mode(supervisor, main):
-    """主程序未运行，或已明确报告空闲时允许切换。"""
+def may_change_mode(supervisor, main, active_tray=True):
+    """主程序未运行、空闲或挑毛盘已结束时允许切换。"""
     if not isinstance(supervisor, dict) or not supervisor.get('pid'):
         return False
     if supervisor.get('child_pid'):
-        return main.get('mode') == '空闲'
+        return not active_tray and main.get('mode') in ('空闲', '挑毛中')
     return supervisor.get('child_state') not in ('启动中', '运行', '就绪')
 
 
@@ -76,3 +76,14 @@ def tray_active(root, child_pid):
 def end_tray(root):
     with mode_lock(root):
         (Path(root) / 'state' / 'film_tray.pid').unlink(missing_ok=True)
+
+
+def clear_stale_tray(root):
+    with mode_lock(root):
+        path = Path(root) / 'state' / 'film_tray.pid'
+        try:
+            owner = int(path.read_text(encoding='ascii'))
+        except (OSError, ValueError):
+            owner = None
+        if owner != os.getpid():
+            path.unlink(missing_ok=True)

@@ -383,10 +383,11 @@ class CommitReply(Instant):
             except Exception as exc:
                 record_image_error(self.events, "精定位已提交应答叠加图", exc, bb.read("task_id"))
             bb.write("fine_render_data", None, self.name)
-        if func in (9, 10):
+        if func in (9, 10) or (func == 999 and cycle is None):
             from nest_clear.film_mode import end_tray
             try:
                 end_tray(self.events.directory)
             except (OSError, AttributeError):
                 logger.exception("清理菲林盘状态失败")
+        if func in (9, 10):
             self.events.emit("tray_end", task_id=bb.read("task_id"), scans=bb.read("next_index"))

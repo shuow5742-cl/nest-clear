@@ -274,7 +274,7 @@ class App:
             logger.warning(FONT_WARNING)
             banner = tk.Label(self.root, text=FONT_WARNING, bg='#fef0c7', fg='#7a4b00', font=self.theme.status, anchor='w', padx=8, pady=4)
             banner.grid(row=0, column=0, sticky='ew', padx=6, pady=(4, 0))
-        self.film_banner = tk.Label(self.root, text='主流程测试模式（菲林片）：识别菲林片目标，非燕窝挑毛',
+        self.film_banner = tk.Label(self.root, text='主流程测试模式（菲林片）已开启：识别菲林片目标，非燕窝挑毛',
                                     bg='#b00020', fg='white', font=self.theme.status, anchor='center', padx=8, pady=5)
         self.tail = EventTail(root); self.pictures = []; self.cache = {}; self.events = []; self.files = {}
         self.last_mode = read_json(main_status_file(self.directory)).get('mode') if page is not None else None
@@ -396,8 +396,10 @@ class App:
             value = self.label(pick_content, '—', font=self.theme.mono)
             value.grid(row=r, column=c * 2 + 1, sticky='w'); self.pick_values[title] = value
         pick.grid_configure(columnspan=2)
-        self.film_button = ttk.Button(pick.master, text='主流程测试模式（菲林片）', command=self.toggle_film_mode)
+        self.film_button = tk.Button(pick.master, text='主流程测试模式（菲林片）', command=self.toggle_film_mode)
         self.film_button.grid(row=0, column=1, sticky='e', padx=(0, 8))
+        self.film_reason = self.label(pick.master, '', fg=MUTED)
+        self.film_reason.grid(row=1, column=1, sticky='e', padx=(0, 8))
         reply = self.card(left, '最近应答', 2, 0, columnspan=2)
         self.reply_table = self.table_widget(reply, ('时间', 'Task_ID', '功能码', '原因'),
                                              (80, 65, 85, 120), stretch=('原因',), height=5)
@@ -1166,8 +1168,9 @@ class App:
             with mode_lock(self.directory):
                 supervisor = read_json(supervisor_state_file(self.directory))
                 main = read_json(main_status_file(self.directory))
-                if not may_change_mode(supervisor, main) or tray_active(self.directory, supervisor.get('child_pid')):
-                    messagebox.showwarning('无法切换', '仅主程序空闲或未运行时可以切换。', parent=self.root)
+                busy = tray_active(self.directory, supervisor.get('child_pid'))
+                if not may_change_mode(supervisor, main, busy):
+                    messagebox.showwarning('无法切换', '请等待本盘或当前任务结束后再切换。', parent=self.root)
                     return
                 previous = read_mode(self.directory)
                 write_mode(self.directory, not previous)
@@ -1184,13 +1187,25 @@ class App:
             enabled = read_mode(self.directory)
         except (OSError, ValueError):
             enabled = False
-        active = enabled or (main.get('mode') == '挑毛中' and main.get('film_mode') is True)
-        if active:
+        if enabled:
             self.film_banner.grid(row=0, column=0, sticky='ew', padx=6, pady=(4, 0))
         else:
             self.film_banner.grid_remove()
+        busy = tray_active(self.directory, supervisor.get('child_pid'))
+        allowed = may_change_mode(supervisor, main, busy) and not busy
         self.film_button.config(text='主流程测试模式（菲林片）：' + ('开' if enabled else '关'),
-                                state='normal' if may_change_mode(supervisor, main) and not tray_active(self.directory, supervisor.get('child_pid')) else 'disabled')
+                                fg='#b00020' if enabled else '#222222',
+                                disabledforeground='#b00020' if enabled else '#777777',
+                                state='normal' if allowed else 'disabled')
+        if allowed:
+            reason = ''
+        elif busy:
+            reason = '挑毛进行中，本盘结束后可切换'
+        elif supervisor.get('child_pid') and main.get('mode'):
+            reason = '主程序正在执行其他任务，空闲后可切换'
+        else:
+            reason = '主程序状态未就绪或正在运行，空闲后可切换'
+        self.film_reason.config(text=reason)
         mode = main.get('mode')
         if mode != self.last_mode:
             self.last_mode = mode

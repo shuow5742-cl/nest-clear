@@ -421,6 +421,8 @@ def run(
 ) -> None:
     """持续处理各盘；暂停时仍按节拍向父程序报告活性。"""
     config = load_config(config_path)
+    from nest_clear.film_mode import clear_stale_tray, end_tray
+    clear_stale_tray(config.record_directory)
     app = Application(config, config_path, events=events)
     if gate is None and (supervised or supervisor_state_file(config.record_directory).exists()):
         gate = SupervisorGate(config.record_directory, mark=app.mark)
@@ -429,7 +431,10 @@ def run(
             app.step(gate)
             time.sleep(0.02)
     finally:
-        app.close()
+        try:
+            app.close()
+        finally:
+            end_tray(config.record_directory)
 
 
 def main() -> None:
