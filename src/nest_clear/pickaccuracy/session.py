@@ -9,10 +9,8 @@ from .store import evaluate
 
 DEFAULTS = dict(center_tol_mm=.5, infield_warn_mm=.05, const_max_dev_mm=.05,
                 const_std_mm=.025, repeat_tol_mm=.03, verify_tol_mm=.05,
-                outlier_mm=.1, max_points=40, calib_tool_z_mm=-10.)
-A = (2, 3, 5, 10, 12, 21, 26, 28, 29)
-B = (2, 3, 4, 5, 10, 11, 12, 13, 18, 19, 20, 21, 26, 27, 28, 29)
-SIMPLE = (2, 5, 26, 29, 12)
+                outlier_mm=.1, max_points=40, calib_tool_z_mm=-10.,
+                min_points_a=9, min_points_b=16, min_infield_corners=4)
 
 
 class Session(OffsetSession):
@@ -25,29 +23,85 @@ class Session(OffsetSession):
         self.phase = 'overview'; self.samples = []; self.edges = []; self.skipped = []
         self.queue = []; self.candidate = None; self.sent = None; self.plan = None
         self.simple = bool(tool == 2 and prior)
-        self.queue = [(i, 'simple' if self.simple else 'A', None) for i in (SIMPLE if self.simple else A)]
+        self.plans = {}
+        self.available = None
         self.retested = set(); self.failure = None; self.decision = {}; self.warnings = []
         self.attempt_count = 0
 
     def _queue(self, indices, stage):
         self.queue += [(i, stage, None) for i in indices]
 
+    def _reachable(self, index, stage, corner=None, record=True):
+        pos = self.predicted[index]
+        desired = np.zeros(2) if corner is None else np.asarray(corner) * (.8 * self.fine_half)
+        raw = self._pose_for(pos, (self.cal.K[0,2], self.cal.K[1,2]))
+        raw = (raw[0]-desired[0], raw[1]-desired[1], raw[2])
+        pose = self._clamp_pose(raw)
+        uv = self._project(pos, pose)
+        if not self._within(pose) or uv is None or not self._in_image(uv):
+            reason = '相机不可达'
+        else:
+            comp = self._verification_comp(index, pos) if stage == 'verify' else (0., 0.)
+            offset = self.offsets[self.tool-1]
+            toolpos = (pos[0]+offset[0]+comp[0], pos[1]+offset[1]+comp[1], self.cfg['calib_tool_z_mm'])
+            reason = None if self._within(toolpos) else '工具不可达'
+        if reason:
+            entry = {'target':f'T{index:02d}', 'stage':stage, 'reason':reason}
+            if corner is not None: entry['corner'] = corner
+            if record and entry not in self.skipped: self.skipped.append(entry)
+            return None
+        return pose, uv, not np.allclose(pose, raw, atol=1e-9, rtol=0)
+
+    def _spread(self, indices, count, anchors=()):
+        remaining = sorted(indices); selected = []; anchors = list(anchors)
+        while remaining and len(selected) < count:
+            if anchors or selected:
+                def score(i):
+                    return min(np.linalg.norm(self.predicted[i]-self.predicted[j]) for j in anchors+selected)
+            else:
+                def score(i):
+                    p = self.predicted[i] + np.asarray(self.offsets[self.tool-1][:2])
+                    return min(p[0]-self.travel[0][0], self.travel[0][1]-p[0],
+                               p[1]-self.travel[1][0], self.travel[1][1]-p[1])
+            chosen = max(remaining, key=score); remaining.remove(chosen); selected.append(chosen)
+        return selected
+
+    def _start_plan(self):
+        self.available = [i for i in sorted(self.predicted) if self._reachable(i, 'A')]
+        stage = 'simple' if self.simple else 'A'
+        selected = self._spread(self.available, 5 if self.simple else 9)
+        self.plans[stage] = [f'T{i:02d}' for i in selected]
+        self._queue(selected, stage)
+
+    def _plan_verify(self, count):
+        fitted = {int(s['target'][1:]) for s in self._fit_samples()}
+        available = []
+        for i in sorted(self.predicted):
+            try:
+                if self._reachable(i, 'verify'): available.append(i)
+            except (ValueError, RuntimeError):
+                continue
+        fresh = self._spread([i for i in available if i not in fitted], count, fitted)
+        chosen = fresh + self._spread([i for i in available if i in fitted], count-len(fresh), fresh)
+        self.plans.setdefault('verify', []).append([f'T{i:02d}' for i in chosen])
+        self._queue(chosen, 'verify')
+
     def _move_next(self):
+        if self.phase == 'failed': return 'failed'
+        if self.available is None:
+            self._start_plan()
         if self.queue and self.attempt_count >= self.cfg['max_points']:
             return self._fail('超过最大测点数')
         while self.queue:
             index, stage, corner = self.queue.pop(0)
-            pos = self.predicted[index]
-            desired = np.zeros(2) if corner is None else np.array(corner) * (.8 * self.fine_half)
-            pose = self._pose_for(pos, (self.cal.K[0,2], self.cal.K[1,2]))
-            pose = (pose[0] - desired[0], pose[1] - desired[1], pose[2])
-            offset = self.offsets[self.tool-1]
-            compensation = self._verification_comp(index, pos) if stage == 'verify' else (0., 0.)
-            toolpos = (pos[0]+offset[0]+compensation[0], pos[1]+offset[1]+compensation[1], self.cfg['calib_tool_z_mm'])
-            if not self._within(pose) or not self._within(toolpos):
-                self.skipped.append({'target':f'T{index:02d}', 'stage':stage, 'reason':'相机或工具坐标超出行程'})
+            if stage == 'repeat' and not any(s['target'] == f'T{index:02d}' for s in self._fit_samples()):
                 continue
+            reachable = self._reachable(index, stage, corner)
+            if reachable is None: continue
+            pose, uv, clamped = reachable
             self.current, self.plan, self.target_pose = index, (stage, corner), pose
+            self.expected_uv, self.camera_clamped = uv, clamped
+            self.target_uv = None
             self.retries, self.phase = 0, 'center'
             return 'continue'
         return self._advance()
@@ -73,16 +127,23 @@ class Session(OffsetSession):
         if target is None: return self._fail(f'无法识别目标 T{self.current:02d}')
         if target.cross_error_mm > 2*self.cfg['ring_cross_tol_mm']: return self._fail('目标识别质量差')
         point = np.asarray(pixel_to_module(*target.ring_uv, pose, self.cal)[:2])
-        principal = np.asarray(pixel_to_module(self.cal.K[0,2], self.cal.K[1,2], pose, self.cal)[:2])
-        corner = self.plan[1]
-        desired = np.zeros(2) if corner is None else np.asarray(corner)*(.8*self.fine_half)
-        error = point-principal-desired
+        expected = self.expected_uv if self.expected_uv is not None else (self.cal.K[0,2], self.cal.K[1,2])
+        principal = np.asarray(pixel_to_module(*expected, pose, self.cal)[:2])
+        error = point-principal
         if np.linalg.norm(error) > self.cfg['center_tol_mm']:
-            if self.retries >= 2: return self._fail('目标对中重试超限')
-            self.retries += 1
-            self.target_pose = (pose[0]+error[0], pose[1]+error[1], self.start[2])
-            if not self._within(self.target_pose): return self._fail('修正后的相机坐标超出行程')
-            return 'continue'
+            raw = (pose[0]+error[0], pose[1]+error[1], self.start[2])
+            corrected = self._clamp_pose(raw)
+            if np.allclose(corrected, pose, atol=1e-9, rtol=0):
+                self.camera_clamped = True
+                if not self._in_image(target.ring_uv): return self._fail('目标超出画面中央 80% 范围')
+            elif self.retries >= 2:
+                return self._fail('目标对中重试超限')
+            else:
+                self.retries += 1; self.target_pose = corrected
+                self.camera_clamped = self.camera_clamped or not np.allclose(corrected, raw, atol=1e-9, rtol=0)
+                return 'continue'
+        if self.camera_clamped and not self._in_image(target.ring_uv): return self._fail('目标超出画面中央 80% 范围')
+        self.target_uv = list(target.ring_uv)
         self.measured[self.current] = point
         self.phase = 'tool'
         return 'tool'
@@ -96,7 +157,7 @@ class Session(OffsetSession):
                   'camera_xyz_mm':[float(v) for v in getattr(self, 'capture_pose', self.target_pose)], 'sent_xyz_mm':[float(v) for v in self.sent],
                   'actual_xyz_mm':[float(v) for v in actual], 'residual_xy_mm':residual.tolist(),
                   'stage':stage, 'corner':corner, 'outlier':False, 'retest':stage in ('repeat','outlier_retest'),
-                  'verification':stage == 'verify'}
+                  'verification':stage == 'verify', 'camera_clamped':bool(self.camera_clamped), 'target_uv':self.target_uv}
         self.samples.append(sample)
         if stage == 'infield':
             base = [s['residual_xy_mm'] for s in self.samples if s['target'] == sample['target'] and s['stage'] in ('A','simple','outlier_retest') and not s.get('discarded')]
@@ -140,11 +201,14 @@ class Session(OffsetSession):
     def _table(self):
         grouped = defaultdict(list)
         for s in self._fit_samples(): grouped[s['target']].append(s)
-        if any(f'T{i:02d}' not in grouped for i in B): raise ValueError('补偿表测点不足或不可达')
+        if any(f'T{i:02d}' not in grouped for i in self.b_nodes): raise ValueError('补偿表测点不足或不可达')
         nodes=[]
-        for i in B:
+        for i in self.b_nodes:
             rows=grouped[f'T{i:02d}']; xy=np.mean([s['target_xy_mm'] for s in rows],axis=0); r=np.mean([s['residual_xy_mm'] for s in rows],axis=0)
             nodes.append(dict(target=f'T{i:02d}', x=float(xy[0]), y=float(xy[1]), dx=float(r[0]), dy=float(r[1]), n=len(rows)))
+        points = np.asarray([[n['x'], n['y']] for n in nodes])
+        if len(points) < 3 or np.linalg.matrix_rank(points - points[0], tol=1e-8) < 2:
+            raise ValueError('补偿表节点共线，无法生成补偿表')
         return {'type':'table','nodes':nodes}
 
     def _advance(self):
@@ -167,31 +231,44 @@ class Session(OffsetSession):
                 self.phase='confirm'; return 'confirm'
             for s in verification: s['superseded']=True
             self.simple=False; self.candidate=None
-            self._queue([i for i in A if i not in SIMPLE], 'A'); return self._move_next()
+            self._resume_full(); return self._move_next()
         if self.simple and 'simple_done' not in stages and not getattr(self,'simple_done',False):
             rows=[s for s in self._fit_samples() if s['stage'] in ('simple','outlier_retest')]
-            if len({s['target'] for s in rows}) < 5: return self._fail('简化流程测点不足')
+            if len({s['target'] for s in rows}) < self.cfg['min_points_a']:
+                self.simple=False; self._resume_full(); return self._move_next()
             diffs=np.asarray([np.asarray(s['residual_xy_mm'])-evaluate(self.prior,s['target_xy_mm']) for s in rows]); mean=diffs.mean(axis=0); d=np.linalg.norm(diffs-mean,axis=1)
             self.simple_done=True
             if d.max() <= self.cfg['const_max_dev_mm'] and d.std() <= self.cfg['const_std_mm']:
                 if self.prior['type']=='constant': self.candidate={'type':'constant','constant_xy':(np.asarray(self.prior['constant_xy'])+mean).tolist()}
                 else: self.candidate={'type':'table','nodes':[dict(n,dx=n['dx']+float(mean[0]),dy=n['dy']+float(mean[1])) for n in self.prior['nodes']]}
-                self._queue((19,), 'verify'); return self._move_next()
-            self.simple=False; self._queue([i for i in A if i not in SIMPLE], 'A'); return self._move_next()
+                self._plan_verify(1); return self._move_next()
+            self.simple=False; self._resume_full(); return self._move_next()
         if not getattr(self,'infield_done',False):
-            if len({s['target'] for s in self._fit_samples()}) < len(A): return self._fail('阶段 A 测点不足或不可达')
-            self.infield_done=True; self.queue += [(12,'infield',c) for c in ((-1,-1),(-1,1),(1,-1),(1,1))]; return self._move_next()
+            rows = [s for s in self._fit_samples() if s['stage'] in ('A','simple','outlier_retest')]
+            indices = sorted({int(s['target'][1:]) for s in rows})
+            if len(indices) < self.cfg['min_points_a']:
+                skipped = [s for s in self.skipped if s['stage']=='A' and s['reason'] in ('相机不可达','工具不可达')]
+                a = sum(s['reason']=='相机不可达' for s in skipped); b = sum(s['reason']=='工具不可达' for s in skipped)
+                return self._fail(f'阶段 A 可用目标不足：已测 {len(indices)} 个，需 {self.cfg["min_points_a"]} 个；32 个目标中 {a+b} 个因相机/工具超出行程被跳过（相机 {a} 个、工具 {b} 个）')
+            center = np.mean([self.predicted[i] for i in indices], axis=0)
+            index = min(indices, key=lambda i: np.linalg.norm(self.predicted[i]-center))
+            self.infield_done=True
+            corners = [c for c in ((-1,-1),(-1,1),(1,-1),(1,1)) if self._reachable(index,'infield',c)]
+            self.plans['infield'] = {'target':f'T{index:02d}', 'corners':corners}
+            self.queue += [(index,'infield',c) for c in corners]; return self._move_next()
         if not getattr(self,'classified',False):
-            if len(self.edges) != 4: return self._fail('视野内检查点不足或不可达')
+            if len(self.edges) < self.cfg['min_infield_corners']: return self._fail('视野内检查点不足或不可达')
             mean, good=self._constant(self._fit_samples()); self.classified=True
             if good:
-                self.candidate={'type':'constant','constant_xy':mean.tolist()}; self._queue((19,11),'verify')
+                self.candidate={'type':'constant','constant_xy':mean.tolist()}; self._plan_verify(2)
             else: self._begin_b()
             return self._move_next()
         if getattr(self,'in_b',False) and not getattr(self,'table_ready',False):
-            if {s['target'] for s in self.samples if s['stage']=='repeat'} != {'T02','T29','T12'}:
+            if len({s['target'] for s in self.samples if s['stage']=='repeat'}) < 3:
                 return self._fail('重复性检查点不足或不可达')
-            self.candidate=self._table(); self.table_ready=True; self._queue((11,19),'verify'); return self._move_next()
+            try: self.candidate=self._table()
+            except ValueError as exc: return self._fail(str(exc))
+            self.table_ready=True; self._plan_verify(2); return self._move_next()
         verification=[s for s in self.samples if s['stage']=='verify' and not s.get('superseded')]
         expected=1 if self.simple else 2
         if len(verification)<expected: return self._fail('验证点不足或不可达')
@@ -202,13 +279,27 @@ class Session(OffsetSession):
             return self._fail('补偿后仍超差')
         self.phase='confirm'; return 'confirm'
 
+    def _resume_full(self):
+        existing = {int(s['target'][1:]) for s in self._fit_samples()}
+        selected = list(existing) + self._spread([i for i in self.available if i not in existing], max(0,9-len(existing)), existing)
+        self.plans['A'] = [f'T{i:02d}' for i in selected]
+        self._queue([i for i in selected if i not in existing], 'A')
+
     def _begin_b(self):
         self.in_b=True; self.candidate=None
-        existing={s['target'] for s in self._fit_samples()}
-        self._queue([i for i in B if f'T{i:02d}' not in existing],'B')
-        self._queue((2,29,12),'repeat')
+        existing={int(s['target'][1:]) for s in self._fit_samples()}
+        # Preserve A measurements as nodes, then fill remaining slots by coverage.
+        included = sorted(existing.intersection(self.available))
+        self.b_nodes = included + self._spread([i for i in self.available if i not in included], 16-len(included), included)
+        self.plans['B'] = [f'T{i:02d}' for i in self.b_nodes]
+        if len(self.b_nodes) < self.cfg['min_points_b']:
+            self.failure = '补偿表测点不足或不可达'; self.phase='failed'; return
+        self._queue([i for i in self.b_nodes if i not in existing],'B')
+        repeat = self._spread(self.b_nodes, 3)
+        self.plans['repeat'] = [f'T{i:02d}' for i in repeat]
+        self._queue(repeat,'repeat')
 
     def result(self):
         return dict(self.candidate, samples=self.samples, infield=self.edges, warnings=self.warnings,
-                    skipped=self.skipped, decision=self.decision,
+                    skipped=self.skipped, decision=self.decision, plan=self.plans,
                     verification=[s for s in self.samples if s['stage']=='verify' and not s.get('superseded')])

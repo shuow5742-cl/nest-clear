@@ -35,7 +35,8 @@ def finish(ctx, bb, outcome, reason=None):
         record={'tool':s.get('tool'), 'start_time':s['start_time'], 'end_time':ctx.events.clock().isoformat(),
                 'outcome':outcome,'reason':reason,'requests':s['requests'], 'commands':s['commands'],
                 'shots':s['shots'], 'result':engine.result() if engine and engine.candidate else None,
-                'samples':engine.samples if engine else [], 'skipped':engine.skipped if engine else []}
+                'samples':engine.samples if engine else [], 'skipped':engine.skipped if engine else [],
+                'plan':engine.plans if engine else {}}
         if ctx.events.run_directory is not None:
             path=ctx.events.run_directory/'pickacc'/s['directory']/'session_record.json'
             try:
@@ -76,7 +77,7 @@ class PickAccuracy(ToolOffset):
         if e:
             fields.update(target=f'T{e.current:02d}' if e.current is not None else None,
                           samples=e.samples, skipped=e.skipped, infield=e.edges, warnings=e.warnings,
-                          decision=e.decision, candidate=e.candidate, predicted={f'T{k:02d}':v.tolist() for k,v in e.predicted.items()},
+                          decision=e.decision, candidate=e.candidate, plan=e.plans, predicted={f'T{k:02d}':v.tolist() for k,v in e.predicted.items()},
                           queue=[{'target':f'T{i:02d}','stage':st} for i,st,_ in e.queue])
         fields.update(extra); self.ctx.events.emit('pickacc_state',**fields)
 

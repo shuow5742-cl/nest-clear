@@ -10,6 +10,7 @@ from test_tooloffset_flow import rig
 def engine(tmp_path, tool=1, prior=None, **cfg):
     cal=Calibration(np.array([[2000.,0,2000],[0,2000.,1500],[0,0,1]]),np.zeros(5),np.diag([1.,-1.,-1.]),np.zeros(3),-105.)
     e=Session(cal,(130.,70.,-5.),((80,180),(-10,150),(-15,0)),cfg,tool,((0,0,0),(0,0,0)),4.,prior=prior)
+    e.image_size=(4000,3000)
     e.predicted={i:np.asarray([130.,70.])+p for i,p in e.nominal.items()}
     return e
 
@@ -51,10 +52,10 @@ def test_repeat_fail_and_simple(tmp_path):
     assert run(e,gradient,lambda n,e: np.array([.08,0]) if e.plan[0]=='repeat' else np.zeros(2))=='failed'
     assert '不可重复' in e.failure
     base=engine(tmp_path); assert run(base,gradient)=='confirm'
-    e=engine(tmp_path,tool=2,prior=base.candidate)
+    e=engine(tmp_path,tool=2,prior=base.candidate,min_points_a=5)
     assert run(e,lambda x,y:np.asarray(gradient(x,y))+[.02,-.01])=='confirm'
     assert len(e.samples)==6
-    e=engine(tmp_path,tool=2,prior=base.candidate)
+    e=engine(tmp_path,tool=2,prior=base.candidate,min_points_a=5,verify_tol_mm=.15)
     assert run(e,lambda x,y:(.004*(x-130),.002*(y-70)))=='confirm'
     assert not e.simple and len(e.samples)>6
 
@@ -292,3 +293,50 @@ def test_constant_verification_falls_back_to_table(tmp_path):
     assert run(e,lambda x,y:(.08,-.05),noise)=='confirm', e.failure
     assert e.candidate['type']=='table'
     assert sum(bool(s.get('superseded')) for s in e.samples)==2
+
+
+def field_engine(tool=1, **cfg):
+    e=engine(None, tool=tool, min_points_a=5, min_points_b=6, min_infield_corners=0, **cfg)
+    e.offsets=((29.330,24.322,0),(30.092,-25.283,0))
+    e.predicted={i:np.array([49.1+30*(i//8),-14.2+30*(i%8)]) for i in range(32)}
+    e._pose_for=lambda xy, uv: (xy[0]+.86,xy[1]+.92,-5.)
+    e._project=lambda xy, pose: np.array([2000.+20*(xy[0]+.86-pose[0]),1500.+20*(xy[1]+.92-pose[1])])
+    return e
+
+
+@pytest.mark.parametrize('tool', [1,2])
+def test_field_reachable_constant(tool):
+    e=field_engine(tool)
+    if tool == 1:
+        assert sum(e._within(e._pose_for(e.predicted[i], (2000,1500))) and e._within((*tuple(e.predicted[i]+np.asarray(e.offsets[0][:2])),-10)) for i in (2,3,5,10,12,21,26,28,29)) == 2
+    result=e._move_next()
+    while result=='continue':
+        assert e._within(e.target_pose)
+        point=e.predicted[e.current]; e.measured[e.current]=point; e.phase='tool'
+        comp=np.asarray(e._verification_comp(e.current,point) if e.plan[0]=='verify' else (0,0))
+        xyz=(*tuple(point+np.asarray(e.offsets[tool-1][:2])+comp),-10.)
+        assert e._within(xyz)
+        e.sent=xyz
+        result=e.add_sample((*tuple(np.asarray(xyz[:2])+[.08,-.05]-comp),-10.))
+    assert result=='confirm', e.failure
+    assert len(e.plans['A'])>=5 and e.candidate['type']=='constant'
+    assert 'infield' in e.plans and len(e.plans['verify'][0])==2
+
+
+def test_field_table_and_failure():
+    e=field_engine()
+    assert run(e,lambda x,y:(.002*(x-130),.001*(y-70)))=='confirm', e.failure
+    assert set(e.plans['B']) == {f'T{i:02d}' for i in e.available}
+    assert len(e.plans['repeat'])==3 and e.candidate['type']=='table'
+    e=field_engine(); e.travel=((80,100),(-10,10),(-15,0))
+    assert run(e,lambda x,y:(0,0))=='failed'
+    assert '阶段 A 可用目标不足' in e.failure and '相机 ' in e.failure and '工具 ' in e.failure
+
+
+def test_table_rejects_collinear_nodes():
+    e=field_engine()
+    e.b_nodes=[16,17,18,19,20,21]
+    e.samples=[{'target':f'T{i:02d}', 'stage':'B', 'target_xy_mm':e.predicted[i].tolist(),
+                'residual_xy_mm':[0.,0.]} for i in e.b_nodes]
+    with pytest.raises(ValueError, match='共线'):
+        e._table()

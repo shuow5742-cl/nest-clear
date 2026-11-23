@@ -189,6 +189,9 @@ tool_offset:
   edge_targets: [T12]
 
 pick_accuracy:
+  min_points_a: 5  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 9
+  min_points_b: 6  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 16
+  min_infield_corners: 0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 4
   center_tol_mm: 0.5
   infield_warn_mm: 0.15  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
   const_max_dev_mm: 0.2  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05

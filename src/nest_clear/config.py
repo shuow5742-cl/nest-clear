@@ -548,8 +548,10 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _fail('pick_accuracy', '应为映射')
     accuracy = _mapping({**accuracy_defaults, **root['pick_accuracy']}, 'pick_accuracy', list(accuracy_defaults))
     for key in accuracy_defaults:
-        if key == 'max_points':
-            if type(accuracy[key]) is not int or accuracy[key] < 1: _fail('pick_accuracy.max_points', '须为正整数')
+        if key in ('max_points', 'min_points_a', 'min_points_b', 'min_infield_corners'):
+            bounds = {'max_points': (1, 1000), 'min_points_a': (3, 9), 'min_points_b': (3, 16), 'min_infield_corners': (0, 4)}
+            lo, hi = bounds[key]
+            if type(accuracy[key]) is not int or not lo <= accuracy[key] <= hi: _fail('pick_accuracy.' + key, f'须为 {lo} 到 {hi} 的整数')
         else:
             accuracy[key] = _number(accuracy[key], 'pick_accuracy.' + key, key != 'calib_tool_z_mm')
     if accuracy['center_tol_mm'] > fine_half / 2:
