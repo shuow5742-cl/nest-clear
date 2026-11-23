@@ -6,6 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
+from nest_clear.devices.gx_enum import enum_value
+
 DEFAULTS = {'roi_fraction': .6, 'max_saturated_fraction': .001, 'min_green': 40., 'max_green': 190., 'max_p99': 235., 'max_color_error': .03, 'max_block_color_error': .05, 'max_brightness_cv': .15, 'timeout_s': 5.}
 
 
@@ -56,7 +58,7 @@ def read_ratios(worker):
         if value is None: raise ValueError('无法回读当前白平衡参数')
         return list(map(float, value))
     selector = device.BalanceRatioSelector
-    previous = selector.get()
+    previous = enum_value(selector.get())
     channels = camera._gx.GxBalanceRatioSelectorEntry
     try:
         values = []
@@ -75,7 +77,7 @@ def write_ratios(worker, values):
         auto = getattr(device, 'BalanceWhiteAuto', None)
         if auto is not None and (not hasattr(auto, 'is_writable') or auto.is_writable()): auto.set(camera._gx.GxAutoEntry.OFF)
         selector = device.BalanceRatioSelector
-        previous = selector.get(); channels = camera._gx.GxBalanceRatioSelectorEntry
+        previous = enum_value(selector.get()); channels = camera._gx.GxBalanceRatioSelectorEntry
         try:
             for channel, value in zip((channels.RED, channels.GREEN, channels.BLUE), values):
                 selector.set(channel); device.BalanceRatio.set(float(value))
@@ -83,6 +85,10 @@ def write_ratios(worker, values):
     actual = read_ratios(worker)
     worker.readback['balance_ratio'] = actual
     return actual
+
+
+class DarkTargetError(ValueError):
+    pass
 
 
 def run_white_balance(worker, settings, calibration, path, root, progress=lambda _: None):
@@ -120,13 +126,13 @@ def run_white_balance(worker, settings, calibration, path, root, progress=lambda
             deadline = time.monotonic() + s['timeout_s']
             while True:
                 worker.execute({'stage': 'preview'})
-                if node.get() == gx.GxAutoEntry.OFF: break
-                if time.monotonic() >= deadline: raise TimeoutError('自动白平衡超时，请用 18% 灰卡做白平衡')
+                if enum_value(node.get()) == gx.GxAutoEntry.OFF: break
+                if time.monotonic() >= deadline: raise TimeoutError('自动白平衡超时')
             ratios = read_ratios(worker)
         else:
             image, _ = worker.execute({'stage': 'preview'})
             b, g, r = roi(image, s['roi_fraction']).mean(axis=(0, 1))
-            if min(r, g, b) <= 0: raise ValueError('画面过暗，请检查光源/曝光后用 18% 灰卡做白平衡')
+            if min(r, g, b) <= 0: raise DarkTargetError('画面过暗，请检查光源/曝光后用 18% 灰卡做白平衡')
             ratios = write_ratios(worker, [original[0]*g/r, original[1], original[2]*g/b])
         event('readback', method=method, balance_ratio=ratios, original_ratio=original)
         worker.execute({'stage': 'preview'})
@@ -140,8 +146,10 @@ def run_white_balance(worker, settings, calibration, path, root, progress=lambda
             result.update(time=stamp, backup=str(backup) if backup else None)
             worker.readback['balance_ratio'] = ratios
             success = True
+    except DarkTargetError as exc:
+        result = {'state': 'fail', 'reason': str(exc)}
     except Exception as exc:
-        result = {'state': 'fail', 'reason': f'{exc}，请用 18% 灰卡做白平衡'}
+        result = {'state': 'fail', 'reason': f'白平衡执行异常：{exc}（相机参数读写失败，非目标问题，请联系维护）'}
     finally:
         if not success and original is not None:
             try: write_ratios(worker, original)

@@ -13,6 +13,7 @@ from autoweaver.sensor.camera.mock import MockCamera
 from autoweaver.sensor.camera.daheng import DahengCamera
 from autoweaver.worker import AsyncRequestWorker
 from nest_clear.guard import GuardError
+from nest_clear.devices.gx_enum import enum_value
 
 logger = logging.getLogger(__name__)
 _sequence = itertools.count(1)
@@ -116,7 +117,7 @@ class CameraWorker(AsyncRequestWorker):
             elif self.readback["balance_ratio"] is None:
                 try:
                     selector = device.BalanceRatioSelector
-                    previous = selector.get()
+                    previous = enum_value(selector.get())
                     channels = self.camera._gx.GxBalanceRatioSelectorEntry
                     try:
                         values = []
@@ -134,13 +135,13 @@ class CameraWorker(AsyncRequestWorker):
     def exposure_auto_mode(self):
         device = getattr(self.camera, '_cam', None)
         node = getattr(device, 'ExposureAuto', None) if device is not None else None
-        return node.get() if node is not None else None
+        return enum_value(node.get()) if node is not None else None
 
     def restore_exposure_auto_mode(self, value):
         device = getattr(self.camera, '_cam', None)
         node = getattr(device, 'ExposureAuto', None) if device is not None else None
         if node is not None and value is not None:
-            node.set(value)
+            node.set(enum_value(value))
 
     def set_exposure(self, exposure_us: float) -> float:
         """在无并发采图时设置曝光并回读，失败时抛错。"""

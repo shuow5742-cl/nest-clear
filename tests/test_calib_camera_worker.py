@@ -127,7 +127,7 @@ def test_application_attaches_and_closes_calibration_cameras(tmp_path: Path, mon
             config,
             plc=replace(config.plc, ip=plc.host, port=plc.port),
             vision=replace(config.vision, camera_backend="mock"),
-            tool_calibration=replace(config.tool_calibration, cameras={name: {"backend": "mock"} for name in ("front", "side")}),
+            tool_calibration=replace(config.tool_calibration, enabled=True, cameras={name: {"backend": "mock"} for name in ("front", "side")}),
             record_directory=str(tmp_path),
         )
         app = Application(config, ROOT / "config/nest_clear.yaml")

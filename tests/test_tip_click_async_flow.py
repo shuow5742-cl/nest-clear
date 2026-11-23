@@ -76,7 +76,7 @@ def test_delayed_click_does_not_block_ticks_or_heartbeat(tmp_path, monkeypatch, 
     save_baseline(ToolTipBaseline('tool1', (0, 0, 0), views), tmp_path / 'tool1_baseline.yaml', tool=1, source='test')
     cfg = load_config('config/nest_clear.yaml')
     cfg = replace(cfg, record_directory=str(tmp_path / 'runs'),
-                  tool_calibration=replace(cfg.tool_calibration, directory=str(tmp_path), unreliable_action='click', click_timeout_s=10))
+                  tool_calibration=replace(cfg.tool_calibration, enabled=True, directory=str(tmp_path), unreliable_action='click', click_timeout_s=10))
     events = EventRecorder(tmp_path / 'runs', 'main')
     board, plc = WorldBoard(), MemoryPLC()
     clock = BTClock(board)

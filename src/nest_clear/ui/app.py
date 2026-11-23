@@ -548,9 +548,9 @@ class App:
         self.exposure_button.grid(row=0, column=1, sticky='e')
         self.wb_button = ttk.Button(exposure_controls, text='白平衡', command=self.start_white_balance)
         self.wb_button.grid(row=0, column=2, sticky='e')
-        self.wb_message = self.label(self.focus_panel, '', font=self.theme.table)
-        self.wb_message.config(justify='left', anchor='w', wraplength=430)
-        self.wb_message.grid(row=10, column=0, sticky='ew')
+        self.wb_message = self.label(headline, '', font=self.theme.table)
+        self.wb_message.config(justify='left', anchor='w', wraplength=350)
+        self.wb_message.grid(row=1, column=0, columnspan=2, sticky='ew')
         self.wb_pending = False
         actions = tk.Frame(self.focus_panel, bg=WHITE); actions.grid(row=9, column=0, sticky='ew')
         ttk.Button(actions, text='重置峰值', command=self.reset_focus).grid(row=0, column=0)
