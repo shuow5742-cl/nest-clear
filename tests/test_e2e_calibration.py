@@ -124,6 +124,7 @@ def test_offset_and_wrong_tool(rig, tool):
 def test_multiple_offsets(rig):
     """小于位置公差的定位误差迫使多轮收敛。"""
     plc, app, _ = rig
+    object.__setattr__(app.config.tool_calibration, "tip_tolerance_mm", 0.03)
     offset(app, (0.5, 0.3, 0.2))
     records = plc.start_tool_calibration(1, P0, timeout_s=5, position_error=(0.04, 0, 0))
     assert records[0]["func_code"] == 100
@@ -143,6 +144,7 @@ def test_failures_recover_to_idle(rig, case):
     elif case == "arrival":
         error = (0.2, 0, 0)
     elif case == "iterations":
+        object.__setattr__(app.config.tool_calibration, "tip_tolerance_mm", 0.03)
         object.__setattr__(app.config.tool_calibration, "max_iterations", 1)
         error = (0.04, 0, 0)
     elif case == "detect":
@@ -328,6 +330,9 @@ def test_calibration_quality_limits(rig, monkeypatch, kind, hard):
     plc, app, path = rig
     object.__setattr__(app.config.tool_calibration, 'quality_hard_fail', hard)
     cfg = app.config.tool_calibration
+    object.__setattr__(cfg, 'max_residual_mm', .03)
+    object.__setattr__(cfg, 'max_condition', 100.)
+    object.__setattr__(cfg, 'z_disagreement_mm', .03)
     residual = cfg.max_residual_mm * 2 if kind == 'residual' else 0.
     condition = cfg.max_condition * 2 if kind == 'condition' else 1.
     disagreement = cfg.z_disagreement_mm * 2 if kind == 'z' else 0.

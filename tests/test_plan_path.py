@@ -34,7 +34,7 @@ def test_tray_grid_and_single():
     from nest_clear.config import load_config
     from nest_clear.plan.scan_path import scan_details
     cfg = load_config("config/nest_clear.yaml")
-    cfg = replace(cfg, scan=replace(cfg.scan, mode="tray"), travel=((-500., 500.),)*3)
+    cfg = replace(cfg, scan=replace(cfg.scan, mode="tray", fov_mm=tuple(23.6 * n / 1000 for n in (4024, 3036))), travel=((-500., 500.),)*3)
     path = build_scan_path(cfg.scan, cfg.travel)
     detail = scan_details(cfg.scan, path)
     assert (detail["nx"], detail["ny"]) == (3, 3)

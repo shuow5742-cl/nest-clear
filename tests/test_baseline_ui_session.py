@@ -248,3 +248,18 @@ def test_existing_baselines_notice_and_calibration_paths(tmp_path):
     fake = object.__new__(BaselineSession)
     assert '工具偏移标定结果比现有对刀基准新' in fake._selection_notice(1, info)
     assert '尚无工具偏移标定结果' in fake._selection_notice(2, info)
+
+
+def test_disconnected_camera_releases_and_allows_retry(rig, monkeypatch):
+    from nest_clear.guard import GuardError
+    session, camera, *_ = rig
+    execute = camera.execute
+    def disconnected(payload):
+        raise GuardError('CALIB-CAMERA-UNAVAILABLE', '对刀相机未接入', '对刀相机', '请接好相机')
+    monkeypatch.setattr(camera, 'execute', disconnected)
+    wait(lambda: session.phase == 'select')
+    assert not session.closed and not camera.opened and camera.closes == 1
+    assert '未接入' in session.message
+    monkeypatch.setattr(camera, 'execute', execute)
+    cmd(session, 'baseline_select', 'live', {'tool': 1})
+    assert camera.opened

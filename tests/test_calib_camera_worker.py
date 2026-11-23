@@ -132,13 +132,14 @@ def test_application_attaches_and_closes_calibration_cameras(tmp_path: Path, mon
         )
         app = Application(config, ROOT / "config/nest_clear.yaml")
         assert app.calib_camera is not None
+        app.calib_camera.open()
         app.close()
         assert sorted(closed) == ["front", "side"]
 
 
 @pytest.mark.parametrize("enabled", [True, False])
 def test_application_camera_preflight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
-    """启用时预检失败并报错；关闭时不创建或打开对刀设备。"""
+    """启动时不打开对刀设备；关闭时不创建设备。"""
     calls = []
 
     def fail_open(self: object) -> None:
@@ -156,14 +157,9 @@ def test_application_camera_preflight(tmp_path: Path, monkeypatch: pytest.Monkey
             tool_calibration=replace(config.tool_calibration, enabled=enabled),
             record_directory=str(tmp_path),
         )
-        if enabled:
-            with pytest.raises(GuardError, match="打开失败"):
-                Application(config, ROOT / "config/nest_clear.yaml")
-            assert len(calls) == 1
-        else:
-            app = Application(config, ROOT / "config/nest_clear.yaml")
-            try:
-                assert app.calib_camera is None
-                assert not calls
-            finally:
-                app.close()
+        app = Application(config, ROOT / "config/nest_clear.yaml")
+        try:
+            assert (app.calib_camera is not None) is enabled
+            assert not calls
+        finally:
+            app.close()

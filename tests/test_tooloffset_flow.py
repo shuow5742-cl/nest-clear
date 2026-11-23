@@ -199,6 +199,7 @@ def test_no_start_and_picking(rig):
 
 
 def test_jitter_stable_and_unstable_tool_wait(rig):
+    rig.cfg.tool_offset['jitter_tol_mm'] = .02
     assert rig.begin()[0] == 90
     rig.plc.jitter = .008
     assert rig.request(2,95)[0] == 95

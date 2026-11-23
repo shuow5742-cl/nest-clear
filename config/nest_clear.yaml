@@ -113,7 +113,7 @@ vision:
 tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把工具的基准
   unreliable_action: fail
   click_timeout_s: 120
-  enabled: false  # 11-22 夜：现场对刀相机未接入/打不开（CALIB-CAMERA-OPEN 致主程序启动失败、40932 不置 1），与原 commtest 一致先关闭；接好对刀相机后再改 true。false 时不打开对刀相机，对刀功能码回 131
+  enabled: true  # 相机按需打开，未接时对刀请求回 131
   directory: config/calibration  # 基准和补偿文件目录
   cameras:  # 正面看 X/Z，侧面看 Y/Z
     front: {backend: uvc, device: 0}  # 正面设备

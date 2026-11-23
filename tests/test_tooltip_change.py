@@ -67,7 +67,9 @@ def command(ctx, node, name):
 @pytest.mark.parametrize('tool', [1,2])
 def test_pending_probe_confirm_align_and_save(rig, tool):
     from nest_clear.flow.calibration import CheckPosition
-    ctx, root = rig; bb, cameras = setup(rig, tool, pending=True, offset=(-.2,-.2,0))
+    ctx, root = rig
+    ctx.config = replace(ctx.config, tool_calibration=replace(ctx.config.tool_calibration, tip_tolerance_mm=0.03))
+    bb, cameras = setup(rig, tool, pending=True, offset=(-.2,-.2,0))
     codes = []
     for index in range(6):
         check = CheckPosition(ctx, False); check._blackboard = bb; check.perform()
@@ -156,7 +158,9 @@ def test_probe_detection_failure(rig):
 
 def test_two_corrections_and_position_validation(rig):
     from nest_clear.flow.calibration import CheckPosition
-    ctx,_ = rig; bb,cameras = setup(rig, offset=(-.4,-.2,0))
+    ctx,_ = rig
+    ctx.config = replace(ctx.config, tool_calibration=replace(ctx.config.tool_calibration, tip_tolerance_mm=0.03))
+    bb,cameras = setup(rig, offset=(-.4,-.2,0))
     first = frame(ctx,bb,cameras)
     assert command(ctx,first,'tooltip_confirm_move') == Status.SUCCESS
     target = bb.read('reply_coordinates')['calibration1_xyz']

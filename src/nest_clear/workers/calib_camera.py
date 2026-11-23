@@ -1,12 +1,14 @@
 """在后台线程统一采集正面和侧面的对刀相机图像。"""
 
 from typing import Any, Callable
+import threading
 
 import numpy as np
 from autoweaver.worker import AsyncRequestWorker
 from autoweaver.sensor.camera.base import CameraBase
 
 from nest_clear.devices.calib_cameras import CalibCamera
+from nest_clear.guard import GuardError
 from nest_clear.workers.camera import CameraWorker
 from nest_clear.record.images import tray_number
 
@@ -37,6 +39,7 @@ class CalibCameraWorker(AsyncRequestWorker):
         self.timeout_s = timeout_s
         self.events = events
         self.blocked = set()
+        self.capture_done = {}
         self.opened = False
         for name in ("front", "side"):
             config = dict(cameras[name])
@@ -48,28 +51,44 @@ class CalibCameraWorker(AsyncRequestWorker):
                     config["tip_offset"] = tip_offset
             self.cameras[name] = CalibCamera(name, config, position or (lambda: [0, 0, 0]))
 
+    def _camera_error(self, exc: Exception) -> GuardError:
+        detail = str(exc).replace("\n", "；")
+        message = f"对刀相机未接入或打不开：{detail}；请接好正面/侧面相机后重试"
+        if self.events:
+            self.events.emit("warning", reason=message)
+        return GuardError("CALIB-CAMERA-UNAVAILABLE", message, "对刀相机", "请检查相机连接。")
+
     def open(self) -> None:
         """预检时打开两台相机；任何失败都释放已打开的设备。"""
         if self.opened:
             return
+        for name in list(self.blocked):
+            if self.capture_done[name].is_set():
+                self.cameras[name].close()
+                self.blocked.remove(name)
         if self.blocked:
-            raise RuntimeError('对刀相机采图超时，须重启主程序后重新打开')
+            raise self._camera_error(RuntimeError('上次采图超时，底层调用尚未返回，请稍后重试'))
         try:
             for camera in self.cameras.values():
                 camera.open()
             self.opened = True
-        except BaseException:
+        except Exception as exc:
             self.on_stop()
-            raise
+            raise self._camera_error(exc) from exc
 
     def execute(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
         """一次请求依次取得两视图，交给后续对刀算法。"""
         self.open()
         result = CaptureImages()
         for name, camera in self.cameras.items():
+            done = threading.Event()
+            self.capture_done[name] = done
             class Adapter:
                 def snapshot(self):
-                    return camera.capture()
+                    try:
+                        return camera.capture()
+                    finally:
+                        done.set()
                 snapshot_with_meta = CameraBase.snapshot_with_meta
             worker = CameraWorker("mock", camera.config.get("sn", f"{camera.backend}:{camera.config.get('device', name)}"), Adapter(), timeout_s=self.timeout_s, role=f"对刀 {name}")
             worker.needs_reopen = name in self.blocked
@@ -104,6 +123,11 @@ class CalibCameraWorker(AsyncRequestWorker):
                             logging.getLogger(__name__).exception("对刀原图归档失败")
                 elif self.events:
                     self.events.emit("capture", task_id=payload.get("task_id"), stage="对刀", role=name, **meta)
+            except Exception as exc:
+                if worker.needs_reopen:
+                    self.blocked.add(name)
+                self.on_stop()
+                raise self._camera_error(exc) from exc
             finally:
                 if worker.needs_reopen:
                     self.blocked.add(name)

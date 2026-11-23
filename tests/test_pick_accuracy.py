@@ -194,6 +194,7 @@ def test_plc_table_simple_and_constant(rig, scenario):
     import hashlib, math
     from nest_clear.tooloffset.commands import send
     from nest_clear.tooloffset.session import nominal_targets
+    rig.cfg.pick_accuracy.update(const_max_dev_mm=0.05, const_std_mm=0.025)
     tool=2 if scenario=='simple' else 1
     gradient=lambda x,y:(.002*(x-130),.001*(y-70))
     if tool==2:

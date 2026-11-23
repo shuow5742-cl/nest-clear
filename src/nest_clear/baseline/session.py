@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import yaml
 
+from nest_clear.guard import GuardError
 from nest_clear.paths import live_image_file
 from nest_clear.tooloffset.store import _read, save_mapping
 from nest_clear.tooltip import SilhouetteTipDetector, ToolTipBaseline, ViewCalib
@@ -794,7 +795,7 @@ class BaselineSession:
                     try:
                         self._command(command, params)
                     except Exception as exc:
-                        self.phase = "fail"
+                        self.phase = "select" if self.tool is None else "fail"
                         self.message = str(exc)
                         self.events.emit("baseline_error", reason=str(exc), tool=self.tool)
                         self._record_measurement(command, "fail", str(exc))
@@ -802,7 +803,18 @@ class BaselineSession:
                 except queue.Empty:
                     pass
                 if self.tool is not None and not self.stop.is_set() and self.phase in ("live", "fail"):
-                    images = self._frame("baseline_preview")
+                    try:
+                        images = self._frame("baseline_preview")
+                    except GuardError as exc:
+                        if exc.code != "CALIB-CAMERA-UNAVAILABLE":
+                            raise
+                        self.cameras.on_stop()
+                        self.tool = None
+                        self.phase = "select"
+                        self.message = f"未接入：{exc}"
+                        self.events.emit("baseline_error", reason=self.message, tool=None)
+                        self.publish()
+                        continue
                     self.frames = images
                     if time.monotonic() - last_detect >= 0.5:
                         self.detections = self._detect(images)

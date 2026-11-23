@@ -41,6 +41,7 @@ def running(tmp_path, monkeypatch, request):
         if getattr(request, 'param', None) == 'large_glare':
             # 让大亮斑进入角点覆盖检查，而非先触发整体过曝。
             camcal_cfg['max_saturated_fraction'] = .5
+            camcal_cfg['min_corner_ratio'] = .6
         cfg = replace(cfg, travel=((-500., 500.),)*3, camera_calibration=camcal_cfg, plc=replace(cfg.plc, ip=plc.host, port=plc.port),
                       record_directory=str(tmp_path / 'record'),
                       vision=replace(cfg.vision, calibration=str(path), camera_backend='mock',
@@ -145,6 +146,7 @@ def test_glare_geometry_without_tcp():
 
     settings = dict(load_config(ROOT / 'config/nest_clear.yaml').camera_calibration)
     settings['start_xyz'] = [0., 0., 110.]
+    settings['min_corner_ratio'] = 0.6
     cfg = CameraCalibConfig(**settings)
     scene = CharucoScene()
     nominal = load_calibration(ROOT / 'config/calibration/camera.yaml')
@@ -208,6 +210,7 @@ def test_large_glare_and_restart(running):
 
 def test_axis_scale(running):
     plc, app, _, _ = running
+    app.config.camera_calibration["max_axis_scale_error"] = .002
     replies = plc.start_camera_calibration((0, 0, 110), timeout_s=120, x_scale_error=.003)
     assert replies[-1]['func_code'] == 82
     assert [r for r in events(app) if r['event'] == 'camcal_failed'][-1]['code'] == 'CAMCAL-AXIS-SCALE'

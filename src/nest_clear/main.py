@@ -159,7 +159,7 @@ def write_meta(events: EventRecorder, config_path: Path, calibration_path: Path,
                     if device.backend == "mock":
                         height, width = device.config.get("size", [480, 640])
                         info.update(model="mock", width=width, height=height)
-                    elif device.backend == "uvc":
+                    elif device.backend == "uvc" and device.device is not None:
                         import cv2
                         info.update(model="uvc", width=int(device.device.get(cv2.CAP_PROP_FRAME_WIDTH)),
                                     height=int(device.device.get(cv2.CAP_PROP_FRAME_HEIGHT)))
@@ -278,7 +278,6 @@ class Application:
             self.camera.open()
             if config.tool_calibration.enabled:
                 self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras, timeout_s=config.capture_timeout_s, events=self.events)
-                self.calib_camera.open()
             detector = detector or (HairDetector(config.vision.hair_detector, calibration, config.scan.z, config.vision.scale_z_bin_mm) if config.vision.detector == "hair" else StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels]))
             write_meta(self.events, Path(config_path), calibration_path, config, self.camera, detector, self.path, self.calib_camera, assembly)
             vision = VisionWorker(
