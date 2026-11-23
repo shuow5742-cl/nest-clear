@@ -4,6 +4,17 @@ import pytest
 from datetime import date
 from nest_clear.ui.model import decode_status, status_indicators, classify_event, EventTail, read_json, camcal_progress, tooltip_progress
 
+@pytest.mark.parametrize('mode,page', [
+    ('相机标定中', '相机标定'), ('工具偏移标定中', '工具偏移标定'),
+    ('挑取精度标定中', '挑取精度标定'), ('对刀基准建立中', '对刀基准建立'),
+    ('对刀中(工具1)', '换针对刀'), ('对刀中(工具2)', '换针对刀'),
+    ('挑毛中', '主页'), ('空闲', None), ('未知', None), (None, None),
+])
+def test_page_for_mode(mode, page):
+    from nest_clear.ui.model import page_for_mode
+    assert page_for_mode({'mode': mode}) == page
+    assert page_for_mode({}) is None
+
 def test_recent_replies_limit_and_order(tmp_path):
     from nest_clear.ui.status import MainStatus
     status = MainStatus(tmp_path)

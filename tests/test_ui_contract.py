@@ -104,7 +104,7 @@ def test_home_tables_fit_window(tmp_path, geometry):
         pytest.skip('DISPLAY 不可连接')
     probe.destroy()
     write_demo(tmp_path, initial=True)
-    app = App(tmp_path, 50, ignore_before_ns=0)
+    app = App(tmp_path, 50, page='main', ignore_before_ns=0)
     try:
         try:
             app.root.state('normal')

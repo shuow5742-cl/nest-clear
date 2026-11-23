@@ -8,6 +8,21 @@ from nest_clear.display import format_number
 BITS = ('手动模式','自动模式','循环启动','循环暂停','循环停止','上电完成','急停中','初始化中','初始化完成','信息提示','一般报警','严重故障')
 
 
+def page_for_mode(status):
+    """将主程序状态中的工作模式映射到页面；空闲和未知模式不切页。"""
+    mode = status.get('mode') if isinstance(status, dict) else None
+    if not isinstance(mode, str): return None
+    return {
+        '相机标定中': '相机标定',
+        '工具偏移标定中': '工具偏移标定',
+        '挑取精度标定中': '挑取精度标定',
+        '对刀基准建立中': '对刀基准建立',
+        '对刀中(工具1)': '换针对刀',
+        '对刀中(工具2)': '换针对刀',
+        '挑毛中': '主页',
+    }.get(mode)
+
+
 def pickacc_tray_geometry(width, height):
     """行程框等比例居中；箭头按 0.05 mm 约 30 像素选择常用倍率。"""
     scale = max(.01, min((width - 90) / 100, (height - 45) / 160))

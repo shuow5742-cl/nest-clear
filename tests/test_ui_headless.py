@@ -150,7 +150,9 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         for index, name in enumerate(app.App.PAGE_NAMES):
             ui.select_page(name + '页' if name != '主页' else name)
             assert ui.tabs.selected == index
+        ui.select_page(page)
         ui.refresh()
+        assert ui.tabs.selected == app.App.PAGE_NAMES.index(page)
         ui.update_preview({'pid': 1, 'child_pid': 2})
         assert ui.focus_button.options['state'] == 'disabled'
         assert ui.preview_button.options['state'] == 'disabled'
@@ -237,6 +239,34 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert ui.reply_table.options['height'] == 5
         assert len(ui.reply_table.rows) == 5
         assert ui.tip_message.options['text'] == '修正量过大'
+        if page == '主页':
+            automatic = app.App(tmp_path, ignore_before_ns=0)
+            automatic.refresh()
+            assert automatic.tabs.selected == 1
+            main = {'mode': '空闲'}
+            original_file_data = ui.file_data
+            ui.file_data = lambda path: main if path.name == 'main_status.json' else {}
+            ui.refresh()
+            ui.select_page('主页')
+            for mode, expected in [('相机标定中', 1), ('挑毛中', 0),
+                                   ('对刀中(工具1)', 5), ('对刀基准建立中', 4)]:
+                main['mode'] = mode
+                ui.refresh()
+                assert ui.tabs.selected == expected
+                if mode == '相机标定中':
+                    ui.select_page('主页')
+                    ui.refresh()
+                    assert ui.tabs.selected == 0
+                    ui.select_page('相机标定')
+            main['mode'] = '空闲'
+            ui.refresh()
+            assert ui.tabs.selected == 4
+            ui.last_mode = None  # 界面重启后首次读到正在运行的模式
+            main['mode'] = '相机标定中'
+            ui.refresh()
+            assert ui.tabs.selected == 1
+            ui.file_data = original_file_data
+            ui.refresh()
         target = tmp_path / 'screen' / (page + '.png')
         class Capture:
             def save(self, path): path.write_bytes(b'screenshot')
