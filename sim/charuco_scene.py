@@ -64,11 +64,12 @@ class CharucoScene:
 
 class SimulatedCharucoCamera:
     """从 PLC 实际运动状态生成拍摄图像。"""
-    def __init__(self, plc, *, glare_frames=(), overexposed_frames=()):
+    def __init__(self, plc, *, glare_frames=(), overexposed_frames=(), glare_axes=(100, 80)):
         self.plc = plc
         self.io = PLCClient(plc.host, plc.port, 1, plc.contract)
         self.scene = CharucoScene()
         self.glare_frames = set(glare_frames)
+        self.glare_axes = glare_axes
         self.overexposed_frames = set(overexposed_frames)
         self.frames = 0
 
@@ -85,5 +86,5 @@ class SimulatedCharucoCamera:
         self.frames += 1
         feedback = self.io.read_real32_block(self.plc.contract['actual_x'].address, 3)
         xyz = getattr(self.plc, 'physical_xyz', feedback)
-        glare = ((2012, 1518), (100, 80)) if self.frames in self.glare_frames else None
+        glare = ((2012, 1518), self.glare_axes) if self.frames in self.glare_frames else None
         return self.scene.render(xyz, glare=glare, overexposed=self.frames in self.overexposed_frames)

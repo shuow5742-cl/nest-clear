@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def running(tmp_path, monkeypatch):
+def running(tmp_path, monkeypatch, request):
     # 用户要求本次工作不执行 git 命令。
     monkeypatch.setattr('nest_clear.main.repository_commit', lambda *_: 'unknown')
     monkeypatch.setattr('nest_clear.main.repository_dirty', lambda *_: None)
@@ -32,7 +32,11 @@ def running(tmp_path, monkeypatch):
         path = tmp_path / 'camera.yaml'
         path.write_bytes((ROOT / 'config/calibration/camera.yaml').read_bytes())
         cfg = load_config(ROOT / 'config/nest_clear.yaml')
-        cfg = replace(cfg, camera_calibration={**cfg.camera_calibration, 'start_xyz': [0., 0., 110.]}, plc=replace(cfg.plc, ip=plc.host, port=plc.port),
+        camcal_cfg = {**cfg.camera_calibration, 'start_xyz': [0., 0., 110.]}
+        if getattr(request, 'param', None) == 'large_glare':
+            # 让大亮斑进入角点覆盖检查，而非先触发整体过曝。
+            camcal_cfg['max_saturated_fraction'] = .5
+        cfg = replace(cfg, camera_calibration=camcal_cfg, plc=replace(cfg.plc, ip=plc.host, port=plc.port),
                       record_directory=str(tmp_path / 'record'),
                       vision=replace(cfg.vision, calibration=str(path), camera_backend='mock',
                                      detector='stub', allow_placeholder_calibration=True),
@@ -128,14 +132,31 @@ def test_normal_and_offline(running, tmp_path, caplog):
     print(f'完整 TCP 墙钟耗时: {elapsed:.3f}s，在线求解: {durations[0]:.3f}s')
 
 
-def test_glare_and_restart(running):
+def test_small_glare_is_accepted(running):
     plc, app, camera, _ = running
     camera.glare_frames.add(7)
+    replies = plc.start_camera_calibration((0, 0, 110), timeout_s=120)
+    assert replies[-1]['func_code'] == 81
+    warnings = [r for r in events(app) if r['event'] == 'camcal_glare_warning' and r['image_index'] == 7]
+    assert len(warnings) == 1
+    assert warnings[0]['sequence'] == 7
+    assert warnings[0]['bboxes'] and len(warnings[0]['bboxes'][0]) == 4
+    assert isinstance(warnings[0]['excluded_corners'], int) and warnings[0]['excluded_corners'] >= 0
+
+
+@pytest.mark.parametrize('running', ['large_glare'], indirect=True)
+def test_large_glare_and_restart(running):
+    plc, app, camera, _ = running
+    camera.glare_frames.add(7)
+    camera.glare_axes = (900, 800)
     replies = plc.start_camera_calibration((0, 0, 110), timeout_s=120)
     assert replies[-1]['func_code'] == 82
     failed = [r for r in events(app) if r['event'] == 'camcal_failed'][-1]
     assert failed['code'] == 'CAMCAL-GLARE' and failed['detail']['bbox']
-    # 亮斑发生在网格边缘；回到起始位再重新启动，否则会触发板面偏心检查。
+    detail = failed['detail']
+    assert detail['image_index'] == 7
+    assert detail['usable_corners'] < .6 * detail['predicted_corners']
+    # 回到起始位再重新启动，否则会触发板面偏心检查。
     plc.set_actual_xyz((0, 0, 110))
     plc.physical_xyz = [0, 0, 110]
     assert plc.wait_reply(plc.request(80), 120)['func_code'] == 80

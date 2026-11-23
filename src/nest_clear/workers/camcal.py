@@ -58,4 +58,8 @@ class CamcalWorker(AsyncRequestWorker):
         step.overlay = None
         ctx.events.emit('camcal_step', task_id=task_id, sequence=session['shots'], target_xyz=step.target_xyz,
                         actual_xyz=actual, detail=step.detail, raw_path=raw, kind=step.kind, code=step.code, reason=step.reason, plan=getattr(session["engine"], "plan", []))
+        if step.kind in ('move', 'done') and step.detail.get('glare_blobs'):
+            ctx.events.emit('camcal_glare_warning', task_id=task_id, sequence=session['shots'],
+                            image_index=session['shots'], bboxes=[b['bbox'] for b in step.detail['glare_blobs']],
+                            excluded_corners=step.detail['glare_excluded_corners'])
         return {'step': step, 'raw_path': raw}

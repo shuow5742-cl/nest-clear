@@ -157,6 +157,7 @@ camera_calibration:
   min_corner_ratio: 0.6
   saturation_level: 250
   max_saturated_fraction: 0.01
+  glare_corner_margin_px: null  # null 自动取相邻角点间距的 1/4；整数为像素距离
   glare_blob_min_px: 2000
   max_rms_px: 0.25
   max_image_rms_px: 0.5

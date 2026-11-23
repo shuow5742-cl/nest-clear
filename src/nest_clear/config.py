@@ -274,7 +274,7 @@ def _camera_calibration(data: Any) -> dict[str, Any]:
     numbers = {"square_mm", "marker_mm", "board_thickness_mm", "xy_limit_mm", "z_limit_mm",
                "grid_half_mm", "z_outer_mm", "z_inner_mm", "position_tolerance_mm", "max_rms_px",
                "max_image_rms_px", "max_repeat_px"} | fractions
-    allowed = integers | numbers | {"dictionary", "start_xyz"}
+    allowed = integers | numbers | {"dictionary", "start_xyz", "glare_corner_margin_px"}
     if not isinstance(data, dict):
         _fail("camera_calibration", "应为映射")
     if set(data) - allowed:
@@ -284,6 +284,9 @@ def _camera_calibration(data: Any) -> dict[str, Any]:
         if key == "start_xyz":
             if value is not None:
                 _vector(value, path, 3)
+        elif key == "glare_corner_margin_px":
+            if value is not None and (type(value) is not int or value < 0):
+                _fail(path, "应为非负整数或 null")
         elif key == "dictionary":
             _string(value, path)
         elif key in integers:

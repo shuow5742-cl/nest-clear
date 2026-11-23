@@ -19,6 +19,7 @@ class CameraCalibConfig:
     saturation_level: int = 250
     max_saturated_fraction: float = 0.01
     glare_blob_min_px: int = 2000
+    glare_corner_margin_px: int | None = None
     glare_min_lost_corners: int = 2
     max_rms_px: float = 0.25
     max_image_rms_px: float = 0.5

@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import yaml
 from scipy.optimize import least_squares
+from scipy.spatial import cKDTree
 from .config import CameraCalibConfig
 from nest_clear.vision.geometry import Calibration, pixel_to_module
 
@@ -63,14 +64,16 @@ def _board_mask(cfg, rvec, tvec, nominal, image_size):
     return mask
 
 def _glare_margin(predicted, cfg):
-    """Median projected spacing of horizontally and vertically adjacent corners."""
+    """Pixel margin: configured override or one quarter of adjacent spacing."""
+    if cfg.glare_corner_margin_px is not None:
+        return float(cfg.glare_corner_margin_px)
     if predicted is not None and np.shape(predicted) == ((cfg.cols-1)*(cfg.rows-1), 2):
         grid = np.asarray(predicted).reshape(cfg.rows-1, cfg.cols-1, 2)
         distances = np.concatenate((np.linalg.norm(np.diff(grid, axis=0), axis=2).ravel(),
                                     np.linalg.norm(np.diff(grid, axis=1), axis=2).ravel()))
         distances = distances[np.isfinite(distances) & (distances > 0)]
-        if len(distances): return float(np.median(distances))
-    return 10.0
+        if len(distances): return 0.25 * float(np.median(distances))
+    return 2.5
 
 def _plan(cfg, start, center):
     s = np.asarray(start, float); c = np.asarray(center, float)
@@ -236,35 +239,66 @@ class CameraCalibrationSession:
         else:
             mask = np.ones(gray.shape, np.uint8)
             fraction = full_fraction; scope = 'image'
+        missing = [int(i) for i in np.flatnonzero(visible) if i not in set(ids.tolist())]
         detail={'image_index':n, 'actual_xyz':pose.tolist(), 'saturated_fraction':fraction,
                 'saturated_fraction_full':full_fraction, 'saturation_scope':scope,
-                'detected_corners':len(ids), 'predicted_corners':int(visible.sum())}
+                'detected_corners':len(ids), 'predicted_corners':int(visible.sum()),
+                'missing_ids': missing, 'missing_corners': len(missing), 'glare_blobs': [],
+                'glare_missing_ids': [], 'glare_excluded_ids': [],
+                'glare_missing_corners': 0, 'glare_excluded_corners': 0}
         if fraction > cfg.max_saturated_fraction:
             cv2.putText(overlay,f'{n} xyz={tuple(np.round(pose,2))} sat={fraction:.3%}',(10,30),cv2.FONT_HERSHEY_SIMPLEX,.7,(255,255,0),2)
             label = '标定板区域内饱和比例' if scope == 'board' else '全图饱和比例（无法确定有效标定板区域）'
             return self._fail('CAMCAL-OVEREXPOSED',f'第 {n} 张{label} {fraction:.3%} 超过 {cfg.max_saturated_fraction:.3%}；请降低照明。',detail,overlay)
-        missing = [i for i in np.flatnonzero(visible) if i not in set(ids.tolist())]
-        num, labels, stats, _=cv2.connectedComponentsWithStats((saturated & (mask>0)).astype(np.uint8),8)
-        blob=None
-        for idx in range(1,num):
-            x,y,bw,bh,area=map(int,stats[idx]);
-            if area < cfg.glare_blob_min_px: continue
-            margin=_glare_margin(predicted, cfg)
-            lost=[i for i in missing if x-margin <= predicted[i,0] <= x+bw+margin and y-margin <= predicted[i,1] <= y+bh+margin]
-            if len(lost) >= cfg.glare_min_lost_corners:
-                blob={'bbox':[x,y,x+bw-1,y+bh-1],'area_px':area,'missing_corners':len(lost)}; cv2.rectangle(overlay,(x,y),(x+bw-1,y+bh-1),(255,0,255),2); break
-        for u,v in pts: cv2.circle(overlay,(round(u),round(v)),4,(0,255,0),-1)
+        margin = _glare_margin(predicted, cfg)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats((saturated & (mask > 0)).astype(np.uint8), 8)
+        blobs = []
+        excluded, attributed = set(), set()
+        for idx in range(1, num):
+            x, y, bw, bh, area = map(int, stats[idx])
+            if area < cfg.glare_blob_min_px:
+                continue
+            # Query Euclidean distance to the actual saturated pixels. This is
+            # circular dilation by the margin, including subpixel corner positions.
+            ys, xs = np.nonzero(labels[y:y+bh, x:x+bw] == idx)
+            tree = cKDTree(np.column_stack((xs + x, ys + y)))
+            def near(point):
+                u, v = point
+                if not (x-margin <= u <= x+bw-1+margin and y-margin <= v <= y+bh-1+margin):
+                    return False
+                return tree.query(point, distance_upper_bound=margin + 1e-9)[0] <= margin
+            lost = [i for i in missing if near(predicted[i])]
+            removed = [int(i) for i, point in zip(ids, pts) if near(point)]
+            attributed.update(lost); excluded.update(removed)
+            blob = {'bbox': [x, y, x+bw-1, y+bh-1], 'area_px': area,
+                    'excluded_ids': removed, 'missing_ids': lost}
+            blobs.append(blob)
+            cv2.rectangle(overlay, (x, y), (x+bw-1, y+bh-1), (255, 0, 255), 2)
+        for i, (u, v) in zip(ids, pts):
+            cv2.circle(overlay, (round(u), round(v)), 5 if i in excluded else 4,
+                       (0, 255, 255) if i in excluded else (0, 255, 0), -1)
         for i in missing:
-            u,v=np.round(predicted[i]).astype(int); cv2.drawMarker(overlay,(u,v),(0,0,255),cv2.MARKER_TILTED_CROSS,10,2)
-        detail.update({'detected_corners':len(ids),'predicted_corners':int(visible.sum()),'missing_corners':len(missing)})
+            u, v = np.round(predicted[i]).astype(int)
+            cv2.drawMarker(overlay, (u, v), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 10, 2)
+        keep = np.array([int(i) not in excluded for i in ids], dtype=bool)
+        expected = int(visible.sum())
+        detail.update({'missing_ids': missing, 'missing_corners': len(missing),
+                       'glare_blobs': blobs, 'glare_margin_px': margin,
+                       'glare_missing_ids': sorted(attributed), 'glare_excluded_ids': sorted(excluded),
+                       'glare_missing_corners': len(attributed), 'glare_excluded_corners': len(excluded),
+                       'usable_corners': int(keep.sum())})
+        if blobs:
+            detail.update({'bbox': blobs[0]['bbox'], 'area_px': blobs[0]['area_px']})
         cv2.putText(overlay,f'{n}/{len(self._plan)+1 if self._plan else "?"} xyz={tuple(np.round(pose,2))} corners={len(ids)} sat={fraction:.3%}',(10,30),cv2.FONT_HERSHEY_SIMPLEX,.7,(255,255,0),2)
-        if blob:
-            detail.update(blob); x1,y1,x2,y2=blob['bbox']
-            return self._fail('CAMCAL-GLARE',f'第 {n} 张（位姿 {tuple(pose)}）画面 ({x1},{y1})-({x2},{y2}) 处有亮斑 面积 {blob["area_px"]} 像素，导致 {blob["missing_corners"]} 个角点丢失；请调整顶光角度后重新标定',detail,overlay)
-        expected=int(visible.sum())
-        if len(ids)<4 or expected == 0 or len(ids) < cfg.min_corner_ratio*expected:
-            return self._fail('CAMCAL-NO-BOARD' if n==1 else 'CAMCAL-COVERAGE',f'第 {n} 张检出 {len(ids)} 个角点，预计可见 {expected} 个；请检查失焦、遮挡或光照。',detail,overlay)
-        return self._accept_observation(pose, ids, pts, detail, overlay)
+        if keep.sum() < 4 or expected == 0 or keep.sum() < cfg.min_corner_ratio * expected:
+            # Compare glare-related losses to all other losses; count each ID once.
+            glare_loss = len(attributed | (excluded & set(np.flatnonzero(visible))))
+            other_loss = len(set(missing) - attributed)
+            glare_primary = glare_loss > other_loss and glare_loss > 0
+            code = 'CAMCAL-GLARE' if glare_primary else ('CAMCAL-NO-BOARD' if n == 1 and expected == 0 else 'CAMCAL-COVERAGE')
+            cause = '亮斑导致角点缺失或被剔除，请调整光源' if glare_primary else '角点不足，可能是中间偏暗、失焦或遮挡，请检查光照和焦距'
+            return self._fail(code, f'第 {n} 张检出 {len(ids)}/预计 {expected} 个角点，剔除 {len(excluded)} 个，剩余 {int(keep.sum())} 个；{cause}。', detail, overlay)
+        return self._accept_observation(pose, ids[keep], pts[keep], detail, overlay)
 
     def _accept_observation(self, pose, ids, pts, detail, overlay):
         cfg = self.cfg
