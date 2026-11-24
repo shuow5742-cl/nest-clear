@@ -236,11 +236,37 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert ui.baseline_views['front']['info'].options['fg'] == app.COLORS['green']
         assert 'usb-0:4' in ui.baseline_views['front']['path'].options['text']
         assert 'USB 带宽不足' in ui.baseline_views['side']['info'].options['text']
-        assert ui.baseline_views['side']['toggle'].options['text'] == '预览失败，点击重试'
+        assert ui.baseline_views['side']['toggle'].options['text'] == '辅助对刀相机（侧面）预览：开'
         assert '集线器' in ui.baseline_views['side']['hint'].options['text']
         assert '对比度 —' in ui.baseline_views['side']['detail'].options['text']
         assert ui.baseline_views['side']['path'].parent.row_options[0]['weight'] == 0
         assert ui.baseline_views['side']['path'].parent.row_options[2]['weight'] == 1
+        # Eligibility controls every action independently of whether preview is on.
+        from nest_clear.paths import supervisor_state_file
+        import json
+        supervisor = {'pid': 1, 'child_pid': 2, 'child_state': '就绪', 'word': 0}
+        supervisor_state_file(tmp_path).write_text(json.dumps(supervisor))
+        active = {'mode': '对刀基准建立中', 'command_seq': 0, 'baseline': {
+            'phase': 'live', 'preview': {'front': {'on': True}, 'side': {'on': True}}}}
+        ui.update_baseline(active, supervisor)
+        for view in ui.baseline_views.values():
+            assert all(view[key].options['state'] == 'disabled' for key in ('toggle', 'choose', 'exposure', 'reset'))
+            assert '不可用：对刀基准建立中' in view['reason'].options['text']
+            assert '不可用' not in view['toggle'].options['text']
+        assert ui.baseline_swap.options['state'] == 'disabled'
+        active['mode'] = '挑毛中'
+        ui.update_baseline(active, supervisor)
+        for view in ui.baseline_views.values():
+            assert all(view[key].options['state'] == 'normal' for key in ('toggle', 'choose', 'exposure', 'reset'))
+            assert not view['reason'].visible
+        assert ui.baseline_swap.options['state'] == 'normal'
+        active['baseline']['preview']['front']['on'] = False
+        ui.update_baseline(active, supervisor)
+        assert ui.baseline_views['front']['choose'].options['state'] == 'normal'
+        assert all(ui.baseline_views['front'][key].options['state'] == 'disabled' for key in ('exposure', 'reset'))
+        ui.update_baseline({'mode':'对刀基准建立中', 'command_seq':0, 'baseline':{
+            'phase':'prepare', 'preview':{'front':{'on':True},'side':{'on':True,'error':'USB 带宽不足'}},
+            'existing':{'tool1':{'camera_differences':['front.device']}}}})
         assert '基准需重建' in ui.baseline_notice.options['text']
         assert ui.baseline_results_card.visible is False
         assert ui.baseline_existing_card.visible is False

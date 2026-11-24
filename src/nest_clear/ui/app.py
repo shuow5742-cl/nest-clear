@@ -690,6 +690,9 @@ class App:
         self.baseline_notice = tk.Label(head, text='', bg=WHITE, fg=COLORS['yellow'], anchor='w', font=self.theme.body)
         self.baseline_notice.grid(row=3, column=0, sticky='ew')
         self.baseline_views = {}
+        style = ttk.Style(self.root)
+        style.map('TooltipAction.TButton', foreground=[('disabled', '#9ca3af'), ('!disabled', INK)],
+                  background=[('disabled', '#e5e7eb')])
         for column, (name, title) in enumerate((('front','主对刀相机（正面）'), ('side','辅助对刀相机（侧面）'))):
             body = self.card(self.baseline, title + ' · 点击放大', 1, column)
             body.columnconfigure(0, weight=1); body.rowconfigure(0, weight=0); body.rowconfigure(1, weight=0); body.rowconfigure(2, weight=1)
@@ -697,16 +700,17 @@ class App:
             actions = tk.Frame(body, bg=WHITE); actions.grid(row=1, column=0, sticky='w')
             toggle = tk.Button(actions, text=title+'预览：关', command=lambda n=name:self.baseline_toggle(n))
             toggle.grid(row=0, column=0)
-            choose = ttk.Button(actions, text='选择相机', command=lambda n=name:self.baseline_choose(n)); choose.grid(row=0, column=1)
-            exposure = ttk.Button(actions, text='重新测曝光', command=lambda n=name:self.baseline_command('tooltip_exposure_retest', {'camera':n})); exposure.grid(row=0, column=2)
-            reset = ttk.Button(actions, text='清晰度峰值清零', command=lambda n=name:self.baseline_command('tooltip_peak_reset', {'camera':n})); reset.grid(row=0, column=3)
+            choose = ttk.Button(actions, style='TooltipAction.TButton', text='选择相机', command=lambda n=name:self.baseline_choose(n)); choose.grid(row=0, column=1)
+            exposure = ttk.Button(actions, style='TooltipAction.TButton', text='重新测曝光', command=lambda n=name:self.baseline_command('tooltip_exposure_retest', {'camera':n})); exposure.grid(row=0, column=2)
+            reset = ttk.Button(actions, style='TooltipAction.TButton', text='清晰度峰值清零', command=lambda n=name:self.baseline_command('tooltip_peak_reset', {'camera':n})); reset.grid(row=0, column=3)
+            reason = self.label(actions, '', fg=MUTED); reason.grid(row=1, column=0, columnspan=4, sticky='w')
             pic = self.picture(body, 'baseline_'+name); pic.grid_configure(row=2)
             info = tk.Label(body, text='预览关闭', bg=WHITE, fg=MUTED, font=self.theme.large, anchor='w', justify='left'); info.grid(row=3, column=0, sticky='ew')
             hint = self.label(body, '', fg=COLORS['red']); hint.grid(row=4, column=0, sticky='ew')
             detail = self.label(body, ''); detail.grid(row=5, column=0, sticky='ew')
             graph = tk.Canvas(body, height=24, bg=WHITE, highlightthickness=0); graph.grid(row=6, column=0, sticky='ew')
             body.bind('<Configure>', lambda event, info=info, hint=hint: (info.config(wraplength=max(100, event.width-12)), hint.config(wraplength=max(100, event.width-12))))
-            self.baseline_views[name] = dict(path=path, toggle=toggle, choose=choose, exposure=exposure, reset=reset, info=info, hint=hint, detail=detail, graph=graph, picture=pic)
+            self.baseline_views[name] = dict(path=path, toggle=toggle, choose=choose, exposure=exposure, reset=reset, reason=reason, info=info, hint=hint, detail=detail, graph=graph, picture=pic)
         self.baseline_swap = ttk.Button(controls, text='主辅对调', command=lambda:self.baseline_command('tooltip_swap'))
         self.baseline_swap.grid(row=0, column=9, padx=2)
         results = self.card(self.baseline, '本次结果', 2, 0)
@@ -806,8 +810,11 @@ class App:
             title = '主对刀相机（正面）' if name == 'front' else '辅助对刀相机（侧面）'
             live = extract_tooltip_preview(preview_doc, name, file_age=preview_age)
             display = baseline_preview_display(item, live=live, allow_inline=(preview_age is None and not preview_doc))
-            button_text = display['button'] if display['failed'] else title+'预览：'+('开' if on else '关')
-            widgets['toggle'].config(text=button_text + ('' if may_prepare else '（' + (blocked_reason or '会话进行中') + '）'), fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
+            button_text = title+'预览：'+('开' if on else '关')
+            widgets['reason'].config(text='' if may_prepare else '不可用：' + (blocked_reason or '会话进行中'))
+            if may_prepare: widgets['reason'].grid_remove()
+            else: widgets['reason'].grid()
+            widgets['toggle'].config(text=button_text, fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
             enable(widgets['choose'], may_prepare); enable(widgets['exposure'], on and may_prepare); enable(widgets['reset'], on and may_prepare)
             def number(value): return f'{value:.2f}' if isinstance(value, (float,int)) else '—'
             if display['failed']:
