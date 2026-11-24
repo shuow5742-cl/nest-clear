@@ -262,7 +262,7 @@ def test_internal_999_reply_diagnostic(rig, monkeypatch):
 
 def test_calibration_complete_and_raw(rig):
     import hashlib
-    production = __import__('pathlib').Path('config/calibration/camera.yaml')
+    production = __import__('pathlib').Path('config/calibration/examples/camera.yaml')
     before = hashlib.sha256(production.read_bytes()).digest()
     assert rig.request(1, 80)[0] == 80
     rig.plc.actual = (1., 0., 0.)
@@ -313,7 +313,7 @@ def test_rendered_real_session(tmp_path):
 
     cfg = load_config('config/nest_clear.yaml')
     cfg = replace(cfg, camera_calibration={**cfg.camera_calibration, 'start_xyz': [130., 70., 110.]}, travel=((80., 180.), (-10., 150.), (100., 120.)))
-    production = __import__('pathlib').Path('config/calibration/camera.yaml')
+    production = __import__('pathlib').Path('config/calibration/examples/camera.yaml')
     before = sha256(production.read_bytes()).digest()
     path = tmp_path / 'calibration' / 'camera.yaml'
     path.parent.mkdir()

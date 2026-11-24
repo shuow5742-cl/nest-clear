@@ -32,5 +32,5 @@ def test_postprocess() -> None:
 
 def test_nominal_scale():
     from nest_clear.vision.geometry import load_calibration, scale_um_per_px
-    c = load_calibration('config/calibration/camera.yaml')
+    c = load_calibration('config/calibration/examples/camera.yaml')
     assert scale_um_per_px(c, c.plane_z, 0) == pytest.approx(23.58, abs=.1)

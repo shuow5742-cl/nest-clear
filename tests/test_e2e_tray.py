@@ -39,7 +39,7 @@ class SequenceDetector:
 def running(tmp_path: Path) -> Iterator[tuple[FakePLC, Application, SequenceDetector, Path]]:
     """启动模拟 PLC、Mock 相机和后台主循环。"""
     calibration_dir = tmp_path / 'calibration'
-    shutil.copytree(ROOT / 'config/calibration', calibration_dir)
+    shutil.copytree(ROOT / 'config/calibration/examples', calibration_dir)
     with FakePLC(wrap=3) as plc:
         config = load_config(ROOT / "config/nest_clear.yaml")
         config = replace(
@@ -104,7 +104,20 @@ def test_full_tray_and_wrap(running, monkeypatch):
     monkeypatch.setattr(VisionWorker, "execute", execute)
     records = plc.drive_tray(timeout_s=5)
     assert records[-1]["func_code"] == 9
-    app.archive.executor.submit(lambda: None).result(timeout=10)
+    # The reply may arrive before the background archive has enqueued the image.
+    deadline = time.monotonic() + 10
+    images = []
+    while time.monotonic() < deadline:
+        images = list(app.events.run_directory.glob("images/000001_coarse_t0001_v01_c01_ovl.jpg"))
+        rows = app.events.run_directory / "events.jsonl"
+        if images and rows.exists() and any(
+            '"image_written"' in line and images[0].name in line
+            for line in rows.read_text().splitlines()
+        ):
+            break
+        time.sleep(.01)
+    else:
+        pytest.fail("coarse overlay was not archived")
     import cv2
     import numpy as np
     images = list(app.events.run_directory.glob("images/000001_coarse_t0001_v01_c01_ovl.jpg"))
@@ -144,7 +157,7 @@ def test_unknown_and_arrival_error(running: tuple[FakePLC, Application, Sequence
 def test_nonzero_baseline_ignored(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """启动时清应答并忽略已有编号，只处理后续变化。"""
     calibration_dir = tmp_path / 'calibration'
-    shutil.copytree(ROOT / 'config/calibration', calibration_dir)
+    shutil.copytree(ROOT / 'config/calibration/examples', calibration_dir)
     with FakePLC(wrap=3) as plc:
         plc.task_id = 2
         plc.io.write("request_func", 1)

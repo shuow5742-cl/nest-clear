@@ -34,7 +34,7 @@ def running(tmp_path, monkeypatch, request):
     monkeypatch.setattr('nest_clear.main.framework_commit', lambda: 'unknown')
     with FakePLC() as plc:
         calibration_dir = tmp_path / 'calibration'
-        shutil.copytree(ROOT / 'config/calibration', calibration_dir)
+        shutil.copytree(ROOT / 'config/calibration/examples', calibration_dir)
         path = calibration_dir / 'camera.yaml'
         cfg = load_config(ROOT / 'config/nest_clear.yaml')
         camcal_cfg = {**cfg.camera_calibration, 'start_xyz': [0., 0., 110.]}
@@ -157,7 +157,7 @@ def test_glare_geometry_without_tcp():
     settings['min_corner_ratio'] = 0.6
     cfg = CameraCalibConfig(**settings)
     scene = CharucoScene()
-    nominal = load_calibration(ROOT / 'config/calibration/camera.yaml')
+    nominal = load_calibration(ROOT / 'config/calibration/examples/camera.yaml')
     session = CameraCalibrationSession(cfg, nominal, scene.size, settings['start_xyz'])
     pose = tuple(settings['start_xyz'])
     for _ in range(6):
