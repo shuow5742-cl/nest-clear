@@ -43,6 +43,42 @@ def test_enumeration_filters_non_capture(tmp_path, monkeypatch):
     assert enumerate_capture_devices(tmp_path) == [str(capture)]
 
 
+def test_enumeration_deduplicates_by_realpath_and_prefers_usb(tmp_path, monkeypatch):
+    import struct
+    from nest_clear.devices.calib_cameras import enumerate_capture_devices
+    targets = tmp_path / 'dev'
+    targets.mkdir()
+    video0 = targets / 'video0'
+    video1 = targets / 'video1'
+    video2 = targets / 'video2'
+    for video in (video0, video1, video2):
+        video.touch()
+    by_path = tmp_path / 'by-path'
+    by_path.mkdir()
+    # Two symlinks point to video0: -usbv2- sorts before -usb- when prefixed with a/b,
+    # and the real pci- names have -usb- vs -usbv2- pointing to video1.
+    link_usbv2_alpha = by_path / 'a-usbv2-0:8:1.0-video-index0'
+    link_usb_alpha = by_path / 'b-usb-0:8:1.0-video-index0'
+    link_pci_usb = by_path / 'pci-0000:00:14.0-usb-0:8:1.0-video-index0'
+    link_pci_usbv2 = by_path / 'pci-0000:00:14.0-usbv2-0:8:1.0-video-index0'
+    link_other = by_path / 'pci-0000:00:14.0-usb-0:4:1.0-video-index0'
+    link_usbv2_alpha.symlink_to(video0)
+    link_usb_alpha.symlink_to(video0)
+    link_pci_usb.symlink_to(video1)
+    link_pci_usbv2.symlink_to(video1)
+    link_other.symlink_to(video2)
+
+    def query(fd, request, data, mutate):
+        struct.pack_into('II', data, 84, 1, 0)
+
+    monkeypatch.setattr('nest_clear.devices.calib_cameras.fcntl.ioctl', query)
+    assert enumerate_capture_devices(by_path) == [
+        str(link_usb_alpha),
+        str(link_other),
+        str(link_pci_usb),
+    ]
+
+
 def test_baseline_detects_assignment_and_exposure_change(tmp_path):
     from types import SimpleNamespace
     from nest_clear.devices.tooltip_camera_store import baseline_differences

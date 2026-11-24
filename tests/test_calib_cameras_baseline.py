@@ -7,7 +7,7 @@ from nest_clear.guard import GuardError
 from nest_clear.tooltip import SilhouetteTipDetector
 
 
-def test_uvc_open_failure(monkeypatch) -> None:
+def test_uvc_open_failure(tmp_path, monkeypatch) -> None:
     """模拟 UVC 打开失败，检查身份与现场排查建议。"""
 
     class ClosedDevice:
@@ -23,7 +23,7 @@ def test_uvc_open_failure(monkeypatch) -> None:
 
     monkeypatch.setattr("cv2.VideoCapture", lambda device: ClosedDevice())
     with pytest.raises(GuardError) as error:
-        CalibCamera("front", {"backend": "uvc", "device": 0}).open()
+        CalibCamera("front", {"backend": "uvc", "device": 0, "settings_path": str(tmp_path / "empty_cameras.yaml")}).open()
     assert "front" in str(error.value) and "uvc" in str(error.value) and "检查" in str(error.value)
 
 

@@ -96,14 +96,17 @@ def test_arrival_sampling_and_flow(tmp_path, values, timeout, warning, stable):
         assert normal_row[key] == film_row[key]
 
 
-def test_actual_pose_drives_pick_coordinates():
+def test_actual_pose_drives_pick_coordinates(tmp_path):
     from nest_clear.flow.context import FlowContext
     from nest_clear.flow.picking import WorkRequest, FinishCapture
     from nest_clear.vision.geometry import pixel_to_module
     from nest_clear.vision.fine import FineResult
     from nest_clear.vision.hair_integration import measure
     from test_hair_integration import Board, Events, candidate
-    config = replace(load_config('config/nest_clear.yaml'), travel=((-100., 100.),) * 3)
+    config = load_config('config/nest_clear.yaml')
+    config = replace(config, record_directory=str(tmp_path), tools=((0., 0., 0.), (0., 0., 0.)),
+                     travel=((-100., 100.),) * 3,
+                     tool_calibration=replace(config.tool_calibration, directory=str(tmp_path)))
     cal = Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)
     def pick(x):
         ctx = FlowContext(None, config, [(0, 0, 0)], RequestTracker(0), Events(), cal)
@@ -146,7 +149,7 @@ def test_invalid_actual_still_fails(tmp_path):
         def execute(self, payload):
             if payload['operation'] == 'actual': return (float('nan'), 0., 0.)
             return super().execute(payload)
-    config = load_config('config/nest_clear.yaml')
+    config = replace(load_config('config/nest_clear.yaml'), record_directory=str(tmp_path))
     board = WorldBoard(); clock = BTClock(board); plc = PLC()
     for worker in (plc, MemoryCamera(), EmptyVision()): clock.attach_worker(worker)
     events = EventRecorder(tmp_path, 'main')

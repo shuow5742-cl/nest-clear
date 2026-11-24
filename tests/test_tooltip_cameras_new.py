@@ -60,7 +60,7 @@ def test_store_and_placeholder(tmp_path):
     assert len(list((tmp_path/'history').iterdir()))==1
     assert compare_settings({'x':1},{'x':2})[0]['field']=='x'
     with pytest.raises(Exception, match='辅助对刀相机未配置'):
-        CalibCamera('side', {'backend':'uvc','device':'待接入：插好后填路径'}).open()
+        CalibCamera('side', {'backend':'uvc','device':'待接入：插好后填路径','settings_path':str(tmp_path/'empty_cameras.yaml')}).open()
 
 def test_focus_exposure_invariance():
     original=np.full((240,240), 120, np.uint8); original[:, :120]=20
@@ -179,16 +179,17 @@ def test_open_error_messages(tmp_path, monkeypatch):
     import errno
     import struct
     path = tmp_path / 'by-path-camera'
+    settings = str(tmp_path / 'empty_cameras.yaml')
     with pytest.raises(Exception, match='未找到主对刀相机：' + str(path) + '，检查线缆与插口'):
-        CalibCamera('front', {'backend': 'uvc', 'device': str(path)}).open()
+        CalibCamera('front', {'backend': 'uvc', 'device': str(path), 'settings_path': settings}).open()
     with pytest.raises(Exception, match='辅助对刀相机未配置'):
-        CalibCamera('side', {'backend': 'uvc', 'device': '待接入：待确认'}).open()
+        CalibCamera('side', {'backend': 'uvc', 'device': '待接入：待确认', 'settings_path': settings}).open()
     path.touch()
     def querycap_non_capture(fd, request, buffer, mutate):
         struct.pack_into('II', buffer, 84, 0, 0)
     monkeypatch.setattr('nest_clear.devices.calib_cameras.fcntl.ioctl', querycap_non_capture)
     with pytest.raises(Exception, match='不是视频 capture 节点'):
-        CalibCamera('front', {'backend': 'uvc', 'device': str(path)}).open()
+        CalibCamera('front', {'backend': 'uvc', 'device': str(path), 'settings_path': settings}).open()
     def querycap_capture(fd, request, buffer, mutate):
         struct.pack_into('II', buffer, 84, 1, 0)
     monkeypatch.setattr('nest_clear.devices.calib_cameras.fcntl.ioctl', querycap_capture)
@@ -199,4 +200,4 @@ def test_open_error_messages(tmp_path, monkeypatch):
         def release(self): pass
     monkeypatch.setattr('cv2.VideoCapture', lambda *args: NoBandwidth())
     with pytest.raises(Exception, match='USB 带宽不足：请检查连接并尝试更换 USB 根端口'):
-        CalibCamera('front', {'backend': 'uvc', 'device': str(path)}).open()
+        CalibCamera('front', {'backend': 'uvc', 'device': str(path), 'settings_path': settings}).open()
