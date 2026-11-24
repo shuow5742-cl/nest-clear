@@ -5,6 +5,28 @@ import pytest
 from nest_clear.ui.demo import write_demo
 
 
+def test_baseline_choose_refreshes_devices_each_time(monkeypatch):
+    from nest_clear.ui import app
+    from nest_clear.devices import calib_cameras
+
+    discovered = iter([[], ['/dev/v4l/by-path/new-video-index0']])
+    monkeypatch.setattr(calib_cameras, 'enumerate_capture_devices', lambda: next(discovered))
+    shown = []
+    monkeypatch.setattr(app.messagebox, 'showinfo', lambda *args: shown.append(args))
+    values = []
+    monkeypatch.setattr(app.tk, 'Toplevel', lambda root: Widget(root))
+    monkeypatch.setattr(app.tk, 'StringVar', lambda value: SimpleNamespace(get=lambda: value))
+    monkeypatch.setattr(app.ttk, 'Combobox', lambda parent, **kwargs: values.append(kwargs['values']) or SimpleNamespace(pack=lambda **kw: None))
+    monkeypatch.setattr(app.ttk, 'Button', lambda parent, **kwargs: SimpleNamespace(pack=lambda **kw: None))
+    instance = SimpleNamespace(root=Widget(), baseline_devices=['stale'], baseline_command=lambda *args: None)
+
+    app.App.baseline_choose(instance, 'front')
+    app.App.baseline_choose(instance, 'front')
+
+    assert shown
+    assert values == [['/dev/v4l/by-path/new-video-index0']]
+
+
 class Widget:
     def __init__(self, parent=None, **kwargs):
         self.parent = parent; self.master = parent; self.options = dict(kwargs); self.children = []; self.rows = {}; self.sel = ()

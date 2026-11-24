@@ -725,7 +725,9 @@ class App:
         self.baseline_command('tooltip_preview', {'camera':name, 'on':True if item.get('error') else not item.get('on', False)})
 
     def baseline_choose(self, name):
-        devices = getattr(self, 'baseline_devices', [])
+        # 枚举结果会随 USB 热插拔变化，不能沿用主程序启动时的缓存。
+        from nest_clear.devices.calib_cameras import enumerate_capture_devices
+        devices = enumerate_capture_devices()
         if not devices:
             messagebox.showinfo('选择相机', '未检测到 capture 相机'); return
         top = tk.Toplevel(self.root); top.title('选择对刀相机')
