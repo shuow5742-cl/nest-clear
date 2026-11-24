@@ -161,7 +161,7 @@ def test_production_compensation_hot_load(tmp_path):
     from nest_clear.flow.picking import WorkRequest
     from test_hair_integration import Board, Events
     cfg=load_config('config/nest_clear.yaml')
-    cfg=replace(cfg,tools=((1,2,0),(3,4,0)),travel=((-100,100),)*3,tool_calibration=replace(cfg.tool_calibration,directory=str(tmp_path)))
+    cfg=replace(cfg,record_directory=str(tmp_path),tools=((1,2,0),(3,4,0)),travel=((-100,100),)*3,tool_calibration=replace(cfg.tool_calibration,directory=str(tmp_path)))
     events=Events(); bb=Board(work_cycle=None,request_func=1,task_id=1)
     request=WorkRequest(FlowContext(None,cfg,[(0,0,0)],RequestTracker(0),events)); request._blackboard=bb; request.perform()
     pick=bb.read('work_cycle')._pick_coords
