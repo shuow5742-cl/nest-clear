@@ -116,12 +116,46 @@ def picking_text(p):
     if isinstance(view, int) and 'view_index' in p: view += 1
     return f"第 {tray} 盘 · 视野 {view}/{total} · 粗拍 {val('coarse_shots')} 次 · 可去 {val('removable_count', 'n0')} · 红框 {val('red_count')} · 已下发 {val('sent_count', 'attempts')}"
 
-def status_indicators(s, m, now=None):
+# 父程序默认每 0.1 秒发布；30 秒容忍 300 个周期及短暂调度延迟。
+SUPERVISOR_STALE_SECONDS = 30
+
+def supervisor_live(s, age):
+    return age is not None and age <= SUPERVISOR_STALE_SECONDS and bool(s.get('pid'))
+
+
+def parent_process_row(s, supervisor_age, now=None):
+    live = supervisor_live(s, supervisor_age)
+    return ('父程序', s.get('pid') if live else '—', display_time(s.get('start_time')),
+            duration(s.get('start_time'), now) if live else '—', '运行' if live else '未运行', '—')
+
+
+def child_process_row(s, supervisor_age, now=None):
+    live = supervisor_live(s, supervisor_age)
+    pid = s.get('child_pid') if live else None
+    return ('主程序', pid or '—', display_time(s.get('child_start_time')),
+            duration(s.get('child_start_time'), now) if pid else '—',
+            (s.get('child_state') or '无数据') if live else '未运行',
+            s.get('child_last_exit_reason') or '无')
+
+
+def status_indicators(s, m, now=None, supervisor_age=None):
     plc_text, plc_color = relative_time(s.get('plc_last_read'), now)
     hb_text, hb_color = relative_time(s.get('heartbeat_last_write'), now)
     if s.get('plc_connected') is False: plc_color = 'red'
     if s.get('heartbeat_interrupted'): hb_color = 'red'
-    return {'父程序': ('green' if s.get('pid') else 'gray', str(s.get('pid') or '无数据')), '主程序': ('green' if s.get('child_state') in ('运行','就绪') else 'yellow' if s.get('child_state') == '启动中' else 'gray', str(m.get('mode') or s.get('child_state') or '无数据')), 'PLC 连接': (plc_color, plc_text), '心跳': (hb_color, hb_text), '40932 就绪': ('green' if s.get('algorithm_ready') == 1 else 'gray', str(s.get('algorithm_ready') if s.get('algorithm_ready') is not None else '无数据'))}
+    live = supervisor_live(s, supervisor_age)
+    child = live and bool(s.get('child_pid')) and s.get('child_state') in ('启动中', '运行', '就绪')
+    main_indicator = (('yellow' if s.get('child_state') == '启动中' else 'green'), str(m.get('mode') or s.get('child_state'))) if child else ('gray', '主程序未运行')
+    ready_text = str(s.get('algorithm_ready') if s.get('algorithm_ready') is not None else '无数据')
+    if live:
+        parent = ('green', str(s['pid']))
+        ready = ('green' if s.get('algorithm_ready') == 1 else 'gray', ready_text)
+    else:
+        parent = ('gray', f'未运行({int(supervisor_age)}秒过期)' if supervisor_age is not None and supervisor_age > SUPERVISOR_STALE_SECONDS else '无数据')
+        plc_text, hb_text, ready_text = (text + '(过期)' if text != '无数据' else text for text in (plc_text, hb_text, ready_text))
+        plc_color = hb_color = 'gray'
+        ready = ('gray', ready_text)
+    return {'父程序': parent, '主程序': main_indicator, 'PLC 连接': (plc_color, plc_text), '心跳': (hb_color, hb_text), '40932 就绪': ready}
 
 EVENTS = {'error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
 def classify_event(row):

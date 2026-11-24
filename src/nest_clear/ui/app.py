@@ -16,7 +16,7 @@ from PIL import Image, ImageGrab, ImageTk
 
 from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file, ui_command_file
 from .model import (EventTail, camcal_progress, decode_status, display_time, duration,
-                    read_json, status_indicators, tooltip_progress, preview_controls, edge_corner_label,
+                    read_json, status_indicators, parent_process_row, child_process_row, tooltip_progress, preview_controls, edge_corner_label,
                     pickacc_tray_geometry, pickacc_type, pickacc_stage, pickacc_note, pickacc_infield,
                     tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time, page_for_mode)
 
@@ -402,7 +402,7 @@ class App:
         self.film_reason.grid(row=1, column=1, sticky='e', padx=(0, 8))
         reply = self.card(left, '最近应答', 2, 0, columnspan=2)
         self.reply_table = self.table_widget(reply, ('时间', 'Task_ID', '功能码', '原因'),
-                                             (80, 65, 85, 120), stretch=('原因',), height=5)
+                                             (150, 65, 85, 120), stretch=('原因',), height=5)
         self.reply_table.bind('<Double-1>', self.reply_detail)
         self.reply_table.bind('<Motion>', self.reply_hover)
         self.reply_table.bind('<Leave>', self.reply_hover_close)
@@ -1211,15 +1211,16 @@ class App:
             self.last_mode = mode
             page = page_for_mode(main)
             if page is not None: self.select_page(page)
-        for name, (color, value) in status_indicators(supervisor, main).items():
+        try:
+            supervisor_age = max(0, time.time() - supervisor_state_file(self.directory).stat().st_mtime)
+        except OSError:
+            supervisor_age = None
+        for name, (color, value) in status_indicators(supervisor, main, supervisor_age=supervisor_age).items():
             dot, label = self.lights[name]; dot.config(fg=COLORS[color]); label.config(text=str(value))
         for label, item in zip(self.bits, decode_status(supervisor.get('word'))):
             label.config(text=f"● {item['name']}", fg=COLORS[item['color']])
-        self.process_table.item('parent', values=('父程序', supervisor.get('pid') or '—', display_time(supervisor.get('start_time')),
-            duration(supervisor.get('start_time')), '运行' if supervisor.get('pid') else '无数据', '—'))
-        self.process_table.item('child', values=('主程序', supervisor.get('child_pid') or '—', display_time(supervisor.get('child_start_time')),
-            duration(supervisor.get('child_start_time')) if supervisor.get('child_pid') else '—', supervisor.get('child_state') or '无数据',
-            supervisor.get('child_last_exit_reason') or '无'))
+        self.process_table.item('parent', values=parent_process_row(supervisor, supervisor_age))
+        self.process_table.item('child', values=child_process_row(supervisor, supervisor_age))
         picking = main.get('picking') if isinstance(main.get('picking'), dict) else {}
         view = self.val(picking, 'view_index', 'view')
         if isinstance(view, int) and 'view_index' in picking: view += 1

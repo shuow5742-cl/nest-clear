@@ -5,8 +5,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-pdf = '燕窝二代_挑取测试菲林片_A4打印版_20261120.pdf'
-original = '燕窝二代_挑取精度测试菲林片_V1_245x120.pdf'
+pdf = '燕窝二代_挑取测试菲林片_A4打印版_20261123.pdf'
+original = '燕窝二代_挑取精度测试菲林片_V2_245x120.pdf'
 scale = 20
 with tempfile.TemporaryDirectory() as tmp:
     images = []
@@ -15,6 +15,19 @@ with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(['pdftocairo', '-png', '-r', '508', '-singlefile', name, prefix], check=True)
         images.append(cv2.imread(prefix + '.png', cv2.IMREAD_GRAYSCALE))
 a4, orig = images
+# V1/V2 的每个目标局部（含编号和 ArUco）在同一渲染网格上逐像素比对。
+with tempfile.TemporaryDirectory() as tmp:
+    prefix = str(Path(tmp) / 'v1')
+    subprocess.run(['pdftocairo', '-png', '-r', '508', '-singlefile',
+                    '燕窝二代_挑取精度测试菲林片_V1_245x120.pdf', prefix], check=True)
+    v1 = cv2.imread(prefix + '.png', cv2.IMREAD_GRAYSCALE)
+v1_equal = True
+for y in (45, 15, -15, -45):
+    for x in (-105, -75, -45, -15, 15, 45, 75, 105):
+        # 覆盖十字、圆环、编号、坐标文字和码，避开箭头及页眉。
+        x0, x1 = int((x+132.5-8)*scale), int((x+132.5+10)*scale)
+        y0, y1 = int((70-y-10)*scale), int((70-y+10)*scale)
+        v1_equal &= np.array_equal(v1[y0:y1, x0:x1], orig[y0:y1, x0:x1])
 rows = list(csv.DictReader(open('targets.csv', encoding='utf-8')))
 corners, ids, _ = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)).detectMarkers(a4)
 ids = [] if ids is None else ids.flatten().tolist()
@@ -71,14 +84,14 @@ kernel = np.ones((3,3), np.uint8)
 a_ink = (pattern_a4 < 200).astype(np.uint8)
 b_ink = (pattern_orig < 200).astype(np.uint8)
 unmatched = int(np.sum(a_ink * (1-cv2.dilate(b_ink,kernel))) + np.sum(b_ink * (1-cv2.dilate(a_ink,kernel))))
-passed=(sorted(ids)==list(range(32)) and max(errors)<.05 and max(ring_errors)<.05 and max(tick_errors)<.05 and all(abs(a-b)<.01 for a,b in zip(dims,(297,210))) and unmatched==0)
-report=f'''\nA4 打印版 20261120 自检（pdftocairo 508 dpi，20 px/mm）：
+passed=(v1_equal and sorted(ids)==list(range(32)) and max(errors)<.05 and max(ring_errors)<.05 and max(tick_errors)<.05 and all(abs(a-b)<.01 for a,b in zip(dims,(297,210))) and unmatched==0)
+report=f'''\nV1 与 V2：32 个目标中心、编号及 ArUco 局部逐像素一致：{v1_equal}。\nA4 打印版 20261123 自检（pdftocairo 508 dpi，20 px/mm）：
 PDF 页面：{dims[0]:.5f} × {dims[1]:.5f} mm（要求 297 × 210 mm）。
 ArUco：检出 {len(ids)}/32，唯一 ID {len(set(ids))} 个，与 0–31 一致：{sorted(ids)==list(range(32))}；码中心最大偏差 {max(errors):.5f} mm。
 32 个目标圆环中心相对 targets.csv 名义坐标最大偏差：{max(ring_errors):.5f} mm（要求 < 0.05 mm）。
 X、Y 的 100 mm 和 50 mm 校验尺：逐一检测全部 304 个毫米刻度，相邻间距最大偏差 {max(tick_errors):.5f} mm。
 原菲林图案内部区域同分辨率像素比较：最大灰度差 {np.max(diff)}；偏离另一图墨迹超过 1 像素的像素数 {unmatched}（文字边缘存在抗锯齿差异）。
 方法：ArUco 角点均值；避开十字线的圆环内外边缘拟合圆；刻度线灰度重心。\n最终结论：{'全部通过' if passed else '未通过'}。\n'''
-path=Path('自检结果.txt'); old=path.read_text(encoding='utf-8'); old=old.split('\nA4 打印版 20261120 自检')[0]; path.write_text(old.rstrip()+'\n'+report,encoding='utf-8')
+path=Path('自检结果.txt'); old=path.read_text(encoding='utf-8'); old=old.split('\nV1 与 V2：')[0].split('\nA4 打印版 20261123 自检')[0]; path.write_text(old.rstrip()+'\n'+report,encoding='utf-8')
 print(report)
 if not passed: raise SystemExit(1)
