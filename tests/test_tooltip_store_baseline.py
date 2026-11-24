@@ -16,7 +16,7 @@ from nest_clear.tooltip import store
 def calibration(tmp_path: Path) -> Path:
     """复制占位配置，防止测试污染现场文件。"""
     directory = tmp_path / "calibration"
-    shutil.copytree("config/calibration", directory)
+    shutil.copytree("config/calibration/examples", directory)
     return directory
 
 

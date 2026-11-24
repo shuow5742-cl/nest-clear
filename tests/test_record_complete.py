@@ -98,7 +98,7 @@ def test_gate_pause_and_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def record_test_config(tmp_path: Path):
     """为使用原点附近模拟坐标的记录测试准备独立配置和标定。"""
     calibration = tmp_path / "calibration"
-    shutil.copytree(ROOT / "config/calibration", calibration)
+    shutil.copytree(ROOT / "config/calibration/examples", calibration)
     config = yaml.safe_load((ROOT / "config/nest_clear.yaml").read_text())
     config["record"]["directory"] = str(tmp_path / "runs")
     config["tool_calibration"].update(enabled=False, directory=str(calibration))

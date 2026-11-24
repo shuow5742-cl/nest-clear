@@ -134,7 +134,7 @@ def test_fine_pick_uses_scaled_detector_config(monkeypatch):
     from nest_clear.vision.geometry import load_calibration
     from nest_clear.workers.vision import HairDetector
     import nest_clear.vision.fine as fine
-    calibration = load_calibration('config/calibration/camera.yaml')
+    calibration = load_calibration('config/calibration/examples/camera.yaml')
     cfg = replace(load_config('config/nest_clear.yaml').vision, fine_box_half_mm=100.)
     detector = HairDetector(cfg.hair_detector, calibration, 0.)
     monkeypatch.setattr(detector, 'detect', lambda image: [candidate(w=130, h=30, length=130)])
@@ -156,7 +156,7 @@ def test_detector_scale_guard_and_cache():
     from nest_clear.guard import GuardError
     from nest_clear.vision.geometry import load_calibration
     from nest_clear.workers.vision import HairDetector
-    calibration = load_calibration('config/calibration/camera.yaml')
+    calibration = load_calibration('config/calibration/examples/camera.yaml')
     detector = HairDetector(HairDetectConfig(), calibration, 0.)
     assert detector.for_z(0.) is detector.config
     assert detector.for_z(1.) is detector.for_z(1.)

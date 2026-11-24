@@ -11,7 +11,7 @@ from sim.charuco_scene import (CharucoScene, K, DISTORTION, ROTATION,
 
 def test_rendered_session_accuracy_by_depth():
     cfg = CameraCalibConfig()
-    nominal = load_calibration('config/calibration/camera.yaml')
+    nominal = load_calibration('config/calibration/examples/camera.yaml')
     scene = CharucoScene()
     session = CameraCalibrationSession(cfg, nominal, scene.size, (0, 0, 110))
     board_points = _board(cfg).getChessboardCorners()

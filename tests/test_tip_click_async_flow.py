@@ -1,6 +1,8 @@
 """真实行为树、内存 PLC 与监督器心跳共同验证点击等待不阻塞。"""
 from dataclasses import replace
 import time
+import multiprocessing
+from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,9 +21,11 @@ from nest_clear.tooltip.store import save_baseline
 from nest_clear.vision.geometry import Calibration
 
 
-def delayed_click(connection, images, points, tool):
+def delayed_click(connection, images, points, tool, *, click_started, click_release):
     """子进程模拟打开窗口后操作员两秒才点击。"""
-    time.sleep(2)
+    click_started.set()
+    if not click_release.wait(10):
+        return
     connection.send({name: ClickResult((0., 0.), 'manual', 8., 2.) for name in ('front', 'side')})
     connection.close()
 
@@ -61,9 +65,12 @@ class CoarseDetector:
 
 
 def test_delayed_click_does_not_block_ticks_or_heartbeat(tmp_path, monkeypatch, caplog):
+    context = multiprocessing.get_context("spawn")
+    click_started = context.Event()
+    click_release = context.Event()
     import nest_clear.flow.calibration as flow
     from nest_clear.tooloffset.commands import send
-    monkeypatch.setattr(flow, '_click_process', delayed_click)
+    monkeypatch.setattr(flow, '_click_process', partial(delayed_click, click_started=click_started, click_release=click_release))
     monkeypatch.setattr(flow, 'SilhouetteTipDetector', CoarseDetector)
     publish = flow.ConfirmCalibration.publish
     def auto_confirm(node, phase, message, **fields):
@@ -93,13 +100,16 @@ def test_delayed_click_does_not_block_ticks_or_heartbeat(tmp_path, monkeypatch, 
             clock.tick_once()
             durations.append(time.monotonic() - begin)
             supervisor.tick()
+            if click_started.is_set() and len(plc.heartbeats) >= 2 and len(durations) > 100:
+                click_release.set()
             time.sleep(.005)
         assert plc.replies.get(1) == 111
-        assert time.monotonic() - started >= 2
+        assert click_started.is_set() and click_release.is_set()
         assert len(plc.heartbeats) >= 2
         assert len(durations) > 100
         assert max(durations) < .3, f'最长 tick {max(durations):.3f}s'
         assert not [record for record in caplog.records if 'slow tick' in record.getMessage().lower() and '300' in record.getMessage()]
         assert handle.result is None
     finally:
+        click_release.set()
         clock.shutdown()

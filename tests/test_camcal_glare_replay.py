@@ -22,7 +22,7 @@ def test_field_tenth_frame():
     record = json.loads((session_dir / 'session_record.json').read_text())
     config = yaml.safe_load(Path('config/nest_clear.yaml').read_text())
     cfg = CameraCalibConfig(**config['camera_calibration'])
-    nominal = load_calibration('config/calibration/camera.yaml')
+    nominal = load_calibration('config/calibration/examples/camera.yaml')
     session = CameraCalibrationSession(cfg, nominal, record['image_size'], record['start_xyz'])
     session._obs = record['observations'][:9]
     session._plan = record['plan']

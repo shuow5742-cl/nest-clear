@@ -53,7 +53,7 @@ def test_plan_and_geometry(tmp_path):
     assert len(plan)==52 and plan[0]==plan[26]==plan[-1] == (4.,-2.,110.)
     assert np.all(abs(a[:,:2])<=25) and np.all(abs(a[:,2]-110)<=5)
     assert plan[1][0]<plan[2][0] and plan[6][0]>plan[7][0]
-    old=load_calibration('config/calibration/camera.yaml'); assert np.allclose(old.plane_normal,[0,0,1])
+    old=load_calibration('config/calibration/examples/camera.yaml'); assert np.allclose(old.plane_normal,[0,0,1])
     c=replace(N,plane_point=np.array([0.,0.,0.]),plane_normal=np.array([.1,0.,1.]))
     point=np.array(pixel_to_module(2100,1600,start,c)); assert abs(c.plane_normal@(point-c.plane_point))<1e-9
     path=tmp_path/'camera.yaml'; path.write_text('old',encoding='utf-8'); backup=save_calibration(CalibResult(c,{}),path,tmp_path/'history'); assert backup.read_text()=='old'; assert np.allclose(load_calibration(path).plane_normal,c.plane_normal)

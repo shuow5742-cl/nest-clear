@@ -49,7 +49,7 @@ def setup_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             }
         config_path = tmp_path / "baseline.yaml"
         calibration = tmp_path / "calibration"
-        shutil.copytree("config/calibration", calibration, ignore=shutil.ignore_patterns("examples"))
+        shutil.copytree("config/calibration/examples", calibration)
         plc.set_actual_xyz([1, 2, 3])
         args = [
             "--tool",
