@@ -79,6 +79,8 @@ class Supervisor:
         self._ui_next = 0.0
         self._ui_disabled = False
         self.preview_process = None
+        self.tooltip_host = None
+        self.tooltip_seq = self._tooltip_command_seq()
         self.preview_seq = 0
         self.preview_mode = None
         self.preview_xyz = None
@@ -150,6 +152,44 @@ class Supervisor:
             self.events.emit("error", task_id=task_id, operation="supervisor_reply", reason=str(exc))
             logger.error("错误码：SUPERVISOR-REPLY；主程序%s；Task_ID=%s 代答失败：%s", reason, task_id, exc)
 
+    def _tooltip_command_seq(self):
+        from ..tooloffset.commands import command_path
+        try:
+            seq = json.loads(command_path(self.config.record_directory).read_text(encoding='utf-8')).get('seq')
+            return seq if type(seq) is int else 0
+        except (OSError, ValueError, AttributeError):
+            return 0
+
+    def _reset_tooltip_status(self):
+        from ..preview.process import atomic_write
+        path = Path(self.config.record_directory) / 'state' / 'supervisor_tooltip_status.json'
+        state = {'pid': os.getpid(), 'command_seq': self.tooltip_seq,
+                 'baseline': {'phase': 'idle', 'message': '请开始对刀基准建立', 'preview': {}}}
+        atomic_write(path, json.dumps(state, ensure_ascii=False).encode())
+
+    def _tooltip_tick(self):
+        if self.child is not None:
+            return
+        if self.tooltip_host is None:
+            from ..tooloffset.commands import command_path
+            from ..flow.leaves import PREVIEW_COMMANDS
+            try:
+                command = json.loads(command_path(self.config.record_directory).read_text(encoding='utf-8'))
+                if command.get('command') not in PREVIEW_COMMANDS or type(command.get('seq')) is not int or command['seq'] <= self.tooltip_seq:
+                    return
+            except (OSError, ValueError, AttributeError):
+                return
+            from .tooltip_host import TooltipHost
+            self.tooltip_host = TooltipHost(self.config, self.events, self.tooltip_seq)
+        self.tooltip_host.poll()
+        self.tooltip_seq = self.tooltip_host.reader.last_seq
+
+    def _stop_tooltip(self):
+        if self.tooltip_host is not None:
+            self.tooltip_host.close()
+            self.tooltip_seq = max(self.tooltip_seq, self.tooltip_host.reader.last_seq)
+            self.tooltip_host = None
+
     def _discard_preview_command(self):
         """Do not replay a command belonging to the child after ownership changes."""
         path = ui_command_file(self.config.record_directory)
@@ -175,6 +215,8 @@ class Supervisor:
         logger.error("主程序%s；等待下一次初始化信号", reason)
         self.events.emit("child_exit", reason=reason, code=code)
         self._discard_preview_command()
+        self.tooltip_seq = max(self.tooltip_seq, self._tooltip_command_seq())
+        self._reset_tooltip_status()
         self.child = None
         self._started_at = None
         self._clear_ready()
@@ -201,6 +243,8 @@ class Supervisor:
             )
             return False
         self._discard_preview_command()
+        self.tooltip_seq = max(self.tooltip_seq, self._tooltip_command_seq())
+        self._reset_tooltip_status()
         self.child = None
         self._started_at = None
         self._clear_ready()
@@ -293,6 +337,12 @@ class Supervisor:
 
     def _start(self) -> None:
         """清除旧活性点并启动配置的命令，失败后等待下一条边沿。"""
+        try:
+            self._stop_tooltip()
+        except Exception as exc:
+            logger.error('对刀预览未能释放，拒绝启动主程序：%s', exc)
+            self.events.emit('error', operation='tooltip_handoff', reason=str(exc))
+            return
         if not self._stop_preview("child_start"):
             logger.error("预览进程未退出，拒绝启动主程序")
             return
@@ -303,6 +353,9 @@ class Supervisor:
             # Commands written during child initialization remain visible to it.
             self._discard_preview_command()
             from ..preview.process import atomic_write
+            self.tooltip_seq = max(self.tooltip_seq, self._tooltip_command_seq())
+            tooltip_handoff = Path(self.config.record_directory) / 'state' / 'tooltip_handoff.json'
+            atomic_write(tooltip_handoff, json.dumps({'pid': os.getpid(), 'seq': self.tooltip_seq}).encode())
             handoff = Path(self.config.record_directory) / 'state' / 'main_preview_handoff.json'
             atomic_write(handoff, json.dumps({'pid': os.getpid(), 'seq': self.preview_seq}).encode())
             self._alive.unlink(missing_ok=True)
@@ -435,6 +488,7 @@ class Supervisor:
                         "错误码：SUPERVISOR-STATE；无法发布暂停状态，主程序未启动；位置：初始化；排查建议：修复状态文件后重新初始化"
                     )
         self._preview_tick()
+        self._tooltip_tick()
         now = time.monotonic()
         if (self.preview_process is not None or self.child is not None) and now >= self._preview_xyz_next:
             self._preview_xyz_next = now + .5
@@ -558,6 +612,10 @@ class Supervisor:
         finally:
             if previous_term is not None:
                 signal.signal(signal.SIGTERM, previous_term)
+            try:
+                self._stop_tooltip()
+            except Exception:
+                logger.exception('退出时释放对刀预览失败')
             self._stop_preview("supervisor_exit")
             if self.ui_process is not None:
                 try:

@@ -366,3 +366,18 @@ def tooltip_quality(status, quality):
 def tooltip_time(value):
     dt = parse_time(value)
     return dt.strftime('%H:%M:%S') if dt else '—'
+
+
+def supervisor_tooltip_main(main, supervisor, tooltip):
+    """Overlay supervisor-owned preparation state only while no child exists."""
+    if supervisor.get('child_pid') or supervisor.get('child_state') in ('启动中', '运行', '就绪'):
+        return main
+    result = dict(main)
+    result['mode'] = '空闲'
+    if supervisor.get('pid') and tooltip.get('pid') == supervisor.get('pid'):
+        result['baseline'] = tooltip.get('baseline') or {}
+        result['command_seq'] = tooltip.get('command_seq', 0)
+    else:
+        result['baseline'] = {'phase': 'idle', 'preview': {}}
+        result['command_seq'] = 0
+    return result

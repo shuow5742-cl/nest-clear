@@ -743,7 +743,7 @@ class App:
             try: self.baseline_pending = send(self.directory, name, params, acknowledged=getattr(self, 'baseline_ack', 0))
             except OSError: logger.exception('写对刀基准命令失败')
 
-    def update_baseline(self, main):
+    def update_baseline(self, main, supervisor=None):
         data = main.get('baseline') or {}; phase = data.get('phase') or 'idle'
         self.baseline_ack = main.get('command_seq', 0)
         if self.baseline_pending and self.baseline_ack >= self.baseline_pending: self.baseline_pending = 0
@@ -763,7 +763,7 @@ class App:
         if camera_diffs: notice = '对刀相机设置已变更（' + '；'.join(camera_diffs) + '），基准需重建'
         self.baseline_notice.config(text=notice)
         def enable(widget, condition): widget.config(state='normal' if condition and not self.baseline_pending else 'disabled')
-        enable(self.baseline_start, phase in ('idle', 'done', 'prepare'))
+        enable(self.baseline_start, phase in ('idle', 'done', 'prepare') and (supervisor is None or bool(supervisor.get('child_pid'))))
         self.baseline_preview = data.get('preview') or {}; self.baseline_devices = data.get('detected_cameras') or []
         preparing = phase in ('idle', 'done', 'prepare') and any(
             (self.baseline_preview.get(n) or {}).get('on') or (self.baseline_preview.get(n) or {}).get('error')
@@ -780,8 +780,16 @@ class App:
             self.baseline_live.grid()
             if notice: self.baseline_notice.grid()
             else: self.baseline_notice.grid_remove()
-        may_prepare = phase in ('idle', 'done', 'prepare') and main.get('mode', '空闲') in ('空闲', '对刀基准建立中')
-        enable(self.baseline_swap, may_prepare)
+        if supervisor is None:  # Legacy callers without a supervisor snapshot.
+            permissions = {n: (phase in ('idle', 'done', 'prepare') and main.get('mode', '空闲') in ('空闲', '对刀基准建立中'), None) for n in ('front', 'side')}
+        else:
+            from nest_clear.preview.eligibility import preview_eligibility
+            try:
+                age = max(0, time.time() - supervisor_state_file(self.directory).stat().st_mtime)
+            except OSError:
+                age = None
+            permissions = {n: preview_eligibility(supervisor, age, main.get('mode'), n) for n in ('front', 'side')}
+        enable(self.baseline_swap, all(permissions[n][0] for n in permissions))
         preview_path = tooltip_preview_file(self.directory)
         preview_doc = self.file_data(preview_path)
         try:
@@ -789,6 +797,7 @@ class App:
         except OSError:
             preview_age = None
         for name, widgets in self.baseline_views.items():
+            may_prepare, blocked_reason = permissions[name]
             item = self.baseline_preview.get(name) or {}; on = item.get('on', False)
             device = item.get('device') or '未分配'
             import re
@@ -798,7 +807,7 @@ class App:
             live = extract_tooltip_preview(preview_doc, name, file_age=preview_age)
             display = baseline_preview_display(item, live=live, allow_inline=(preview_age is None and not preview_doc))
             button_text = display['button'] if display['failed'] else title+'预览：'+('开' if on else '关')
-            widgets['toggle'].config(text=button_text + ('' if may_prepare else '（会话进行中）'), fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
+            widgets['toggle'].config(text=button_text + ('' if may_prepare else '（' + (blocked_reason or '会话进行中') + '）'), fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
             enable(widgets['choose'], may_prepare); enable(widgets['exposure'], on and may_prepare); enable(widgets['reset'], on and may_prepare)
             def number(value): return f'{value:.2f}' if isinstance(value, (float,int)) else '—'
             if display['failed']:
@@ -1346,7 +1355,9 @@ class App:
         self.update_tip(tip_data)
         self.update_offset(main)
         self.update_pickacc(main)
-        self.update_baseline(main)
+        from nest_clear.ui.model import supervisor_tooltip_main
+        tooltip = self.file_data(self.directory / 'state' / 'supervisor_tooltip_status.json')
+        self.update_baseline(supervisor_tooltip_main(main, supervisor, tooltip), supervisor)
         key = (date.today(), json.dumps(rows, ensure_ascii=False, default=str))
         if key != self.cache.get('events'):
             self.events = list(rows); self.table.delete(*self.table.get_children())

@@ -57,3 +57,20 @@ class CommandReader:
         if name == 'baseline_start' and not accepted:
             self.events.emit('baseline_state', message='当前正在挑毛或标定，忽略开始请求')
         return (name, params) if accepted else None
+
+
+def startup_reader(root, events):
+    """Respect a supervisor handoff, or discard stale preview/session starts."""
+    try:
+        handoff = json.loads((Path(root) / 'state' / 'tooltip_handoff.json').read_text(encoding='utf-8'))
+        if handoff.get('pid') == os.getppid() and type(handoff.get('seq')) is int:
+            return CommandReader(root, events, last_seq=handoff['seq']), True
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    try:
+        prior = json.loads(command_path(root).read_text(encoding='utf-8'))
+        if prior.get('command') in {'baseline_start', 'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap'} and type(prior.get('seq')) is int:
+            return CommandReader(root, events, last_seq=prior['seq']), False
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return CommandReader(root, events), False

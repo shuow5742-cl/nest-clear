@@ -317,17 +317,12 @@ class Application:
                 existing=existing_baselines(config, calibration_path),
                 config=baseline_config,
             )
-            # 主程序未运行期间遗留的开始命令不能在 PLC 初始化后自动启动会话。
-            from nest_clear.tooloffset.commands import CommandReader, command_path
-            try:
-                prior_command = json.loads(command_path(self.events.directory).read_text(encoding='utf-8'))
-                if prior_command.get('command') in {'baseline_start', 'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap'} and type(prior_command.get('seq')) is int:
-                    seq = prior_command['seq']
-                    self.events.command_reader = CommandReader(self.events.directory, self.events, last_seq=seq)
-                    self.events.emit('tooloffset_command', seq=seq, command=prior_command['command'], params={}, accepted=False)
-                    self.events.emit('baseline_state', phase='idle', message='主程序未运行时的对刀相机命令已忽略，请重新操作')
-            except (OSError, ValueError, TypeError, AttributeError):
-                pass
+            # The supervisor freezes the old owner's sequence before spawning us.
+            from nest_clear.tooloffset.commands import startup_reader
+            self.events.command_reader, handoff = startup_reader(self.events.directory, self.events)
+            if handoff and self.events.command_reader.last_seq:
+                self.events.emit('tooloffset_command', seq=self.events.command_reader.last_seq,
+                                 command='tooltip_handoff', params={}, accepted=False)
             for tool in (1, 2):
                 if not accuracy[f'tool{tool}'].get('type'):
                     self.events.emit('warning', reason=f'工具{tool}挑取补偿未标定', tool=tool)
