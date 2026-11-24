@@ -1,6 +1,6 @@
 import cv2, numpy as np, csv, math, subprocess, os, sys
 from pathlib import Path
-pdf='燕窝二代_挑取精度测试菲林片_V1_245x120.pdf'
+pdf='燕窝二代_挑取精度测试菲林片_V2_245x120.pdf'
 mode=os.environ.get('NEST_FILM_VERIFY_MODE')
 if not mode:
  results=[]
@@ -69,7 +69,7 @@ visible=[r for r in rows if -72.5 <= float(r['x_mm']) <= 12.5 and -31 <= float(r
 cm=[measure(cam,float(r['x_mm']),float(r['y_mm']),cs)[0] for r in visible]
 preview=cv2.resize(im,(2650,1400),interpolation=cv2.INTER_AREA); cv2.imwrite('preview_10px_per_mm.png',preview)
 lws=[v for a in m for v in a[2]]; rings=[a[3] for a in m]
-info=subprocess.check_output(['pdfinfo','燕窝二代_挑取精度测试菲林片_V1_245x120.pdf'],text=True)
+info=subprocess.check_output(['pdfinfo','燕窝二代_挑取精度测试菲林片_V2_245x120.pdf'],text=True)
 import re
 p=re.search(r'Page size:\s+([\d.]+) x ([\d.]+) pts',info); dims=[float(p.group(i))*25.4/72 for i in (1,2)]
 passed=all(abs(a-b)<.01 for a,b in zip(dims,(265,140))) and sorted(ids)==list(range(32)) and max(a[0] for a in m)<.01 and max(a[1] for a in m)<.01 and (mode=='pdftoppm' or all(.09<=a<=.11 for a in lws)) and all(.29<=a<=.31 for a in rings) and len(ii)==len(set(ii)) and len(ii)>0 and len(cm)==len(visible)

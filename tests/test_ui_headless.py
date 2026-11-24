@@ -509,7 +509,12 @@ def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
 
     ui = app.App(tmp_path)
     ui.refresh()
-    # 状态照常显示（父程序、PLC、心跳、40932 及已有业务状态正常保留），仅图片窗口保持空占位。
+    # 业务历史仍显示，过期的父程序状态须标记过期。
+    assert ui.lights['父程序'][1].options['text'].startswith('未运行(')
+    assert ui.lights['父程序'][0].options['fg'] == app.COLORS['gray']
+    assert ui.lights['40932 就绪'][1].options['text'] == '1(过期)'
+    os.utime(sup_file, None)
+    ui.refresh()
     assert ui.lights['父程序'][1].options['text'] == '123'
     assert ui.lights['40932 就绪'][1].options['text'] == '1'
     assert ui.pick_values['盘号'].options['text'] == '9'

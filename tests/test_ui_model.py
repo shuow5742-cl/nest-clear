@@ -31,7 +31,7 @@ def test_decode_and_status():
     bits=decode_status((1<<0)|(1<<6)|(1<<10)|(1<<11))
     assert [bits[i]['color'] for i in (0,1,6,10,11)] == ['green','gray','red','yellow','red']
     assert status_indicators({}, {})['PLC 连接'][0]=='gray'
-    assert status_indicators({'plc_connected':False}, {})['PLC 连接'][0]=='red'
+    assert status_indicators({'pid': 1, 'plc_connected':False}, {}, supervisor_age=0)['PLC 连接'][0]=='red'
 
 def test_preview_unavailable_when_main_running():
     from nest_clear.ui.model import preview_controls
@@ -187,3 +187,47 @@ def test_tooltip_overlay_displays_no_negative_zero(monkeypatch):
     overlay.render_tooltip(np.full((480,640),245,np.uint8), (320,240), (319.99999,239.99999))
     assert any('横向 +0.000 mm  竖向 +0.000 mm' in text for text in texts)
     assert all('-0.000' not in text for text in texts)
+
+
+def test_main_status_running_stopped_and_recovery():
+    main = {'mode': '挑毛中'}
+    running = {'pid': 1, 'child_pid': 2, 'child_state': '就绪'}
+    assert status_indicators(running, main, supervisor_age=0)['主程序'] == ('green', '挑毛中')
+    assert status_indicators({**running, 'child_pid': None, 'child_state': '退出'}, main, supervisor_age=0)['主程序'] == ('gray', '主程序未运行')
+    assert status_indicators(running, main, supervisor_age=31)['主程序'] == ('gray', '主程序未运行')
+    assert status_indicators(running, main, supervisor_age=None)['主程序'] == ('gray', '主程序未运行')
+    assert status_indicators(running, main, supervisor_age=0)['主程序'] == ('green', '挑毛中')
+
+
+def test_reply_time_crosses_day_boundary():
+    from nest_clear.ui.model import display_time
+    assert display_time('2026-11-22T07:00:15-08:00', date(2026, 11, 23)) == '11-22 07:00:15'
+    assert display_time('2026-11-23T07:00:15-08:00', date(2026, 11, 23)) == '07:00:15'
+
+
+def test_supervisor_status_and_process_recover():
+    from nest_clear.ui.model import parent_process_row, child_process_row, SUPERVISOR_STALE_SECONDS
+    from datetime import datetime, timezone
+    now = datetime(2026, 11, 23, 12, tzinfo=timezone.utc)
+    state = {'pid': 123, 'child_pid': 456, 'child_state': '就绪',
+             'start_time': '2026-11-23T11:00:00+00:00',
+             'plc_last_read': now.isoformat(), 'heartbeat_last_write': now.isoformat(),
+             'plc_connected': True, 'algorithm_ready': 1}
+    main = {'mode': '挑毛中'}
+    for age in (SUPERVISOR_STALE_SECONDS + 1, None):
+        indicators = status_indicators(state, main, now, age)
+        assert indicators['父程序'][0] == 'gray'
+        assert indicators['主程序'] == ('gray', '主程序未运行')
+        assert all(indicators[name][0] == 'gray' for name in ('PLC 连接', '心跳', '40932 就绪'))
+        assert all('过期' in indicators[name][1] for name in ('PLC 连接', '心跳', '40932 就绪'))
+        row = parent_process_row(state, age, now)
+        assert row[1] == '—' and row[4] == '未运行'
+        assert child_process_row(state, age, now)[1:5:3] == ('—', '未运行')
+    indicators = status_indicators(state, main, now, 0)
+    assert indicators['父程序'] == ('green', '123')
+    assert indicators['主程序'] == ('green', '挑毛中')
+    assert all(indicators[name][0] == 'green' for name in ('PLC 连接', '心跳', '40932 就绪'))
+    assert child_process_row(state, 0, now)[1] == 456
+    assert parent_process_row(state, 0, now)[1:5] == (123, '11:00:00', '01:00:00', '运行')
+    assert status_indicators({}, {}, now, None)['父程序'] == ('gray', '无数据')
+    assert parent_process_row({}, None, now)[4] == '未运行'
