@@ -108,6 +108,8 @@ class ToolCalibrationConfig:
     probe_step_mm: float = 0.2
     max_step_mm: float = 0.5
     max_total_mm: float = 2.0
+    camera_controls: dict[str, Any] = field(default_factory=dict)
+    auto_exposure: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -577,26 +579,50 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         scan = replace(scan, fov_mm=tuple(vision.hair_detector.expected_um_per_px * n / 1000 for n in (4024, 3036)))
     tc_data = root["tool_calibration"]
     if isinstance(tc_data, dict):
-        tc_data = {"enabled": True, "quality_hard_fail": True, "unreliable_action": "fail", "click_timeout_s": 120.0, "probe_step_mm": .2, "max_step_mm": .5, "max_total_mm": 2., **tc_data}
+        tc_data = {"enabled": True, "quality_hard_fail": True, "unreliable_action": "fail", "click_timeout_s": 120.0, "probe_step_mm": .2, "max_step_mm": .5, "max_total_mm": 2., "camera_controls": {}, "auto_exposure": {}, **tc_data}
     tc = _mapping(tc_data, "tool_calibration", [
         "directory", "cameras", "detection", "position_tolerance_mm", "tip_tolerance_mm",
         "consistency_tolerance_mm", "max_iterations", "max_residual_mm", "max_condition",
-        "z_disagreement_mm", "enabled", "quality_hard_fail", "unreliable_action", "click_timeout_s", "probe_step_mm", "max_step_mm", "max_total_mm",
+        "z_disagreement_mm", "enabled", "quality_hard_fail", "unreliable_action", "click_timeout_s", "probe_step_mm", "max_step_mm", "max_total_mm", "camera_controls", "auto_exposure",
     ])
     if type(tc["enabled"]) is not bool or type(tc["quality_hard_fail"]) is not bool:
         _fail("tool_calibration.enabled", "应为布尔值")
     directory = _string(tc["directory"], "tool_calibration.directory")
     cameras = _mapping(tc["cameras"], "tool_calibration.cameras", ["front", "side"])
     detection = _mapping(tc["detection"], "tool_calibration.detection", ["front", "side"])
+    from .devices.v4l2_controls import DEFAULTS as control_defaults
+    from .devices.tooltip_exposure import DEFAULTS as exposure_defaults
+    def validate_controls(value, path):
+        if not isinstance(value, dict): _fail(path, "应为映射")
+        ranges = {'width': (1, 10000), 'height': (1, 10000), 'exposure': (1, 5000), 'auto_exposure': (1, 1), 'dynamic_framerate': (0, 0), 'white_balance_auto': (0, 0), 'white_balance_temperature': (2800, 6500), 'sharpness': (0, 0), 'backlight_compensation': (0, 0), 'gain': (0, 0), 'gamma': (72, 500), 'brightness': (-255, 255), 'contrast': (0, 255), 'saturation': (0, 255), 'hue': (-180, 180), 'power_line_frequency': (1, 1)}
+        for key, val in value.items():
+            if key not in ranges: _fail(path, f"未知字段 {key}")
+            if val is None and control_defaults[key] is None: continue
+            low, high = ranges[key]
+            if type(val) is not int or not low <= val <= high: _fail(path + '.' + key, f"须为 {low}–{high} 的整数")
+        return dict(value)
+    common_controls = {**control_defaults, **validate_controls(tc['camera_controls'], 'tool_calibration.camera_controls')}
+    ae = tc['auto_exposure']
+    if not isinstance(ae, dict) or set(ae) - set(exposure_defaults): _fail('tool_calibration.auto_exposure', '字段无效')
+    ae = {**exposure_defaults, **ae}
+    for k in ('target_low', 'target_high', 'settle_frames', 'max_iterations', 'min_exposure', 'max_exposure'):
+        if type(ae[k]) is not int: _fail('tool_calibration.auto_exposure.' + k, '须为整数')
+    if not (0 <= ae['target_low'] < ae['target_high'] < 250 and 0 <= ae['settle_frames'] <= 100 and 1 <= ae['max_iterations'] <= 100 and 1 <= ae['min_exposure'] < ae['max_exposure'] <= 5000): _fail('tool_calibration.auto_exposure', '范围无效')
+    for k in ('roi_fraction', 'max_saturated_fraction'):
+        if not 0 < _number(ae[k], 'tool_calibration.auto_exposure.' + k) <= 1: _fail('tool_calibration.auto_exposure.' + k, '须在 0 到 1 之间')
+    cameras = {name: dict(value) if isinstance(value, dict) else value for name, value in cameras.items()}
     for name in ("front", "side"):
         camera_config = cameras[name]
         if not isinstance(camera_config, dict):
             _fail(f"tool_calibration.cameras.{name}", "应为映射")
         backend = camera_config.get("backend")
         if backend == "uvc":
-            _mapping(camera_config, f"tool_calibration.cameras.{name}", ["backend", "device"])
-            if type(camera_config["device"]) is not int or camera_config["device"] < 0:
-                _fail(f"tool_calibration.cameras.{name}.device", "设备索引应为非负整数")
+            _mapping(camera_config, f"tool_calibration.cameras.{name}", ["backend", "device"] + (["camera_controls"] if "camera_controls" in camera_config else []))
+            device = camera_config['device']
+            if not ((type(device) is int and device >= 0) or (isinstance(device, str) and device.strip())):
+                _fail(f"tool_calibration.cameras.{name}.device", "设备须为非负整数或非空路径")
+            camera_config['camera_controls'] = {**common_controls, **validate_controls(camera_config.get('camera_controls', {}), f'tool_calibration.cameras.{name}.camera_controls')}
+            camera_config['settings_path'] = str(Path(directory) / 'tooltip_cameras.yaml')
         elif backend == "daheng":
             _mapping(camera_config, f"tool_calibration.cameras.{name}", ["backend", "sn"])
             _string(camera_config["sn"], f"tool_calibration.cameras.{name}.sn")
@@ -636,6 +662,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _number(tc["probe_step_mm"], "tool_calibration.probe_step_mm", True),
         _number(tc["max_step_mm"], "tool_calibration.max_step_mm", True),
         _number(tc["max_total_mm"], "tool_calibration.max_total_mm", True),
+        common_controls, ae,
     )
     ensure_calibration_files(directory)
     tools_path = Path(directory) / "tools.yaml"

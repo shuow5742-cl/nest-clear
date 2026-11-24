@@ -68,13 +68,17 @@ class CalibCameraWorker(AsyncRequestWorker):
                 self.blocked.remove(name)
         if self.blocked:
             raise self._camera_error(RuntimeError('上次采图超时，底层调用尚未返回，请稍后重试'))
-        try:
-            for camera in self.cameras.values():
+        errors = []
+        for camera in self.cameras.values():
+            if camera.device is not None:
+                continue
+            try:
                 camera.open()
-            self.opened = True
-        except Exception as exc:
-            self.on_stop()
-            raise self._camera_error(exc) from exc
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise self._camera_error(RuntimeError("；".join(str(error) for error in errors))) from errors[0]
+        self.opened = True
 
     def execute(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
         """一次请求依次取得两视图，交给后续对刀算法。"""
