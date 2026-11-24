@@ -157,7 +157,7 @@ def status_indicators(s, m, now=None, supervisor_age=None):
         ready = ('gray', ready_text)
     return {'父程序': parent, '主程序': main_indicator, 'PLC 连接': (plc_color, plc_text), '心跳': (hb_color, hb_text), '40932 就绪': ready}
 
-EVENTS = {'error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
+EVENTS = {'arrival_warning','error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
 def classify_event(row):
     event = str(row.get('event','')).lower()
     text = ' '.join(str(row.get(k,'')) for k in ('reason_code','code','reason','what','operation','event')).lower()
@@ -167,7 +167,7 @@ def classify_event(row):
     if event not in EVENTS and reply not in (999,131,82,92) and not any(x in text for x in ('readback','回读不一致','采图失败','capture_failed')):
         return None
     category = '父程序' if row.get('process') == 'supervisor' else '标定' if any(x in text for x in ('camcal','tooltip','tooloffset','pickacc','calib')) or reply in (82,92,131,152) else '通信' if any(x in text for x in ('plc','heartbeat','readback','回读')) else '相机' if any(x in text for x in ('camera','capture','image','采图')) else '配置' if 'config' in text else '算法'
-    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
+    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('arrival_warning','warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
     reason = str(row.get('reason',row.get('message',event)))
     fields = {}
     for line in reason.splitlines():

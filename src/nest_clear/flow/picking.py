@@ -397,9 +397,7 @@ def work_branch(ctx: FlowContext) -> TreeNode:
     from autoweaver.motion_policy.nodes.control.fallback import Fallback
     capture = Sequence([
         Predicate("需要拍照", lambda bb: bb.read("work_action") in ("coarse", "fine")),
-        CallWorker(ctx.board, "plc", lambda bb: {"operation": "actual"}, "actual", name="读取实时坐标"),
-        CheckArrival(ctx.config, ctx.events),
-        Predicate("到位合格", lambda bb: bb.read("arrival_ok")),
+        CheckArrival(ctx.board, ctx.config, ctx.events),
         PlaceholderWarning(ctx),
         BeginCapture(ctx),
         CallWorker(ctx.board, "camera", lambda bb: {"stage": bb.read("work_action"), "task_id": bb.read("task_id")}, "image", name="拍照"),

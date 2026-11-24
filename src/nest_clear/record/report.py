@@ -181,6 +181,16 @@ def report(root: str | Path, day: date) -> str:
         periods.append(f"{_time(row.get('ts', ''))} {row.get('process')} {action}")
     lines.append("开机时段：" + ("；".join(periods) or "无记录"))
     lines.append(f"盘数：{len(trays)}")
+    arrivals = [r for r in events if r.get("event") in ("arrival", "arrival_warning") and "stable" in r]
+    deviations = [(abs(float(d)), axis) for r in arrivals for axis, d in zip("XYZ", r.get("delta", []))]
+    durations = sorted(float(r["settle_elapsed_s"]) for r in arrivals if r.get("settle_elapsed_s") is not None)
+    from statistics import median
+    maximum = max(deviations, default=None)
+    lines.append("到位监督：超差次数 {}，最大偏差 {}，未稳定次数 {}，稳定耗时中位数/最大 {}".format(
+        sum(bool(r.get("over_tolerance")) for r in arrivals),
+        f"{maximum[0]:.3f} mm ({maximum[1]}轴)" if maximum else "无",
+        sum(not r["stable"] for r in arrivals),
+        f"{median(durations):.3f}/{max(durations):.3f} 秒" if durations else "无"))
     attention = []
     tray_ids = list(dict.fromkeys([row.get("tray_id") for row in trays] +
                                   [row.get("tray_id") for row in events if row.get("tray_id") and row.get("event") == "work_cycle"]))

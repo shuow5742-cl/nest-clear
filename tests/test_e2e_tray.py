@@ -137,8 +137,8 @@ def test_full_tray_and_wrap(running, monkeypatch):
 
 
 
-def test_unknown_and_arrival_error(running: tuple[FakePLC, Application, SequenceDetector, Path]) -> None:
-    """未知请求和扫描到位超差均返回 999，附带原因。"""
+def test_unknown_and_arrival_warning(running: tuple[FakePLC, Application, SequenceDetector, Path]) -> None:
+    """未知请求返回 999；扫描到位超差只记录并继续拍照。"""
     plc, app, detector, directory = running
     task = plc.request(123)
     assert plc.wait_reply(task, 5)["func_code"] == 999
@@ -146,12 +146,14 @@ def test_unknown_and_arrival_error(running: tuple[FakePLC, Application, Sequence
     reply = plc.wait_reply(task, 5)
     assert reply["func_code"] == 1
     assert detector.calls == 0
-    plc.set_actual_xyz([100, 100, 100])
+    scan = reply["scan_xyz"]
+    plc.set_actual_xyz([scan[0] + .2, scan[1], scan[2]])
     task = plc.request(20)
-    assert plc.wait_reply(task, 5)["func_code"] == 999
+    assert plc.wait_reply(task, 5)["func_code"] != 999
+    assert detector.calls > 0
     events = [json.loads(line) for line in next(directory.glob("*/*/events.jsonl")).read_text().splitlines()]
     assert any(event["event"] == "error" and "功能码 123" in event["reason"] for event in events)
-    assert any(event["event"] == "arrival" and not event["ok"] for event in events)
+    assert any(event["event"] == "arrival_warning" and not event["ok"] for event in events)
 
 
 def test_nonzero_baseline_ignored(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
