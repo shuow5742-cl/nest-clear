@@ -41,13 +41,15 @@ class CommandReader:
     def __init__(self, root, events, *, last_seq=0):
         self.path, self.events, self.last_seq = command_path(root), events, last_seq
 
-    def poll(self, allowed):
+    def poll(self, allowed, *, defer_unallowed=False):
         try:
             cmd = json.loads(self.path.read_text(encoding='utf-8'))
             seq, name, params = cmd['seq'], cmd['command'], cmd['params']
             if type(seq) is not int or seq <= self.last_seq or not isinstance(name, str) or not isinstance(params, dict):
                 return None
         except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if defer_unallowed and name not in allowed:
             return None
         self.last_seq = seq
         accepted = name in allowed

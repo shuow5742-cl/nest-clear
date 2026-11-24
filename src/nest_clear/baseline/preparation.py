@@ -35,6 +35,7 @@ class Preparation:
         self.stops = {}; self.threads = {}; self.retained = set(); self.retest = {n: threading.Event() for n in self.enabled}
         self.lock = threading.RLock()
         self.busy = False
+        self.assignment_thread = None
         self.devices = []
         self.trackers = {n: PeakTracker(reset_distance=50) for n in self.enabled}
         self.reset_peak = {n: threading.Event() for n in self.enabled}
@@ -167,7 +168,8 @@ class Preparation:
             if not self.worker: raise ValueError('对刀相机不可用')
             if self.busy: raise ValueError('相机分配正在更新')
             self.busy = True
-            threading.Thread(target=self._assign, args=(name, params), daemon=True).start()
+            self.assignment_thread = threading.Thread(target=self._assign, args=(name, params), daemon=True)
+            self.assignment_thread.start()
         else:
             raise ValueError('未知对刀相机命令')
         self.publish()
@@ -330,6 +332,23 @@ class Preparation:
         self.events.emit('tooltip_preparation_finished', cameras={name: {
             key: self.state[name].get(key) for key in ('tenengrad', 'peak', 'percent', 'edge_width_um', 'edge_width_px', 'peak_edge_width_um')
         } for name in self.enabled})
+
+    def stop_previews(self, cameras):
+        """Synchronously stop selected acquisitions and release their devices."""
+        assignment = self.assignment_thread
+        if assignment and assignment is not threading.current_thread():
+            assignment.join()
+        stopped = []
+        for name in cameras:
+            if name not in self.enabled:
+                continue
+            if self.enabled[name]:
+                self.command('tooltip_preview', {'camera': name, 'on': False, '_internal': True})
+                stopped.append(name)
+            thread = self.threads.get(name)
+            if thread and thread is not threading.current_thread() and thread.ident is not None:
+                thread.join()
+        return stopped
 
     def handoff(self):
         """Stop acquisition without closing devices; joining occurs on session thread."""

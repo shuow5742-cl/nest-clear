@@ -17,6 +17,7 @@ from .modes import Mode
 from .picking import next_branch, scan_branch
 from .work_cycle import ProtocolViolation
 from nest_clear.guard import diagnostic
+from nest_clear.preview.control import REQUEST_CAMERAS, close_previews_for
 
 logger = logging.getLogger("nest_clear.flow.dispatch")
 BranchFactory = Callable[[FlowContext], TreeNode]
@@ -37,6 +38,19 @@ BRANCHES: dict[int, Branch] = {
     155: (frozenset((Mode.IDLE, Mode.PICK_ACCURACY)), PickAccuracy),
     156: (frozenset((Mode.IDLE, Mode.PICK_ACCURACY)), PickAccuracy),
 }
+
+
+class CloseRequestPreviews(Instant):
+    def __init__(self, ctx):
+        super().__init__(name='释放请求使用的预览相机')
+        self.events = ctx.events
+
+    def perform(self):
+        bb = self._blackboard
+        mode = bb.read('mode')
+        func = bb.read('request_func')
+        close_previews_for(self.events, REQUEST_CAMERAS.get(func, ()), 'plc_request',
+                           bb.read('task_id'), func, mode=mode.value)
 
 
 class RejectMode(Instant):
@@ -89,7 +103,7 @@ def build_dispatch(ctx: FlowContext, branches: Mapping[int, Branch] | None = Non
         business = Fallback([factory(ctx), PrepareError(ctx.events)], name=f"功能码 {code} 业务或 999")
         checked = Fallback(
             [
-                Sequence([Predicate("模式允许", lambda bb, allowed=allowed: bb.read("mode") != Mode.BASELINE and bb.read("mode") in allowed), business], name="模式允许后执行"),
+                Sequence([Predicate("模式允许", lambda bb, allowed=allowed: bb.read("mode") != Mode.BASELINE and bb.read("mode") in allowed), CloseRequestPreviews(ctx), business], name="模式允许后执行"),
                 Sequence([RejectMode(ctx), PrepareError(ctx.events)], name="模式拒绝并应答 999"),
             ],
             name="模式检查",

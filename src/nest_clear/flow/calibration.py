@@ -23,6 +23,7 @@ from nest_clear.tooltip.click import confirm_tip, _DISPLAY_ERROR
 from .context import FlowContext
 from .leaves import CallWorker, Instant
 from .modes import Mode, transition
+from nest_clear.preview.control import close_for_mode
 
 logger = logging.getLogger("nest_clear.flow.calibration")
 
@@ -50,6 +51,8 @@ def change_mode(bb: object, ctx: FlowContext, target: Mode, name: str) -> None:
     """执行合法模式切换并记录请求上下文。"""
     current = bb.read("mode")
     if current != target:
+        if current == Mode.IDLE:
+            close_for_mode(ctx.events, target.value, bb.read('task_id'), bb.read('request_func'))
         bb.write("mode", transition(current, target), name)
         ctx.events.emit("mode_change", previous_mode=current.value, mode=target.value,
                         task_id=bb.read("task_id"), request_func=bb.read("request_func"),

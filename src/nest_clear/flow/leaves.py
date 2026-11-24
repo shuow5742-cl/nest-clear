@@ -4,6 +4,7 @@ from collections.abc import Callable
 import logging
 import math
 import time
+import json
 from typing import Any
 
 from autoweaver.motion_policy import CallWorker as FrameworkCallWorker
@@ -18,9 +19,56 @@ from nest_clear.record.events import EventRecorder
 from nest_clear.record.images import record_image_error, tray_number
 from .work_cycle import ProtocolViolation
 from .modes import Mode, transition
+from nest_clear.paths import supervisor_state_file
+from nest_clear.preview.eligibility import preview_eligibility
+from nest_clear.preview.control import close_for_mode
+
+
+def preview_command_allowed(events, mode, name, params):
+    """Apply the same fresh-supervisor and per-camera rules as the UI."""
+    try:
+        path = supervisor_state_file(events.directory)
+        age = max(0, time.time() - path.stat().st_mtime)
+        supervisor = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(supervisor, dict): supervisor = {}
+    except (OSError, ValueError, TypeError, AttributeError):
+        supervisor, age = {}, None
+    cameras = ('front', 'side') if name == 'tooltip_swap' else (params.get('camera'),)
+    for camera in cameras:
+        if camera not in ('front', 'side'):
+            return False, '请选择主或辅助对刀相机'
+        allowed, reason = preview_eligibility(supervisor, age, mode.value, camera)
+        if not allowed: return False, reason
+    return True, None
 
 logger = logging.getLogger("nest_clear.flow")
 REQUEST_NAMES = {1: "请求扫描位或下一任务", 60: "挑取完成"}
+PREVIEW_COMMANDS = frozenset({'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap'})
+
+
+def handle_preview_command(events, mode, name, params):
+    preparation = getattr(events, 'tooltip_preparation', None)
+    if not preparation:
+        return
+    baseline = getattr(events, 'baseline_session', None)
+    allowed, reason = preview_command_allowed(events, mode, name, params)
+    if baseline and not baseline.closed:
+        allowed, reason = False, '对刀基准建立中使用对刀相机，预览不可用'
+    if not allowed:
+        events.emit('baseline_state', message=reason)
+        return
+    try:
+        worker = getattr(preparation, 'worker', None)
+        if name == 'tooltip_preview' and params.get('on') and getattr(worker, 'opened', False):
+            # The calibration worker keeps its devices open between requests.
+            # Release that ownership before preparation opens either camera.
+            if getattr(events, 'request_pending', False):
+                events.emit('baseline_state', message='对刀请求正在使用相机，请在应答后重试')
+                return
+            worker.on_stop()
+        preparation.command(name, params)
+    except Exception as exc:
+        events.emit('baseline_state', message=str(exc))
 
 
 class CallWorker(FrameworkCallWorker):
@@ -54,45 +102,28 @@ class WaitRequest(CallWorker):
         session = self._blackboard.read("tooloffset_session", None) or accuracy_session
         baseline_commands = {'baseline_start', 'baseline_select', 'baseline_measure', 'baseline_manual',
                              'baseline_aux', 'baseline_save', 'baseline_confirm', 'baseline_end'}
-        preview_commands = {'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap'}
+        preview_commands = PREVIEW_COMMANDS
         command = reader(reader_ctx).poll(baseline_commands | preview_commands | ({"abort"} if session else set()))
         preparation = getattr(self.events, 'tooltip_preparation', None)
         baseline = getattr(self.events, 'baseline_session', None)
         if baseline and baseline.closed:
-            if self._blackboard.read('mode') == Mode.BASELINE and not (preparation and preparation.active):
+            if self._blackboard.read('mode') == Mode.BASELINE:
                 self._blackboard.write('mode', transition(Mode.BASELINE, Mode.IDLE), self.name)
                 self.events.emit('mode_change', previous_mode=Mode.BASELINE.value, mode=Mode.IDLE.value)
             self.events.baseline_session = baseline = None
-        if preparation and not preparation.active and baseline is None and self._blackboard.read('mode') == Mode.BASELINE:
-            self._blackboard.write('mode', transition(Mode.BASELINE, Mode.IDLE), self.name)
-            self.events.emit('mode_change', previous_mode=Mode.BASELINE.value, mode=Mode.IDLE.value)
-            self.events.emit('baseline_state', phase='idle', message='请开始对刀基准建立')
         if command and command[0] in preview_commands and preparation:
             name, params = command
-            mode = self._blackboard.read('mode')
-            if mode not in (Mode.IDLE, Mode.BASELINE) or (baseline and name in ('tooltip_assign', 'tooltip_swap', 'tooltip_preview')):
-                self.events.emit('baseline_state', message='当前会话不允许修改对刀相机')
-            else:
-                try:
-                    preparation.command(name, params)
-                    if preparation.active and mode == Mode.IDLE:
-                        self._blackboard.write('mode', transition(Mode.IDLE, Mode.BASELINE), self.name)
-                        self.events.emit('mode_change', previous_mode=Mode.IDLE.value, mode=Mode.BASELINE.value)
-                    elif not preparation.active and not baseline and mode == Mode.BASELINE:
-                        self._blackboard.write('mode', transition(Mode.BASELINE, Mode.IDLE), self.name)
-                        self.events.emit('mode_change', previous_mode=Mode.BASELINE.value, mode=Mode.IDLE.value)
-                except Exception as exc:
-                    self.events.emit('baseline_state', message=str(exc))
+            handle_preview_command(self.events, self._blackboard.read('mode'), name, params)
         if command and command[0].startswith('baseline_'):
             name, params = command
             if name == 'baseline_start':
-                if self._blackboard.read('mode') in (Mode.IDLE, Mode.BASELINE) and baseline is None and not (preparation and getattr(preparation, 'busy', False)):
+                if self._blackboard.read('mode') == Mode.IDLE and baseline is None and not (preparation and getattr(preparation, 'busy', False)):
                     try:
+                        close_for_mode(self.events, Mode.BASELINE.value)
                         baseline = self.events.start_baseline()
                         self.events.baseline_session = baseline
-                        if self._blackboard.read('mode') == Mode.IDLE:
-                            self._blackboard.write('mode', transition(Mode.IDLE, Mode.BASELINE), self.name)
-                            self.events.emit('mode_change', previous_mode=Mode.IDLE.value, mode=Mode.BASELINE.value)
+                        self._blackboard.write('mode', transition(Mode.IDLE, Mode.BASELINE), self.name)
+                        self.events.emit('mode_change', previous_mode=Mode.IDLE.value, mode=Mode.BASELINE.value)
                     except Exception as exc:
                         self.events.emit('baseline_state', phase='idle', message=f'无法开始对刀基准建立：{exc}')
                 else:
@@ -102,9 +133,6 @@ class WaitRequest(CallWorker):
             elif name == 'baseline_end' and preparation and preparation.active:
                 for camera in ('front', 'side'):
                     if preparation.enabled[camera]: preparation.command('tooltip_preview', {'camera':camera, 'on':False})
-                if self._blackboard.read('mode') == Mode.BASELINE and not preparation.active:
-                    self._blackboard.write('mode', transition(Mode.BASELINE, Mode.IDLE), self.name)
-                    self.events.emit('mode_change', previous_mode=Mode.BASELINE.value, mode=Mode.IDLE.value)
         if command and command[0] == "abort":
             session["commands"].append({"seq": reader(reader_ctx).last_seq, "command": "abort", "params": command[1]})
             callback = getattr(self.events, "abort_pickaccuracy" if accuracy_session else "abort_tooloffset", None)
@@ -396,6 +424,7 @@ class CommitReply(Instant):
         if func == 1 and current == Mode.IDLE:
             target = Mode.PICKING
         if target is not None:
+            close_for_mode(self.events, target.value, bb.read('task_id'), bb.read('request_func'))
             bb.write("mode", transition(current, target), self.name)
             self.events.emit(
                 "mode_change", previous_mode=current.value, mode=target.value,

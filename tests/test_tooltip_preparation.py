@@ -9,8 +9,10 @@ class Events:
     def __init__(self): self.rows = []; self.baseline_session = None
     def emit(self, event, **data): self.rows.append((event, data))
 
-def test_commands_enter_prepare_and_return_idle(monkeypatch):
-    events = Events(); events.tooltip_preparation = Preparation(events)
+def test_commands_enter_prepare_and_return_idle(monkeypatch, tmp_path):
+    import json
+    (tmp_path / 'supervisor.json').write_text(json.dumps({'pid': 1, 'child_pid': 2, 'word': 0}))
+    events = Events(); events.directory = tmp_path; events.tooltip_preparation = Preparation(events)
     events.tooltip_preparation.worker = SimpleNamespace(cameras={})
     monkeypatch.setattr('threading.Thread.start', lambda self: None)
     commands = iter([('tooltip_preview', {'camera':'front', 'on':True}), ('tooltip_preview', {'camera':'side', 'on':True}), ('tooltip_preview', {'camera':'front', 'on':False}), ('tooltip_preview', {'camera':'side', 'on':False})])
@@ -18,7 +20,7 @@ def test_commands_enter_prepare_and_return_idle(monkeypatch):
     monkeypatch.setattr('nest_clear.flow.tool_offset.reader', lambda ctx: reader)
     monkeypatch.setattr(CallWorker, 'on_running', lambda self: Status.RUNNING)
     leaf = WaitRequest(None, SimpleNamespace(), events); leaf._blackboard = Board(mode=Mode.IDLE)
-    for expected in (Mode.BASELINE, Mode.BASELINE, Mode.BASELINE, Mode.IDLE):
+    for expected in (Mode.IDLE, Mode.IDLE, Mode.IDLE, Mode.IDLE):
         assert leaf.on_running() == Status.RUNNING
         assert leaf._blackboard.read('mode') == expected
 
@@ -135,6 +137,8 @@ def test_focus_improves_and_tip_motion_resets_peak(tmp_path, monkeypatch):
 def test_slow_open_does_not_block_tick(tmp_path, monkeypatch):
     import threading
     import time
+    import json
+    (tmp_path / 'supervisor.json').write_text(json.dumps({'pid': 1, 'child_pid': 2, 'word': 0}))
     gate=threading.Event()
     class Slow:
         config={'device':'x', 'settings_path':str(tmp_path/'cameras.yaml')}
@@ -148,7 +152,7 @@ def test_slow_open_does_not_block_tick(tmp_path, monkeypatch):
     monkeypatch.setattr(CallWorker,'on_running',lambda self: Status.RUNNING)
     leaf=WaitRequest(None, SimpleNamespace(), events); leaf._blackboard=Board(mode=Mode.IDLE)
     begin=time.monotonic(); assert leaf.on_running()==Status.RUNNING
-    assert time.monotonic()-begin < .2 and leaf._blackboard.read('mode') == Mode.BASELINE
+    assert time.monotonic()-begin < .2 and leaf._blackboard.read('mode') == Mode.IDLE
     gate.set(); prep.close(); prep.threads['front'].join(2)
 
 

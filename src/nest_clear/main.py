@@ -364,6 +364,17 @@ class Application:
 
     def step(self, gate: Gate | None = None) -> None:
         """每拍维持活性；暂停时只完成已接收的请求（必须应答），不接收下一请求。"""
+        # Preview commands must remain responsive while a calibration node is
+        # waiting for user input, and while the device gate pauses PLC polling.
+        events = getattr(self, 'events', None)
+        if events is not None:
+            from nest_clear.flow.leaves import PREVIEW_COMMANDS, handle_preview_command
+            from nest_clear.flow.modes import Mode
+            from nest_clear.flow.tool_offset import reader
+            command = reader(type('CommandContext', (), {'events': events})()).poll(PREVIEW_COMMANDS, defer_unallowed=True)
+            if command:
+                mode = self.handle.batch.blackboard.read('mode') if self.handle is not None else Mode.IDLE
+                handle_preview_command(events, mode, *command)
         if gate is not None:
             gate.beat()
             if gate.paused():
