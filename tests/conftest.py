@@ -62,3 +62,18 @@ def isolate_default_calibration(calibration_dir, tmp_path_factory, monkeypatch):
 
     for module in (tooltip_camera_store, calib_cameras, preparation):
         monkeypatch.setattr(module, 'load_settings', isolated_load_settings)
+
+
+@pytest.fixture(autouse=True)
+def isolate_default_video_discovery(tmp_path, monkeypatch):
+    """Keep implicit V4L discovery away from host devices and sysfs."""
+    from nest_clear.devices import v4l2_enum
+
+    by_path = tmp_path / 'empty-by-path'
+    sys_class = tmp_path / 'empty-video4linux'
+    by_path.mkdir()
+    sys_class.mkdir()
+    monkeypatch.setattr(v4l2_enum.enumerate_capture_devices, '__defaults__', (by_path,))
+    monkeypatch.setattr(v4l2_enum.usb_ids, '__defaults__', (sys_class,))
+    monkeypatch.setattr(v4l2_enum.resolve_tooltip_roles, '__kwdefaults__',
+                        {'directory': by_path, 'sys_class': sys_class})

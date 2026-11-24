@@ -52,7 +52,45 @@ def test_focus():
     assert tracker.update(3,(20,0))['percent']==100
     tracker.reset(); assert tracker.peak is None
 
-def test_store_and_placeholder(tmp_path):
+def test_store_and_placeholder(tmp_path, monkeypatch):
+    # Simulate a host with one matching camera, independently of actual hardware.
+    from pathlib import Path
+    from nest_clear.devices import v4l2_enum
+    by_path = tmp_path / 'host-by-path'; by_path.mkdir()
+    node = tmp_path / 'video0'; node.touch()
+    link = by_path / 'pci-0000:00:14.0-usb-0:5:1.0-video-index0'
+    link.symlink_to(node)
+    usb = tmp_path / 'host-usb'; usb.mkdir()
+    (usb / 'idVendor').write_text('05a3')
+    (usb / 'idProduct').write_text('9230')
+    sys_class = tmp_path / 'host-sys'
+    (sys_class / 'video0').mkdir(parents=True)
+    (sys_class / 'video0' / 'device').symlink_to(usb, target_is_directory=True)
+    monkeypatch.setattr(v4l2_enum, '_is_capture_device', lambda path: True)
+    # A default lookup of the real directory would see this simulated host.
+    original_glob = Path.glob
+    def host_glob(path, pattern):
+        if path == Path('/dev/v4l/by-path'):
+            path = by_path
+        return original_glob(path, pattern)
+    monkeypatch.setattr(Path, 'glob', host_glob)
+    original_resolve = Path.resolve
+    def host_resolve(path, *args, **kwargs):
+        host_sys = Path('/sys/class/video4linux')
+        if path.is_relative_to(host_sys):
+            path = sys_class / path.relative_to(host_sys)
+        return original_resolve(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'resolve', host_resolve)
+    with pytest.raises(ValueError, match='只检测到 1 台对刀相机（usb-0:5）'):
+        v4l2_enum.resolve_tooltip_roles(directory=by_path, sys_class=sys_class)
+    # Prove the same fake host reproduces the failure with production defaults.
+    with monkeypatch.context() as host:
+        host.setattr(v4l2_enum.resolve_tooltip_roles, '__kwdefaults__',
+                     {'directory': '/dev/v4l/by-path', 'sys_class': '/sys/class/video4linux'})
+        with pytest.raises(ValueError, match='只检测到 1 台对刀相机（usb-0:5）'):
+            v4l2_enum.resolve_tooltip_roles()
+    assert v4l2_enum.enumerate_capture_devices() == []
+    assert v4l2_enum.usb_ids(link) is None
     path=tmp_path/'tooltip_cameras.yaml'; result=dict(exposure=42,p99=210,saturated_fraction=0.,contrast=100.)
     save_measurement(path,'front',{'device':'/dev/test','controls':{}},result)
     save_measurement(path,'front',{'device':'/dev/test','controls':{}},result)
