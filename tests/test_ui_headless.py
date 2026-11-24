@@ -207,6 +207,62 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert ui.baseline_save.options['state'] == 'normal'
         assert ui.baseline_tools[0].options['state'] == 'disabled'
         assert ui.baseline_tools[0].options['style'] == 'OffsetSelected.TButton'
+        ui.update_baseline({'mode':'对刀基准建立中', 'command_seq':0, 'baseline':{
+            'phase':'prepare', 'preview':{'front':{'on':True,'device':'/dev/v4l/by-path/pci-usb-0:4:1.0-video-index0','percent':98,'tenengrad':1.0,'peak':1.1,'source':'tip'},
+                                           'side':{'on':True,'error':'USB 带宽不足'}},
+            'existing':{'tool1':{'camera_differences':['front.device']}}}})
+        assert ui.baseline_views['front']['info'].options['fg'] == app.COLORS['green']
+        assert 'usb-0:4' in ui.baseline_views['front']['path'].options['text']
+        assert 'USB 带宽不足' in ui.baseline_views['side']['info'].options['text']
+        assert ui.baseline_views['side']['toggle'].options['text'] == '预览失败，点击重试'
+        assert '集线器' in ui.baseline_views['side']['hint'].options['text']
+        assert '对比度 —' in ui.baseline_views['side']['detail'].options['text']
+        assert ui.baseline_views['side']['path'].parent.row_options[0]['weight'] == 0
+        assert ui.baseline_views['side']['path'].parent.row_options[2]['weight'] == 1
+        assert '基准需重建' in ui.baseline_notice.options['text']
+        assert ui.baseline_results_card.visible is False
+        assert ui.baseline_existing_card.visible is False
+        assert ui.baseline_live.visible is False
+
+        # Off camera shows '识别来源 —', and active session shows bottom cards again
+        ui.update_baseline({'mode': '空闲', 'command_seq': 0, 'baseline': {
+            'phase': 'idle', 'preview': {'front': {'on': False}, 'side': {'on': False}}}})
+        assert '识别来源 —' in ui.baseline_views['front']['detail'].options['text']
+        assert ui.baseline_results_card.visible is True
+        assert ui.baseline_existing_card.visible is True
+        ui.update_baseline({'mode': '对刀基准建立中', 'command_seq': 0, 'baseline': {
+            'phase': 'live', 'tool': 1, 'preview': {'front': {'on': False}, 'side': {'on': False}}}})
+        assert ui.baseline_results_card.visible is True
+        assert ui.baseline_existing_card.visible is True
+        assert ui.baseline_live.visible is True
+
+        # Read live metrics from tooltip_preview.json and clear when expired (>3s)
+        import json, os, time
+        from datetime import datetime
+        from nest_clear.paths import tooltip_preview_file
+        preview_file = tooltip_preview_file(tmp_path)
+        preview_file.parent.mkdir(parents=True, exist_ok=True)
+        now_iso = datetime.now().astimezone().isoformat()
+        preview_file.write_text(json.dumps({
+            'updated_at': now_iso,
+            'cameras': {'front': {'tenengrad': 1.28, 'peak': 1.30, 'percent': 98.0, 'edge_width_um': 27.2,
+                                  'edge_width_px': 1.79, 'contrast': 210, 'source': 'tip', 'exposure_ms': 10.0,
+                                  'history': [80, 98], 'updated_at': now_iso}}
+        }), encoding='utf-8')
+        low_main = {'mode': '对刀基准建立中', 'command_seq': 0, 'baseline': {
+            'phase': 'prepare', 'preview': {'front': {'on': True, 'device': 'usb-0:4', 'exposure_source': '已测 2026-11-23'},
+                                            'side': {'on': True, 'device': 'usb-0:8', 'exposure_source': '已测 2026-11-23'}}}}
+        ui.update_baseline(low_main)
+        assert '98%' in ui.baseline_views['front']['info'].options['text']
+        assert ui.baseline_views['side']['info'].options['text'] == '无实时数据'
+        assert '对比度 —' in ui.baseline_views['side']['detail'].options['text']
+        old_t = time.time() - 5.0
+        os.utime(preview_file, (old_t, old_t))
+        ui.update_baseline(low_main)
+        assert ui.baseline_views['front']['info'].options['text'] == '无实时数据'
+        assert '对比度 —' in ui.baseline_views['front']['detail'].options['text']
+        preview_file.unlink(missing_ok=True)
+
         assert len(ui.table.rows) == 3
         ui.update_tip({'phase':'confirm_move', 'tool':1, 'rounds':[{'iteration':1, 'stage':'对准', 'pixels':{}, 'delta':[.1,0,0], 'target':[1,2,3]}]})
         assert len(ui.tiptable.rows) == 1

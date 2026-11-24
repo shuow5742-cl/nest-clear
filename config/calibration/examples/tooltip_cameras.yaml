@@ -1,0 +1,7 @@
+# 占位，未测；测量后由程序写入真实值。
+devices:
+  front: null
+  side: null
+cameras:
+  front: {measured: false}
+  side: {measured: false}

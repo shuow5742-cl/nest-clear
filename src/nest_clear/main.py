@@ -300,9 +300,13 @@ class Application:
                     self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras, timeout_s=config.capture_timeout_s, events=self.events)
                     if self.clock is not None:
                         self.clock.attach_worker(self.calib_camera)
+                preparation = getattr(self.events, 'tooltip_preparation', None)
+                if preparation: preparation.handoff()
                 return BaselineSession(config, self.calib_camera, self.plc, self.events, calibration_path, baseline_config)
             self.events.start_baseline = start_baseline
             self.events.baseline_session = None
+            from nest_clear.baseline.preparation import Preparation
+            self.events.tooltip_preparation = Preparation(self.events, self.calib_camera, config, baseline_config)
             self.events.emit(
                 'baseline_state',
                 phase='idle',
@@ -314,11 +318,11 @@ class Application:
             from nest_clear.tooloffset.commands import CommandReader, command_path
             try:
                 prior_command = json.loads(command_path(self.events.directory).read_text(encoding='utf-8'))
-                if prior_command.get('command') == 'baseline_start' and type(prior_command.get('seq')) is int:
+                if prior_command.get('command') in {'baseline_start', 'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap'} and type(prior_command.get('seq')) is int:
                     seq = prior_command['seq']
                     self.events.command_reader = CommandReader(self.events.directory, self.events, last_seq=seq)
-                    self.events.emit('tooloffset_command', seq=seq, command='baseline_start', params={}, accepted=False)
-                    self.events.emit('baseline_state', phase='idle', message='主程序未运行时的开始请求已忽略，请重新开始')
+                    self.events.emit('tooloffset_command', seq=seq, command=prior_command['command'], params={}, accepted=False)
+                    self.events.emit('baseline_state', phase='idle', message='主程序未运行时的对刀相机命令已忽略，请重新操作')
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
             for tool in (1, 2):
@@ -381,6 +385,9 @@ class Application:
 
     def close(self) -> None:
         """释放时钟、相机和 PLC；当前流程没有设备动作收尾树。"""
+        preparation = getattr(self.events, 'tooltip_preparation', None)
+        if preparation is not None:
+            preparation.close()
         baseline = getattr(self.events, 'baseline_session', None)
         if baseline is not None:
             baseline.end('主程序停止')

@@ -149,6 +149,8 @@ def save_baseline(
             for view in baseline.views
         ],
     }
+    if isinstance(old, dict) and "camera_settings" in old:
+        data["camera_settings"] = old["camera_settings"]
     _write(path, data, tool, "baseline", old, source, task_id)
 
 

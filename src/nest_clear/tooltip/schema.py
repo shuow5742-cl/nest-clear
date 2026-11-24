@@ -58,7 +58,7 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
         _fields(
             raw,
             {"version", "tool_name", "p0", "offset_xyz", "views"},
-            {"timestamp", "note", "jacobian_pending", "jacobian_measured_at", "jacobian_session"},
+            {"timestamp", "note", "jacobian_pending", "jacobian_measured_at", "jacobian_session", "camera_settings"},
             "baseline",
         )
         if type(raw["version"]) is not int or raw["version"] != 1:

@@ -1,11 +1,95 @@
 """文件和事件到显示数据的转换，不依赖 tkinter。"""
 import json
 import math
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from nest_clear.display import format_number
+from nest_clear.paths import tooltip_preview_file
 
 BITS = ('手动模式','自动模式','循环启动','循环暂停','循环停止','上电完成','急停中','初始化中','初始化完成','信息提示','一般报警','严重故障')
+TOOLTIP_PREVIEW_STALE_SECONDS = 3.0
+
+
+def _now_and_epoch(now=None):
+    if now is None:
+        dt = datetime.now().astimezone()
+        return dt, dt.timestamp()
+    if isinstance(now, (int, float)):
+        dt = datetime.fromtimestamp(float(now), tz=timezone.utc).astimezone()
+        return dt, float(now)
+    dt = now if now.tzinfo else now.astimezone()
+    return dt, dt.timestamp()
+
+
+def extract_tooltip_preview(doc, camera, *, now=None, file_age=None, stale_seconds=TOOLTIP_PREVIEW_STALE_SECONDS):
+    """提取单台相机的实时预览指标；文件缺失或超过 stale_seconds 秒未更新时返回 None。"""
+    if file_age is not None and file_age > stale_seconds:
+        return None
+    if not isinstance(doc, dict) or not doc:
+        return None
+    cameras = doc.get('cameras') if isinstance(doc.get('cameras'), dict) else doc
+    cam = cameras.get(camera) if isinstance(cameras, dict) else None
+    if not isinstance(cam, dict) or not cam:
+        return None
+    ts = cam.get('updated_at') or cam.get('wall') or cam.get('ts') or doc.get('updated_at')
+    if ts is None:
+        return cam if file_age is not None else None
+    now_dt, now_epoch = _now_and_epoch(now)
+    if isinstance(ts, (int, float)):
+        if now_epoch - float(ts) > stale_seconds:
+            return None
+    else:
+        dt = parse_time(ts)
+        if dt is None or (now_dt - dt).total_seconds() > stale_seconds:
+            return None
+    return cam
+
+
+def read_tooltip_preview(root, *, now=None, stale_seconds=TOOLTIP_PREVIEW_STALE_SECONDS):
+    """读取 <root>/state/tooltip_preview.json 并过滤掉过期相机；文件缺失或过期返回 {}。"""
+    path = tooltip_preview_file(root)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    _, now_epoch = _now_and_epoch(now)
+    file_age = max(0.0, now_epoch - mtime)
+    if file_age > stale_seconds:
+        return {}
+    doc = read_json(path)
+    result = {}
+    for name in ('front', 'side'):
+        cam = extract_tooltip_preview(doc, name, now=now, file_age=file_age, stale_seconds=stale_seconds)
+        if cam is not None:
+            result[name] = cam
+    return result
+
+
+def baseline_preview_display(item, live=None, *, allow_inline=False):
+    """Format one preparation view, discarding stale metrics after an error or expiration."""
+    error = str(item.get('error') or '')
+    if error:
+        hint = ('两台相机不要接在同一个 USB 集线器上，换一个主板 USB 口后重开预览。'
+                if 'USB' in error or '带宽' in error else '检查相机配置、连接和权限后重开预览。')
+        return {'failed': True, 'on': bool(item.get('on')), 'no_live_data': False,
+                'button': '预览失败，点击重试', 'message': error, 'hint': hint,
+                'metrics': {'percent': '—', 'current': '—', 'peak': '—', 'edge_um': '—',
+                            'edge_px': '—', 'contrast': '—', 'source': '—', 'exposure': '—'},
+                'history': []}
+    if not item.get('on'):
+        return {'failed': False, 'on': False, 'no_live_data': False, 'message': '预览关闭',
+                'metrics': None, 'history': []}
+    src = live if isinstance(live, dict) and live else (item if allow_inline and 'percent' in item else None)
+    if not src or src.get('percent') is None:
+        exposure_error = item.get('exposure_error')
+        message = str(exposure_error) if exposure_error else '无实时数据'
+        return {'failed': False, 'on': True, 'no_live_data': True, 'message': message,
+                'metrics': {'percent': '—', 'current': '—', 'peak': '—', 'edge_um': '—',
+                            'edge_px': '—', 'contrast': '—', 'source': '—', 'exposure': '—'},
+                'history': []}
+    return {'failed': False, 'on': True, 'no_live_data': False, 'live': src,
+            'history': list(src.get('history') or [])}
 
 
 def page_for_mode(status):
@@ -157,7 +241,7 @@ def status_indicators(s, m, now=None, supervisor_age=None):
         ready = ('gray', ready_text)
     return {'父程序': parent, '主程序': main_indicator, 'PLC 连接': (plc_color, plc_text), '心跳': (hb_color, hb_text), '40932 就绪': ready}
 
-EVENTS = {'arrival_warning','error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
+EVENTS = {'arrival_warning','tooltip_settings_warning','tooltip_preview_error','tooltip_exposure_failed','error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
 def classify_event(row):
     event = str(row.get('event','')).lower()
     text = ' '.join(str(row.get(k,'')) for k in ('reason_code','code','reason','what','operation','event')).lower()
@@ -167,7 +251,7 @@ def classify_event(row):
     if event not in EVENTS and reply not in (999,131,82,92) and not any(x in text for x in ('readback','回读不一致','采图失败','capture_failed')):
         return None
     category = '父程序' if row.get('process') == 'supervisor' else '标定' if any(x in text for x in ('camcal','tooltip','tooloffset','pickacc','calib')) or reply in (82,92,131,152) else '通信' if any(x in text for x in ('plc','heartbeat','readback','回读')) else '相机' if any(x in text for x in ('camera','capture','image','采图')) else '配置' if 'config' in text else '算法'
-    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('arrival_warning','warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
+    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('arrival_warning','warning','tooltip_settings_warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
     reason = str(row.get('reason',row.get('message',event)))
     fields = {}
     for line in reason.splitlines():

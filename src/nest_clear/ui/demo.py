@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from PIL import Image, ImageDraw
-from nest_clear.paths import supervisor_state_file, main_status_file, live_image_file
+from nest_clear.paths import supervisor_state_file, main_status_file, live_image_file, tooltip_preview_file
 
 
 def atomic(path, value):
@@ -157,14 +157,15 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
     if baseline_state:
         if initial:
             project = Path(__file__).resolve().parents[3]; env = dict(os.environ, PYTHONPATH=str(project/'src'))
-            subprocess.run([str(project/'.venv/bin/python'), '-m', 'nest_clear.tools.baseline_demo_image', str(root), baseline_state], cwd=project, env=env, check=True, timeout=30)
+            subprocess.run([str(project/'.venv/bin/python'), '-m', 'nest_clear.tools.baseline_demo_image', str(root), 'live' if baseline_state.startswith('prepare') else baseline_state], cwd=project, env=env, check=True, timeout=30)
         path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
         candidate = json.loads((root/'baseline_demo.json').read_text(encoding='utf-8'))
         from nest_clear.baseline.session import format_outside_message
         delta = candidate.get('delta_mm') or [0.0, 0.0]
         fail_msg = format_outside_message(delta)
         phases = {'select':('select','请选择工具'), 'live':('live','请点动针尖到主相机中心后按【对刀基准】'),
-                  'success':('success','基准建立成功（待保存）'), 'fail':('fail', fail_msg), 'confirm':('confirm','请确认覆盖保存')}
+                  'success':('success','基准建立成功（待保存）'), 'fail':('fail', fail_msg), 'confirm':('confirm','请确认覆盖保存'),
+                  'prepare':('prepare','请调焦后开始对刀基准建立'), 'prepare_error':('prepare','请检查相机连接'), 'prepare_unassigned':('idle','请分配相机')}
         phase,message = phases[baseline_state]
         data['mode']='对刀基准建立中'; data['baseline']={'phase':phase, 'message':message, 'tool':None if phase=='select' else 1,
             'candidate':candidate if phase in ('success','fail','confirm') else None, 'offset_xyz':None if phase=='select' else [1.2,-.3,.05],
@@ -172,6 +173,30 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
             'live_delta':candidate['delta_mm'] if phase != 'select' else None, 'live_inside':candidate['inside'],
             'existing':{'tool1':{'time':stamp,'p0':[125,73,110],'offset_xyz':[1.2,-.3,.05],'pixels':{'front':[319,240],'side':[322,240]},'jacobian_pending':True,'stale':True,'offset_newer':True},
                         'tool2':{'time':stamp,'p0':[126,73,110],'offset_xyz':[2.1,.4,.02],'pixels':{'front':[320,240],'side':[321,240]},'jacobian_pending':True}}}
+        if baseline_state.startswith('prepare'):
+            def low_view(port):
+                return {'on': True, 'device': f'/dev/v4l/by-path/pci-0000:00:14.0-usb-0:{port}:1.0-video-index0', 'exposure_source': '已测 2026-11-23'}
+            def live_view(current, peak):
+                percent = 100 * current / peak
+                return {'percent': percent, 'tenengrad': current, 'peak': peak, 'edge_width_um': 27.2, 'edge_width_px': 1.79, 'contrast': 210, 'source': 'tip', 'exposure_ms': 10.0, 'fps': 5.0, 'tip_uv': [320, 240], 'history': [60, 65, 73, 82, 90, percent], 'updated_at': stamp}
+            data['baseline']['tool'] = None
+            data['baseline']['preview'] = {'front': low_view(4), 'side': low_view(8)}
+            data['baseline']['detected_cameras'] = [data['baseline']['preview'][n]['device'] for n in ('front', 'side')]
+            preview_cameras = {'front': live_view(1.28, 1.30), 'side': live_view(1.13, 1.30)}
+            if baseline_state == 'prepare_error':
+                data['baseline']['preview']['side']['error'] = 'USB 带宽不足'
+                preview_cameras.pop('side', None)
+                live_image_file(root, 'baseline_side').unlink(missing_ok=True)
+            if baseline_state == 'prepare_unassigned':
+                data['mode'] = '空闲'
+                data['baseline']['preview'] = {'front': {'on': False}, 'side': {'on': False}}
+                preview_cameras = {}
+                for name in ('front', 'side'):
+                    live_image_file(root, 'baseline_' + name).unlink(missing_ok=True)
+            if preview_cameras:
+                atomic(tooltip_preview_file(root), {'updated_at': stamp, 'cameras': preview_cameras})
+            else:
+                tooltip_preview_file(root).unlink(missing_ok=True)
         atomic(path,data)
     if tooltip_state:
         if initial:
@@ -268,7 +293,7 @@ def generate(root):
 
 def main():
     from .__main__ import add_view_arguments, validate_view_arguments
-    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm')); parser.add_argument('--tooltip-state', choices=('idle','probe','confirm_move','in_range','done','fail')); add_view_arguments(parser)
+    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm','prepare','prepare_error','prepare_unassigned')); parser.add_argument('--tooltip-state', choices=('idle','probe','confirm_move','in_range','done','fail')); add_view_arguments(parser)
     parser.add_argument('--film-mode', action='store_true')
     parser.add_argument('--temporary-exposure', action='store_true')
     parser.add_argument('--wb-state', choices=('running','success','fail'), default=None)
@@ -294,6 +319,7 @@ def main():
     from .app import App
     app = App(args.root, page=args.page or '主页', screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms, ignore_before_ns=0)
     if args.screenshot:
+        app.root.overrideredirect(True)
         app.root.attributes('-topmost', True)
     if args.geometry:
         try:

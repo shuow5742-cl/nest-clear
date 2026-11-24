@@ -191,6 +191,10 @@ def report(root: str | Path, day: date) -> str:
         f"{maximum[0]:.3f} mm ({maximum[1]}轴)" if maximum else "无",
         sum(not r["stable"] for r in arrivals),
         f"{median(durations):.3f}/{max(durations):.3f} 秒" if durations else "无"))
+    preparations = [row for row in events if row.get('event') == 'tooltip_preparation_finished']
+    latest = (preparations[-1].get('cameras') or {}) if preparations else {}
+    widths = ' / '.join(f"{label} {latest.get(name, {}).get('edge_width_um', '未测')} µm" for name, label in (('front','主'), ('side','辅')))
+    lines.append(f"对刀相机准备：{len(preparations)} 次，最终边缘宽度 {widths}")
     attention = []
     tray_ids = list(dict.fromkeys([row.get("tray_id") for row in trays] +
                                   [row.get("tray_id") for row in events if row.get("tray_id") and row.get("event") == "work_cycle"]))

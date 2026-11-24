@@ -14,11 +14,12 @@ from tkinter import font as tkfont, ttk, messagebox
 
 from PIL import Image, ImageGrab, ImageTk
 
-from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file, ui_command_file
+from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file, ui_command_file, tooltip_preview_file
 from .model import (EventTail, camcal_progress, decode_status, display_time, duration,
                     read_json, status_indicators, parent_process_row, child_process_row, tooltip_progress, preview_controls, edge_corner_label,
                     pickacc_tray_geometry, pickacc_type, pickacc_stage, pickacc_note, pickacc_infield,
-                    tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time, page_for_mode)
+                    tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time, page_for_mode,
+                    baseline_preview_display, extract_tooltip_preview)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -688,16 +689,51 @@ class App:
         self.baseline_live.grid(row=2, column=0, sticky='ew')
         self.baseline_notice = tk.Label(head, text='', bg=WHITE, fg=COLORS['yellow'], anchor='w', font=self.theme.body)
         self.baseline_notice.grid(row=3, column=0, sticky='ew')
-        self.picture(self.card(self.baseline, '主对刀相机 · 点击放大', 1, 0), 'baseline_front')
-        self.picture(self.card(self.baseline, '辅助对刀相机 · 点击放大', 1, 1), 'baseline_side')
+        self.baseline_views = {}
+        for column, (name, title) in enumerate((('front','主对刀相机（正面）'), ('side','辅助对刀相机（侧面）'))):
+            body = self.card(self.baseline, title + ' · 点击放大', 1, column)
+            body.columnconfigure(0, weight=1); body.rowconfigure(0, weight=0); body.rowconfigure(1, weight=0); body.rowconfigure(2, weight=1)
+            path = self.label(body, '未分配', fg=MUTED); path.grid(row=0, column=0, sticky='w')
+            actions = tk.Frame(body, bg=WHITE); actions.grid(row=1, column=0, sticky='w')
+            toggle = tk.Button(actions, text=title+'预览：关', command=lambda n=name:self.baseline_toggle(n))
+            toggle.grid(row=0, column=0)
+            choose = ttk.Button(actions, text='选择相机', command=lambda n=name:self.baseline_choose(n)); choose.grid(row=0, column=1)
+            exposure = ttk.Button(actions, text='重新测曝光', command=lambda n=name:self.baseline_command('tooltip_exposure_retest', {'camera':n})); exposure.grid(row=0, column=2)
+            reset = ttk.Button(actions, text='清晰度峰值清零', command=lambda n=name:self.baseline_command('tooltip_peak_reset', {'camera':n})); reset.grid(row=0, column=3)
+            pic = self.picture(body, 'baseline_'+name); pic.grid_configure(row=2)
+            info = tk.Label(body, text='预览关闭', bg=WHITE, fg=MUTED, font=self.theme.large, anchor='w', justify='left'); info.grid(row=3, column=0, sticky='ew')
+            hint = self.label(body, '', fg=COLORS['red']); hint.grid(row=4, column=0, sticky='ew')
+            detail = self.label(body, ''); detail.grid(row=5, column=0, sticky='ew')
+            graph = tk.Canvas(body, height=24, bg=WHITE, highlightthickness=0); graph.grid(row=6, column=0, sticky='ew')
+            body.bind('<Configure>', lambda event, info=info, hint=hint: (info.config(wraplength=max(100, event.width-12)), hint.config(wraplength=max(100, event.width-12))))
+            self.baseline_views[name] = dict(path=path, toggle=toggle, choose=choose, exposure=exposure, reset=reset, info=info, hint=hint, detail=detail, graph=graph, picture=pic)
+        self.baseline_swap = ttk.Button(controls, text='主辅对调', command=lambda:self.baseline_command('tooltip_swap'))
+        self.baseline_swap.grid(row=0, column=9, padx=2)
         results = self.card(self.baseline, '本次结果', 2, 0)
-        self.baseline_result = tk.Label(results, text='等待测量', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.body, width=1, wraplength=600)
+        self.baseline_results_card = results.master
+        self.baseline_result = tk.Label(results, text='等待测量', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.table, width=1, wraplength=600)
         self.baseline_result.grid(row=0, column=0, sticky='nsew')
         results.bind('<Configure>', lambda event: self.baseline_result.config(wraplength=max(200, event.width - 12)))
         old = self.card(self.baseline, '现有基准与工具补偿', 2, 1)
-        self.baseline_existing = tk.Label(old, text='—', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.body, width=1, wraplength=600)
+        self.baseline_existing_card = old.master
+        self.baseline_existing = tk.Label(old, text='—', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.table, width=1, wraplength=600)
         self.baseline_existing.grid(row=0, column=0, sticky='nsew')
         old.bind('<Configure>', lambda event: self.baseline_existing.config(wraplength=max(200, event.width - 12)))
+
+    def baseline_toggle(self, name):
+        item = getattr(self, 'baseline_preview', {}).get(name) or {}
+        self.baseline_command('tooltip_preview', {'camera':name, 'on':True if item.get('error') else not item.get('on', False)})
+
+    def baseline_choose(self, name):
+        devices = getattr(self, 'baseline_devices', [])
+        if not devices:
+            messagebox.showinfo('选择相机', '未检测到 capture 相机'); return
+        top = tk.Toplevel(self.root); top.title('选择对刀相机')
+        value = tk.StringVar(value=devices[0])
+        ttk.Combobox(top, textvariable=value, values=devices, state='readonly', width=70).pack(padx=12, pady=12)
+        def choose():
+            self.baseline_command('tooltip_assign', {'camera':name, 'device':value.get()}); top.destroy()
+        ttk.Button(top, text='确定', command=choose).pack(pady=8)
 
     def baseline_command(self, name, params=None):
         from nest_clear.tooloffset.commands import send
@@ -721,9 +757,78 @@ class App:
             selected_old = existing.get(f'tool{tool}') or {}
             if selected_old.get('tool_offset_missing'): notice = f'提示：工具{tool} 尚无工具偏移标定结果（不阻止建基准）'
             elif selected_old.get('offset_newer'): notice = f'提示：工具{tool} 的工具偏移标定结果比现有对刀基准新（不阻止建基准）'
+        camera_diffs = [f'工具{i}: ' + '、'.join((existing.get(f'tool{i}') or {}).get('camera_differences') or []) for i in (1,2) if (existing.get(f'tool{i}') or {}).get('camera_differences')]
+        if camera_diffs: notice = '对刀相机设置已变更（' + '；'.join(camera_diffs) + '），基准需重建'
         self.baseline_notice.config(text=notice)
         def enable(widget, condition): widget.config(state='normal' if condition and not self.baseline_pending else 'disabled')
-        enable(self.baseline_start, phase in ('idle', 'done'))
+        enable(self.baseline_start, phase in ('idle', 'done', 'prepare'))
+        self.baseline_preview = data.get('preview') or {}; self.baseline_devices = data.get('detected_cameras') or []
+        preparing = phase in ('idle', 'done', 'prepare') and any(
+            (self.baseline_preview.get(n) or {}).get('on') or (self.baseline_preview.get(n) or {}).get('error')
+            for n in ('front', 'side')
+        )
+        if preparing:
+            self.baseline_results_card.grid_remove()
+            self.baseline_existing_card.grid_remove()
+            self.baseline_live.grid_remove()
+            self.baseline_notice.grid_remove()
+        else:
+            self.baseline_results_card.grid()
+            self.baseline_existing_card.grid()
+            self.baseline_live.grid()
+            if notice: self.baseline_notice.grid()
+            else: self.baseline_notice.grid_remove()
+        may_prepare = phase in ('idle', 'done', 'prepare') and main.get('mode', '空闲') in ('空闲', '对刀基准建立中')
+        enable(self.baseline_swap, may_prepare)
+        preview_path = tooltip_preview_file(self.directory)
+        preview_doc = self.file_data(preview_path)
+        try:
+            preview_age = max(0.0, time.time() - preview_path.stat().st_mtime)
+        except OSError:
+            preview_age = None
+        for name, widgets in self.baseline_views.items():
+            item = self.baseline_preview.get(name) or {}; on = item.get('on', False)
+            device = item.get('device') or '未分配'
+            import re
+            short = re.search(r'usb-[0-9]+:[0-9.]+', str(device))
+            widgets['path'].config(text='设备：' + (short.group(0) if short else str(device)))
+            title = '主对刀相机（正面）' if name == 'front' else '辅助对刀相机（侧面）'
+            live = extract_tooltip_preview(preview_doc, name, file_age=preview_age)
+            display = baseline_preview_display(item, live=live, allow_inline=(preview_age is None and not preview_doc))
+            button_text = display['button'] if display['failed'] else title+'预览：'+('开' if on else '关')
+            widgets['toggle'].config(text=button_text + ('' if may_prepare else '（会话进行中）'), fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
+            enable(widgets['choose'], may_prepare); enable(widgets['exposure'], on and may_prepare); enable(widgets['reset'], on and may_prepare)
+            def number(value): return f'{value:.2f}' if isinstance(value, (float,int)) else '—'
+            if display['failed']:
+                text = display['message']; color = COLORS['red']
+                detail = '清晰度 —　边缘 — µm / — px　对比度 —　识别来源 —　曝光 —'
+            elif not display['on']:
+                text = '预览关闭'; color = MUTED
+                detail = f'边缘 — µm / — px　对比度 —　识别来源 —　曝光 — ms {item.get("exposure_source", "未测")}'
+            elif display['no_live_data']:
+                text = display['message']
+                color = COLORS['red'] if item.get('exposure_error') else MUTED
+                detail = (str(item.get('exposure_error')) + '　' if item.get('exposure_error') else '') + f'边缘 — µm / — px　对比度 —　识别来源 —　曝光 — ms {item.get("exposure_source", "未测")}'
+            else:
+                src = display['live']
+                pct = src.get('percent')
+                color = COLORS['green'] if isinstance(pct, (int,float)) and pct >= 95 else COLORS['yellow'] if isinstance(pct, (int,float)) and pct >= 80 else COLORS['red']
+                text = f'清晰度 {pct:.0f}%　当前 {src.get("tenengrad",0):.2f} / 峰值 {src.get("peak",0):.2f}'
+                source = '识别针尖' if src.get('source') == 'tip' else '未识别到针尖，按画面中央计算'
+                exposure_source = item.get('exposure_source') or src.get('exposure_source') or '未测'
+                detail = (str(item.get('exposure_error')) + '　' if item.get('exposure_error') else '') + f'边缘 {number(src.get("edge_width_um"))} µm / {number(src.get("edge_width_px"))} px　对比度 {number(src.get("contrast"))}　{source}　曝光 {number(src.get("exposure_ms"))} ms {exposure_source}'
+            widgets['info'].config(text=text, fg=color)
+            hint_text = display.get('hint', '')
+            widgets['hint'].config(text=hint_text)
+            if hint_text: widgets['hint'].grid()
+            else: widgets['hint'].grid_remove()
+            widgets['detail'].config(text=detail)
+            graph=widgets['graph']; graph.delete('all'); values=display.get('history') or []
+            if len(values)>1:
+                width=max(2, graph.winfo_width()); height=max(2, graph.winfo_height())
+                points=[coord for i,v in enumerate(values) for coord in (i*width/(len(values)-1), height-max(0,min(100,v))*height/100)]
+                graph.create_line(*points, fill=COLORS['blue'], width=2)
+
         for i, button in enumerate(self.baseline_tools, 1):
             enable(button, phase == 'select'); button.config(style='OffsetSelected.TButton' if i == tool else 'TButton')
         for b in (self.baseline_measure, self.baseline_manual): enable(b, phase in ('live','fail','success','saved'))
@@ -1583,7 +1688,8 @@ class App:
             self.tiptable.insert('', 'end', values=(row.get('iteration') or '—', row.get('stage') or '—', tooltip_pixels(row.get('pixels')), tooltip_deviation(row.get('deviation_mm'), compact=True), tooltip_vector(row.get('delta'), signed=True, compact=True), tooltip_vector(row.get('target'), compact=True), '是' if row.get('click') else '否', tooltip_time(row.get('confirmed_at'))))
         phase = data.get('phase', 'idle'); tool = data.get('tool')
         self.tip_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else COLORS['gray'])
-        self.tip_message.config(text=data.get('message') or '等待 PLC 100/101', fg=COLORS['red'] if phase in ('limit','fail') else COLORS['green'] if phase == 'done' else INK)
+        warning = data.get('camera_settings_warning')
+        self.tip_message.config(text=warning or data.get('message') or '等待 PLC 100/101', fg=COLORS['yellow'] if warning else COLORS['red'] if phase in ('limit','fail') else COLORS['green'] if phase == 'done' else INK)
         for name, button in self.tip_buttons.items():
             enabled = (name == 'tooltip_confirm_move' and phase in ('probe','confirm_move') or name == 'tooltip_confirm_result' and phase == 'in_range' or name in ('tooltip_click','tooltip_abort') and phase in ('probe','confirm_move','in_range','limit','click_failed'))
             button.config(state='normal' if enabled and not self.tip_pending else 'disabled')

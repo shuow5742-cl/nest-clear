@@ -32,6 +32,11 @@ def ui_command_file(root: str | Path) -> Path:
     return Path(root) / 'state' / 'ui_command.json'
 
 
+def tooltip_preview_file(root: str | Path) -> Path:
+    """返回对刀准备模式高频实时预览指标文件路径。"""
+    return Path(root) / 'state' / 'tooltip_preview.json'
+
+
 def live_image_file(root: str | Path, name: str = 'latest') -> Path:
     if name not in {'latest', 'preview_latest', 'camcal_latest', 'tooloffset_latest', 'tooloffset_crop', 'pickacc_latest', 'pickacc_crop', 'calib_front_latest', 'calib_side_latest', 'baseline_front', 'baseline_side'}:
         raise ValueError('未知实时图片')

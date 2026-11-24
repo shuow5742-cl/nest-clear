@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parents[2] / "config/calibration/examples"
-CALIBRATION_FILES = ("camera.yaml", "tools.yaml", "tool1_baseline.yaml", "tool2_baseline.yaml")
+CALIBRATION_FILES = ("camera.yaml", "tools.yaml", "tool1_baseline.yaml", "tool2_baseline.yaml", "tooltip_cameras.yaml")
 logger = logging.getLogger(__name__)
 
 
