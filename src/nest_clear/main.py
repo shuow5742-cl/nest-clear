@@ -276,6 +276,9 @@ class Application:
             camera_sn = assembly.camera_sn(config)
             self.camera = CameraWorker(config.vision.camera_backend, camera_sn, camera, timeout_s=config.capture_timeout_s, exposure_us=config.exposure_us, gain_db=config.gain_db, balance_ratio=config.balance_ratio, principal=(float(calibration.K[0][2]), float(calibration.K[1][2])), image_size=config.camera_image_size)
             self.camera.open()
+            from nest_clear.preview.main_host import MainPreview
+            self.main_preview = MainPreview(config, self.camera, self.events)
+            self.events.stop_main_preview = self.main_preview.stop
             if config.tool_calibration.enabled:
                 self.calib_camera = CalibCameraWorker(config.tool_calibration.cameras, timeout_s=config.capture_timeout_s, events=self.events)
             detector = detector or (HairDetector(config.vision.hair_detector, calibration, config.scan.z, config.vision.scale_z_bin_mm) if config.vision.detector == "hair" else StubDetector([PixelTarget(*pixel) for pixel in config.vision.pixels]))
@@ -368,6 +371,11 @@ class Application:
         # waiting for user input, and while the device gate pauses PLC polling.
         events = getattr(self, 'events', None)
         if events is not None:
+            from nest_clear.flow.modes import Mode
+            mode = self.handle.batch.blackboard.read('mode') if self.handle is not None else Mode.IDLE
+            main_preview = getattr(self, 'main_preview', None)
+            if main_preview is not None:
+                main_preview.poll(mode)
             from nest_clear.flow.leaves import PREVIEW_COMMANDS, handle_preview_command
             from nest_clear.flow.modes import Mode
             from nest_clear.flow.tool_offset import reader
@@ -396,6 +404,12 @@ class Application:
 
     def close(self) -> None:
         """释放时钟、相机和 PLC；当前流程没有设备动作收尾树。"""
+        main_preview = getattr(self, 'main_preview', None)
+        if main_preview is not None:
+            try:
+                main_preview.stop()
+            except Exception:
+                logger.exception('关闭主相机预览或恢复参数失败')
         preparation = getattr(self.events, 'tooltip_preparation', None)
         if preparation is not None:
             preparation.close()

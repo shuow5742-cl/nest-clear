@@ -21,11 +21,9 @@ def atomic_write(path, data):
 
 
 def run_preview(config, mode="preview"):
+    """Standalone host: open and close a camera owned by this process."""
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    root = Path(config.record_directory)
-    status_path = root / 'state' / 'preview_status.json'
-    settings = config.ui_preview
     sn = config.camera_sn
     if sn == 'auto' and config.vision.camera_backend == 'daheng':
         from nest_clear.devices.camera_select import resolve_camera
@@ -33,6 +31,23 @@ def run_preview(config, mode="preview"):
     worker = CameraWorker(config.vision.camera_backend, sn, timeout_s=config.capture_timeout_s,
                           exposure_us=config.exposure_us, gain_db=config.gain_db,
                           balance_ratio=config.balance_ratio, image_size=config.camera_image_size)
+    try:
+        try:
+            worker.open()
+        except Exception as exc:
+            status_path = Path(config.record_directory) / 'state' / 'preview_status.json'
+            atomic_write(status_path, json.dumps({'error': str(exc)}, ensure_ascii=False).encode())
+            raise
+        return run_preview_session(config, mode, worker, stop)
+    finally:
+        worker.camera.close()
+
+
+def run_preview_session(config, mode, worker, stop, *, shared=False):
+    """Run the same preview renderer with a caller-owned, already open worker."""
+    root = Path(config.record_directory)
+    status_path = root / 'state' / 'preview_status.json'
+    settings = config.ui_preview
     values = {'sharpness': None, 'corners': 0, 'board_offset_mm': None}
     analysis_thread = None
     if mode == 'focus':
@@ -48,10 +63,9 @@ def run_preview(config, mode="preview"):
     started = time.monotonic()
     frames = 0
     try:
-        worker.open()
         while not stop.is_set():
             begin = time.monotonic()
-            image, _ = worker._execute({'stage': 'preview'})
+            image, _ = (worker.execute if shared else worker._execute)({'stage': 'preview'})
             captured = time.monotonic()
             if mode == 'focus':
                 action_path = root / 'state' / 'focus_action.json'
@@ -184,5 +198,5 @@ def run_preview(config, mode="preview"):
             stop.wait(max(0, settings['interval_s'] - (time.monotonic()-begin)))
     except Exception as exc:
         atomic_write(status_path, json.dumps({'error': str(exc)}, ensure_ascii=False).encode())
-    finally:
-        worker.camera.close()
+        if shared:
+            raise

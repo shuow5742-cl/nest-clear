@@ -300,3 +300,19 @@ def test_baseline_preview_reads_state_file_and_handles_expiry(tmp_path):
     stale_epoch = now.timestamp() - 5.0
     os.utime(path, (stale_epoch, stale_epoch))
     assert read_tooltip_preview(tmp_path, now=now) == {}
+
+
+def test_main_preview_controls_use_mode_and_hosted_focus_state():
+    from nest_clear.ui.model import preview_controls
+    status = {'pid': 1, 'child_pid': 2, 'word': 0,
+              'preview': {'on': True, 'mode': 'focus'}}
+    focus = preview_controls(status, 0, '空闲')
+    assert focus['focus_enabled'] and focus['white_balance_enabled']
+    blocked = preview_controls(status, 0, '挑毛中')
+    assert not blocked['preview_enabled'] and not blocked['focus_enabled']
+    assert '挑毛中' in blocked['reason']
+    status['word'] = 1  # 手动模式
+    assert preview_controls(status, 0, '挑毛中')['focus_enabled']
+    status['preview'] = {'on': False}
+    assert preview_controls(status, 0, '对刀基准建立中')['preview_enabled']
+    assert not preview_controls(status, 0, '空闲')['white_balance_enabled']

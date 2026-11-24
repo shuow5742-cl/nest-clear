@@ -150,6 +150,19 @@ class Supervisor:
             self.events.emit("error", task_id=task_id, operation="supervisor_reply", reason=str(exc))
             logger.error("错误码：SUPERVISOR-REPLY；主程序%s；Task_ID=%s 代答失败：%s", reason, task_id, exc)
 
+    def _discard_preview_command(self):
+        """Do not replay a command belonging to the child after ownership changes."""
+        path = ui_command_file(self.config.record_directory)
+        try:
+            stamp = path.stat().st_mtime_ns
+            command = json.loads(path.read_text(encoding='utf-8'))
+            seq = command.get('seq')
+            self._preview_command_stamp = stamp
+            if type(seq) is int:
+                self.preview_seq = max(self.preview_seq, seq)
+        except (OSError, ValueError, AttributeError):
+            pass
+
     def _running(self) -> bool:
         """检查子进程并记录意外退出，等待下一个初始化边沿。"""
         if self.child is None:
@@ -161,6 +174,7 @@ class Supervisor:
         self._last_exit = reason
         logger.error("主程序%s；等待下一次初始化信号", reason)
         self.events.emit("child_exit", reason=reason, code=code)
+        self._discard_preview_command()
         self.child = None
         self._started_at = None
         self._clear_ready()
@@ -177,7 +191,7 @@ class Supervisor:
         self.events.emit("child_stop", reason=reason, child_pid=self.child.pid)
         try:
             self.child.terminate()
-            self.child.wait(timeout=3)
+            self.child.wait(timeout=max(3, self.config.capture_timeout_s * 8 + 10))
         except subprocess.TimeoutExpired:
             self.child.kill()
             self.child.wait()
@@ -186,6 +200,7 @@ class Supervisor:
                 "错误码：SUPERVISOR-STOP；停止主程序失败：%s；位置：子进程；排查建议：检查进程权限", exc
             )
             return False
+        self._discard_preview_command()
         self.child = None
         self._started_at = None
         self._clear_ready()
@@ -260,7 +275,8 @@ class Supervisor:
             if not wanted:
                 self._stop_preview('ui')
             elif self.child is not None:
-                self.events.emit('preview_rejected', reason='child_running')
+                # The child reads this command itself and owns its camera.
+                pass
             elif self.preview_process is None:
                 from ..preview.process import run_preview
                 status = Path(self.config.record_directory) / 'state' / 'preview_status.json'
@@ -283,6 +299,12 @@ class Supervisor:
         if not self._clear_ready():
             return
         try:
+            # Freeze the old owner's command boundary before starting the child.
+            # Commands written during child initialization remain visible to it.
+            self._discard_preview_command()
+            from ..preview.process import atomic_write
+            handoff = Path(self.config.record_directory) / 'state' / 'main_preview_handoff.json'
+            atomic_write(handoff, json.dumps({'pid': os.getpid(), 'seq': self.preview_seq}).encode())
             self._alive.unlink(missing_ok=True)
             self.child = subprocess.Popen(self.config.supervisor.child_command)
             self._started_at = time.monotonic()
@@ -312,6 +334,17 @@ class Supervisor:
                 preview.update(data)
             except (OSError, ValueError):
                 pass
+            if self.child is not None:
+                try:
+                    host = json.loads((Path(self.config.record_directory) / 'state' / 'main_preview_state.json').read_text(encoding='utf-8'))
+                    if host.get('pid') == self.child.pid:
+                        preview.update({k: host[k] for k in ('on', 'mode', 'seq', 'error') if k in host})
+                    else:
+                        preview['on'] = False
+                except (OSError, ValueError, AttributeError):
+                    preview['on'] = False
+            else:
+                preview['on'] = self.preview_process is not None
             preview['actual_xyz'] = self.preview_xyz
             state['preview'] = preview
             state['preview_xyz'] = self.preview_xyz
@@ -403,7 +436,7 @@ class Supervisor:
                     )
         self._preview_tick()
         now = time.monotonic()
-        if self.preview_process is not None and now >= self._preview_xyz_next:
+        if (self.preview_process is not None or self.child is not None) and now >= self._preview_xyz_next:
             self._preview_xyz_next = now + .5
             try:
                 if self._failures:

@@ -1339,7 +1339,7 @@ class App:
         rows = self.tail.poll()
         self.update_reply(main, rows)
         self.update_cam(camcal_progress(main))
-        self.update_preview(supervisor)
+        self.update_preview(supervisor, main)
         self.tip_ack = main.get('command_seq', 0)
         if self.tip_pending and self.tip_ack >= self.tip_pending: self.tip_pending = 0
         tip_data = tooltip_progress(main)
@@ -1448,12 +1448,12 @@ class App:
         except (OSError, ValueError, TypeError):
             logger.exception('写预览命令失败')
 
-    def update_preview(self, supervisor):
+    def update_preview(self, supervisor, main=None):
         try:
             age = max(0, time.time() - supervisor_state_file(self.directory).stat().st_mtime)
         except OSError:
             age = None
-        controls = preview_controls(supervisor, age)
+        controls = preview_controls(supervisor, age, (main or {}).get('mode'))
         self.preview_data = supervisor.get('preview') if isinstance(supervisor.get('preview'), dict) else {}
         self.preview_button.config(text='关闭相机预览' if controls['on'] and controls['mode'] == 'preview' else '打开相机预览',
                                    state='normal' if controls['preview_enabled'] else 'disabled')
