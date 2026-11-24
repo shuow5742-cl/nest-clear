@@ -30,7 +30,12 @@ scan:  # 模组坐标系下的扫描范围与步距，单位 mm
   step_x: 60.0  # X 轴换行步距，单位 mm，取正数并按视野重叠确定
   step_y: 70.0  # Y 轴行内步距，单位 mm，取正数并按视野重叠确定
   z: -3.0  # 11-23 用户定：工作距离 100mm 处 Z=-3，与相机标定起点一致
-arrival_tolerance_mm: 0.1  # 各轴实时位置与下发扫描位置允许的最大绝对差，单位 mm
+arrival_tolerance_mm: 0.1  # 11-23 用户定：超差只记录 arrival_warning 不报错，公差保持 0.1
+arrival_settle:  # 11-23 用户定：采样间隔、稳定窗口样本数、逐轴极差及最长等待时间
+  sample_interval_s: 0.05
+  settle_samples: 4
+  jitter_tol_mm: 0.02
+  settle_timeout_s: 1.0
 pick_depth_z: 0.0  # 下针深度的模组 Z 坐标，单位 mm，按现场测量填写
 travel:  # 模组各轴允许的最小和最大坐标，单位 mm，按设备行程填写
   x: [80.0, 180.0]  # X 轴最小、最大坐标，单位 mm

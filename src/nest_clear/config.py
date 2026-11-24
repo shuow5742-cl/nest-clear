@@ -145,6 +145,7 @@ class Config:
     exposure_source: str = "配置"
     white_balance_override_path: str = ""
     white_balance_source: str = "配置"
+    arrival_settle: dict[str, Any] = field(default_factory=lambda: {"sample_interval_s": .05, "settle_samples": 4, "jitter_tol_mm": .02, "settle_timeout_s": 1.0})
     test_mode: dict[str, Any] = field(default_factory=lambda: {"non_pickable": [f"T{i:02d}" for i in range(3, 31, 3)]})
 
 
@@ -324,7 +325,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             _fail("run_mode", "通信联调模式已删除，请改用 config/nest_clear.yaml")
         if data.get("run_mode") == "production":
             data.pop("run_mode")
-        data = {"test_mode": {}, "pick_accuracy": {}, "tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, **data}
+        data = {"arrival_settle": {}, "test_mode": {}, "pick_accuracy": {}, "tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, **data}
     root = _mapping(
         data,
         "根",
@@ -333,6 +334,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "plc",
             "scan",
             "arrival_tolerance_mm",
+            "arrival_settle",
             "pick_depth_z",
             "tool_calibration",
             "camera_calibration",
@@ -681,6 +683,14 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     if not (wb['roi_fraction'] <= 1 and wb['max_saturated_fraction'] <= 1 and wb['min_green'] < wb['max_green'] <= 255 and wb['max_p99'] <= 255):
         _fail('ui_preview.white_balance', '阈值范围无效')
     preview_data['white_balance'] = wb
+    settle_defaults = {"sample_interval_s": .05, "settle_samples": 4, "jitter_tol_mm": .02, "settle_timeout_s": 1.0}
+    if not isinstance(root["arrival_settle"], dict):
+        _fail("arrival_settle", "应为映射")
+    settle = _mapping({**settle_defaults, **root["arrival_settle"]}, "arrival_settle", list(settle_defaults))
+    for key in ("sample_interval_s", "jitter_tol_mm", "settle_timeout_s"):
+        settle[key] = _number(settle[key], "arrival_settle." + key, True)
+    if type(settle["settle_samples"]) is not int or not 2 <= settle["settle_samples"] <= 40:
+        _fail("arrival_settle.settle_samples", "应为 2 至 40 的整数")
     return Config(
         plc,
         scan,
@@ -703,5 +713,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _string(record["machine_id"], "record.machine_id"),
         camcal,
         UIConfig(**ui_data),
-        preview_data, offset, accuracy, str(exposure_path), exposure_source, str(wb_path), wb_source, test_mode,
+        preview_data, offset, accuracy, str(exposure_path), exposure_source, str(wb_path), wb_source, settle, test_mode,
     )

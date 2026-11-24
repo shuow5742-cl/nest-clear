@@ -11,7 +11,7 @@ from autoweaver.motion_policy.nodes.leaf.condition import Condition
 from autoweaver.motion_policy.nodes.node import Status, TreeNode
 
 from nest_clear.config import Config
-from nest_clear.guard import GuardError, diagnostic, format_pose
+from nest_clear.guard import GuardError, diagnostic
 from nest_clear.vision.hair_integration import render
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.events import EventRecorder
@@ -184,32 +184,70 @@ class PrepareScan(Instant):
         bb.write("reply_tool", None, self.name)
 
 
-class CheckArrival(Instant):
-    """计算并记录扫描位到位结果，供紧随其后的 Condition 判断。"""
+class CheckArrival(CallWorker):
+    """异步重复读取扫描位，等待稳定或超时，不阻塞行为树 tick。"""
 
-    def __init__(self, config: Config, events: EventRecorder) -> None:
-        """绑定到位公差和事件记录器。"""
-        super().__init__(name="记录到位校验")
-        self.config = config
-        self.events = events
+    def __init__(self, board: Any, config: Config, events: EventRecorder, clock=time.monotonic) -> None:
+        super().__init__(board, "plc", {"operation": "actual"}, "arrival_sample", name="读取实时坐标")
+        self.config, self.events, self.clock = config, events, clock
 
-    def perform(self) -> None:
-        """按轴比较实测与目标；无效坐标也作为到位失败记录。"""
+    def on_start(self) -> Status:
+        self.started = self.clock()
+        self.samples = []
+        self.pending = True
+        return super().on_start()
+
+    def on_running(self) -> Status:
+        now = self.clock()
+        if not self.pending:
+            if now - self.last_read < self.config.arrival_settle["sample_interval_s"] and now - self.started < self.config.arrival_settle["settle_timeout_s"]:
+                return Status.RUNNING
+            if now - self.started >= self.config.arrival_settle["settle_timeout_s"]:
+                return self.finish(False, now)
+            self.pending = True
+            return super().on_start()
+        status = super().on_running()
+        if status != Status.SUCCESS:
+            return status
+        now = self.clock()
+        actual = self._blackboard.read("arrival_sample")
+        try:
+            valid = len(actual) == 3 and all(math.isfinite(v) for v in actual)
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            reason = "读取实时坐标无效"
+            self._blackboard.write("error", reason, self.name)
+            self._blackboard.write("error_diagnostic", diagnostic(reason, code="MOTION-ARRIVAL", where="扫描位到位校验", hint="检查实时坐标和通信。"), self.name)
+            return Status.FAILURE
+        self.samples.append((now - self.started, tuple(actual)))
+        self.samples = self.samples[-40:]
+        self.last_read = now
+        self.pending = False
+        n = self.config.arrival_settle["settle_samples"]
+        window = self.samples[-n:]
+        stable = len(window) == n and all(max(x[1][axis] for x in window) - min(x[1][axis] for x in window) <= self.config.arrival_settle["jitter_tol_mm"] for axis in range(3))
+        if stable or now - self.started >= self.config.arrival_settle["settle_timeout_s"]:
+            return self.finish(stable, now)
+        return Status.RUNNING
+
+    def finish(self, stable: bool, now: float) -> Status:
         bb = self._blackboard
-        actual = bb.read("actual")
+        window = self.samples[-self.config.arrival_settle["settle_samples"]:]
+        actual = tuple(sum(sample[1][i] for sample in window) / len(window) for i in range(3))
         expected = bb.read("scan")
-        ok = isinstance(actual, (list, tuple)) and len(actual) == 3
-        if ok:
-            ok = all(
-                math.isfinite(value) and abs(value - target) <= self.config.arrival_tolerance_mm
-                for value, target in zip(actual, expected)
-            )
-        bb.write("arrival_ok", ok, self.name)
-        self.events.emit("arrival", task_id=bb.read("task_id"), expected=expected, actual=actual, ok=ok)
-        if not ok:
-            reason = f"到位超差：期望 {format_pose(expected)}，实际 {format_pose(actual)}，公差 {self.config.arrival_tolerance_mm} mm"
-            bb.write("error", reason, self.name)
-            bb.write("error_diagnostic", diagnostic(reason, code="MOTION-ARRIVAL", where="扫描位到位校验", hint="检查设备坐标、运动和到位公差。"), self.name)
+        delta = tuple(a - e for a, e in zip(actual, expected))
+        over = any(abs(v) > self.config.arrival_tolerance_mm for v in delta)
+        bb.write("actual", actual, self.name)
+        bb.write("arrival_ok", not over and stable, self.name)
+        self.events.emit("arrival_warning" if over or not stable else "arrival", task_id=bb.read("task_id"),
+                         stage=bb.read("work_action"), expected=expected, actual=actual, delta=delta,
+                         reason=(f"扫描位{'未稳定、' if not stable else ''}{'超差' if over else '稳定等待超时'}；偏差 {delta} mm" if over or not stable else "到位稳定"),
+                         where="扫描位到位监督",
+                         tolerance_mm=self.config.arrival_tolerance_mm, stable=stable, over_tolerance=over,
+                         settle_elapsed_s=now - self.started, samples=[[round(t * 1000, 3), *xyz] for t, xyz in self.samples],
+                         ok=not over and stable)
+        return Status.SUCCESS
 
 
 class RecordCapture(Instant):
