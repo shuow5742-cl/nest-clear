@@ -198,5 +198,5 @@ def test_open_error_messages(tmp_path, monkeypatch):
         def read(self): raise OSError(errno.ENOSPC, 'No space left on device')
         def release(self): pass
     monkeypatch.setattr('cv2.VideoCapture', lambda *args: NoBandwidth())
-    with pytest.raises(Exception, match='USB 带宽不足：两台对刀相机须插在不同 USB 控制器上'):
+    with pytest.raises(Exception, match='USB 带宽不足：请检查连接并尝试更换 USB 根端口'):
         CalibCamera('front', {'backend': 'uvc', 'device': str(path)}).open()

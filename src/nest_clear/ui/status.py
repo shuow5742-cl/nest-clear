@@ -56,7 +56,7 @@ class MainStatus:
             if e == 'pickacc_state': d['pickacc'].update(row)
             if e == 'baseline_state': d['baseline'].update(row)
             if e == 'tooltip_start': d['tooltip'] = {}
-            if e.startswith('tooltip_'):
+            if e.startswith('tooltip_') and not e.startswith(('tooltip_preview_', 'tooltip_exposure_', 'tooltip_camera_', 'tooltip_preparation_', 'tooltip_focus_')):
                 d['tooltip'].update(row)
                 if e in ('tooltip_detect','tooltip_offset','tooltip_reliability'): d['tooltip'].setdefault('history', []).append(dict(row))
             now = time.monotonic()

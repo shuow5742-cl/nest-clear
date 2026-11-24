@@ -263,3 +263,16 @@ def test_disconnected_camera_releases_and_allows_retry(rig, monkeypatch):
     monkeypatch.setattr(camera, 'execute', execute)
     cmd(session, 'baseline_select', 'live', {'tool': 1})
     assert camera.opened
+
+
+def test_saved_baseline_includes_camera_settings(rig):
+    s, worker, _, cal, _ = rig
+    settings = {'front': {'device':'front', 'format':'YUYV', 'controls':{'exposure':123}},
+                'side': {'device':'side', 'format':'YUYV', 'controls':{'exposure':456}}}
+    worker.cameras = {name: SimpleNamespace(settings_snapshot=lambda snapshot=snapshot: snapshot)
+                      for name, snapshot in settings.items()}
+    cmd(s, 'baseline_measure', 'success')
+    cmd(s, 'baseline_save', 'confirm')
+    cmd(s, 'baseline_confirm', 'saved', {'accept':True})
+    assert yaml.safe_load((cal/'tool1_baseline.yaml').read_text())['camera_settings'] == settings
+    assert load_baseline(cal/'tool1_baseline.yaml').tool_name == 'tool1'

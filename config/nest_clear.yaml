@@ -118,9 +118,9 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
   cameras:  # 正面看 X/Z，侧面看 Y/Z
     # 两台目前均在 Intel 00:14.0，正/侧面尚未确认：
     # /dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0
-    # /dev/v4l/by-path/pci-0000:00:14.0-usb-0:3:1.0-video-index0
-    # Renesas 0000:02:00.0（总线 003/004）空闲；须将其中一台改插到其端口。
-    # 改插后 by-path 会变化，须重新确认正/侧面和路径，固定插口并贴标签。
+    # /dev/v4l/by-path/pci-0000:00:14.0-usb-0:8:1.0-video-index0
+    # xHCI 不同根端口各自独享 480M；经过 hub 时才共享。带宽不足时界面提示，再换口。
+    # 正侧关系须现场确认；分配写入 tooltip_cameras.yaml，换口后重新确认。
     front: {backend: uvc, device: '待接入：确认主相机与插口后填写 by-path'}
     side: {backend: uvc, device: '待接入：确认辅助相机与插口后填写 by-path'}
   camera_controls: {}  # 默认 YUYV 1920x1080、手动曝光及固定图像控制

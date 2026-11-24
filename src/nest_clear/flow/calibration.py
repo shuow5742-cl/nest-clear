@@ -161,6 +161,11 @@ class StartCalibration(Instant):
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         if isinstance(data, dict) and data.get("status") == "占位，未标定":
             fail(f"工具 {tool} 基准为占位，未标定：{path}")
+        from nest_clear.devices.tooltip_camera_store import baseline_differences
+        differences = baseline_differences(self.ctx.config, data.get('camera_settings')) if isinstance(data, dict) else []
+        if differences:
+            message = '对刀相机设置已变更（' + '、'.join(differences) + '），基准需重建'
+            self.ctx.events.emit('tooltip_settings_warning', camera_settings_warning=message, reason=message)
         baseline = load_baseline(path)
         if baseline.tool_name != f"tool{tool}" or {v.name for v in baseline.views} != {"front", "side"}:
             fail(f"工具 {tool} 基准工具号或视图不匹配")

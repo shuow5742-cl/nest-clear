@@ -231,3 +231,72 @@ def test_supervisor_status_and_process_recover():
     assert parent_process_row(state, 0, now)[1:5] == (123, '11:00:00', '01:00:00', '运行')
     assert status_indicators({}, {}, now, None)['父程序'] == ('gray', '无数据')
     assert parent_process_row({}, None, now)[4] == '未运行'
+
+
+def test_baseline_preview_error_clears_stale_metrics():
+    from nest_clear.ui.model import baseline_preview_display
+    data = baseline_preview_display({'error':'USB 带宽不足','on':True,'percent':98,'tenengrad':1.2,
+        'peak':1.3,'edge_width_um':20,'edge_width_px':2,'contrast':220,'source':'tip','exposure_ms':10,'history':[98]})
+    assert data['button'] == '预览失败，点击重试'
+    assert set(data['metrics'].values()) == {'—'}
+    assert data['history'] == [] and '集线器' in data['hint']
+
+
+def test_tooltip_focus_summary_not_anomaly_and_preserves_status(tmp_path):
+    from nest_clear.ui.status import MainStatus
+    row = {'event': 'tooltip_focus_summary', 'camera': 'front', 'current': 1.2, 'peak': 1.3,
+           'percent': 92.3, 'edge_width_um': 20.0, 'source': 'tip'}
+    assert classify_event(row) is None
+    status = MainStatus(tmp_path)
+    status.observe({'event': 'tooltip_start', 'tool': 1})
+    status.observe(row)
+    assert status.data['tooltip']['event'] == 'tooltip_start'
+    assert 'current' not in status.data['tooltip']
+    if status.timer:
+        status.timer.cancel()
+
+
+def test_baseline_preview_reads_state_file_and_handles_expiry(tmp_path):
+    import os
+    from datetime import datetime, timedelta, timezone
+    from nest_clear.paths import tooltip_preview_file
+    from nest_clear.ui.model import baseline_preview_display, read_tooltip_preview
+
+    low = {'on': True, 'device': 'usb-0:4', 'exposure_source': '已测 2026-11-23'}
+    # Missing file -> no live data
+    assert read_tooltip_preview(tmp_path) == {}
+    missing_disp = baseline_preview_display(low, live=None)
+    assert missing_disp['no_live_data'] is True
+    assert missing_disp['message'] == '无实时数据'
+    assert set(missing_disp['metrics'].values()) == {'—'}
+    assert missing_disp['history'] == []
+
+    now = datetime.now().astimezone()
+    path = tooltip_preview_file(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        'updated_at': now.isoformat(),
+        'cameras': {
+            'front': {'tenengrad': 1.28, 'peak': 1.30, 'percent': 98.5, 'edge_width_um': 27.2,
+                      'edge_width_px': 1.79, 'contrast': 210, 'source': 'tip', 'exposure_ms': 10.0,
+                      'history': [80, 90, 98.5], 'updated_at': now.isoformat()},
+            'side': {'tenengrad': 1.10, 'peak': 1.30, 'percent': 84.6, 'edge_width_um': 30.0,
+                     'edge_width_px': 1.97, 'contrast': 195, 'source': 'tip', 'exposure_ms': 10.0,
+                     'history': [70, 80, 84.6], 'updated_at': (now - timedelta(seconds=4)).isoformat()},
+        }
+    }), encoding='utf-8')
+    fresh = read_tooltip_preview(tmp_path, now=now)
+    assert 'front' in fresh and 'side' not in fresh
+    front_disp = baseline_preview_display(low, live=fresh['front'])
+    assert front_disp['no_live_data'] is False
+    assert front_disp['live']['percent'] == 98.5
+    assert front_disp['history'] == [80, 90, 98.5]
+    side_disp = baseline_preview_display(low, live=fresh.get('side'))
+    assert side_disp['no_live_data'] is True
+    assert side_disp['message'] == '无实时数据'
+    assert set(side_disp['metrics'].values()) == {'—'}
+
+    # File mtime expired (> 3s) -> all cameras report no live data
+    stale_epoch = now.timestamp() - 5.0
+    os.utime(path, (stale_epoch, stale_epoch))
+    assert read_tooltip_preview(tmp_path, now=now) == {}

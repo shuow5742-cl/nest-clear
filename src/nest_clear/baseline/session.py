@@ -189,6 +189,12 @@ def existing_baselines(config: Any, calibration_path: str | Path) -> dict[str, d
         key = f"tool{n}"
         entry = offsets.get(key) if isinstance(offsets.get(key), dict) else {}
         item = summary(cal_dir / f"{key}_baseline.yaml", bool(entry.get("baseline_stale")))
+        try:
+            from nest_clear.devices.tooltip_camera_store import baseline_differences
+            raw = _read(cal_dir / f"{key}_baseline.yaml")
+            item['camera_differences'] = baseline_differences(config, raw.get('camera_settings')) if isinstance(raw, dict) else []
+        except Exception:
+            item['camera_differences'] = []
         item["tool_offset_time"] = entry.get("time")
         item["tool_offset_missing"] = not bool(entry)
         item["offset_newer"] = _is_newer(entry.get("time"), item.get("time"))
@@ -699,7 +705,10 @@ class BaselineSession:
         if not offsets_path.exists() and (directory / "tool_offset.yaml").exists():
             offsets_path = directory / "tool_offset.yaml"
         old = path.read_bytes() if path.exists() else None
-        save_mapping(path, baseline_mapping(baseline), f"tool{self.tool}_baseline")
+        mapping = baseline_mapping(baseline)
+        if hasattr(self.cameras, 'cameras'):
+            mapping['camera_settings'] = {name: camera.settings_snapshot() for name, camera in self.cameras.cameras.items()}
+        save_mapping(path, mapping, f"tool{self.tool}_baseline")
         try:
             offsets = _read(offsets_path)
             if isinstance(offsets.get(f"tool{self.tool}"), dict) and offsets[f"tool{self.tool}"].get("baseline_stale"):
@@ -789,6 +798,8 @@ class BaselineSession:
         """后台循环：处理队列命令，并在等待测量时以约 5fps 刷新实时画面。"""
         last_detect = 0.0
         try:
+            preparation = getattr(self.events, 'tooltip_preparation', None)
+            if preparation: preparation.await_handoff()
             while not self.stop.is_set():
                 try:
                     command, params = self.queue.get_nowait()

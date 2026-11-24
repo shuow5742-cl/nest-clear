@@ -7,11 +7,31 @@ import os
 import struct
 from pathlib import Path
 from .v4l2_controls import V4L2Controls, DEFAULTS
-from .tooltip_camera_store import load_settings
+from .tooltip_camera_store import load_settings, measurement_for_device
 import cv2
 import numpy as np
 
 from nest_clear.guard import GuardError
+
+
+def enumerate_capture_devices(directory: str | Path = '/dev/v4l/by-path') -> list[str]:
+    """Return by-path index0 nodes which report video capture capability."""
+    result = []
+    for path in sorted(Path(directory).glob('*-video-index0')):
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+            try:
+                cap = bytearray(104)
+                fcntl.ioctl(fd, 0x80685600, cap, True)
+                capabilities, device_caps = struct.unpack_from('II', cap, 84)
+                effective = device_caps if capabilities & 0x80000000 else capabilities
+                if effective & (0x1 | 0x1000):
+                    result.append(str(path))
+            finally:
+                os.close(fd)
+        except OSError:
+            continue
+    return result
 
 
 class CalibCamera:
@@ -36,7 +56,10 @@ class CalibCamera:
                 if self.position is None:
                     raise ValueError("mock 需要坐标来源")
             elif self.backend == "uvc":
-                device = self.config["device"]
+                self.exposure_status = '未测曝光'
+                store = self.config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
+                data = load_settings(store)
+                device = data.get('devices', {}).get(self.name) or self.config["device"]
                 label = "主" if self.name == "front" else "辅助"
                 if isinstance(device, str) and device.startswith("待接入"):
                     raise ValueError(f"{label}对刀相机未配置")
@@ -63,8 +86,7 @@ class CalibCamera:
                 width, height = int(self.device.get(cv2.CAP_PROP_FRAME_WIDTH)), int(self.device.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 if (width, height, actual_format) != (settings['width'], settings['height'], cv2.VideoWriter_fourcc(*'YUYV')):
                     raise ValueError(f"格式回读不一致：期望 YUYV {settings['width']}x{settings['height']}，实际 fourcc={actual_format} {width}x{height}")
-                store = self.config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
-                saved = load_settings(store)['cameras'].get(self.name, {})
+                saved = measurement_for_device(data, device)
                 if saved.get('measured') and saved.get('device') == device and type(saved.get('exposure')) is int:
                     settings['exposure'] = saved['exposure']; self.exposure_status = '已测曝光'
                 self.controls = V4L2Controls(path)
@@ -84,7 +106,7 @@ class CalibCamera:
         except Exception as exc:
             self.close()
             if (isinstance(exc, OSError) and exc.errno == errno.ENOSPC) or "No space left on device" in str(exc):
-                exc = OSError("USB 带宽不足：两台对刀相机须插在不同 USB 控制器上")
+                exc = OSError("USB 带宽不足：请检查连接并尝试更换 USB 根端口")
             raise GuardError(
                 "CALIB-CAMERA-OPEN",
                 f"{self.name} 相机打开失败：{exc}",
