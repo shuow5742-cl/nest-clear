@@ -2,6 +2,13 @@
 
 from typing import Any, Callable
 import threading
+import json
+import logging
+import os
+import tempfile
+from pathlib import Path
+
+from nest_clear.devices.v4l2_enum import resolve_tooltip_roles, usb_port
 
 import numpy as np
 from autoweaver.worker import AsyncRequestWorker
@@ -41,10 +48,14 @@ class CalibCameraWorker(AsyncRequestWorker):
         self.blocked = set()
         self.capture_done = {}
         self.opened = False
+        self._roles_lock = threading.RLock()
+        self._last_roles = None
         for name in ("front", "side"):
             config = dict(cameras[name])
             if events is not None and getattr(events, 'directory', None) is not None:
                 config['_ownership_dir'] = str(events.directory)
+            if config.get("backend") == "uvc":
+                config['_role_resolver'] = self.resolve_roles
             if config.get("backend") == "mock":
                 config.setdefault("target_uv", [320, 240])
                 config.setdefault("p0", [0, 0, 0])
@@ -52,6 +63,36 @@ class CalibCameraWorker(AsyncRequestWorker):
                 if tip_offset is not None:
                     config["tip_offset"] = tip_offset
             self.cameras[name] = CalibCamera(name, config, position or (lambda: [0, 0, 0]))
+
+    def resolve_roles(self):
+        with self._roles_lock:
+            cfg = self.cameras['front'].config
+            roles = resolve_tooltip_roles(cfg.get('usb_vendor_id', '05a3'), cfg.get('usb_product_id', '9230'))
+            ports = {name: usb_port(path)[1] for name, path in roles.items()}
+            previous = self._last_roles
+            directory = getattr(self.events, 'directory', None)
+            state_path = Path(directory) / 'state' / 'tooltip_roles.json' if directory else None
+            if previous is None and state_path:
+                try: previous = json.loads(state_path.read_text(encoding='utf-8'))
+                except (OSError, ValueError): pass
+            if previous and previous != ports:
+                message = f'对刀相机插口角色已变化：{previous} → {ports}'
+                logging.getLogger(__name__).warning(message)
+                if self.events: self.events.emit('warning', reason=message)
+            if self.events: self.events.emit('tooltip_roles', **ports)
+            self._last_roles = ports
+            if state_path:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                temp_name = None
+                try:
+                    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=state_path.parent,
+                                                     prefix='.tooltip_roles_', delete=False) as stream:
+                        temp_name = stream.name
+                        json.dump(ports, stream, ensure_ascii=False)
+                    os.replace(temp_name, state_path)
+                finally:
+                    if temp_name and os.path.exists(temp_name): os.unlink(temp_name)
+            return roles
 
     def _camera_error(self, exc: Exception) -> GuardError:
         detail = str(exc).replace("\n", "；")
@@ -64,6 +105,16 @@ class CalibCameraWorker(AsyncRequestWorker):
         """预检时打开两台相机；任何失败都释放已打开的设备。"""
         if self.opened:
             return
+        if any(getattr(camera, 'backend', None) == 'uvc' for camera in self.cameras.values()):
+            try:
+                roles = self.resolve_roles()
+            except Exception as exc:
+                self.on_stop()
+                raise self._camera_error(exc) from exc
+            if any(getattr(camera, 'backend', None) == 'uvc' and camera.device is not None and
+                   camera.actual_settings.get('device') != roles[name]
+                   for name, camera in self.cameras.items()):
+                self.on_stop()
         for name in list(self.blocked):
             if self.capture_done[name].is_set():
                 self.cameras[name].close()
@@ -80,6 +131,11 @@ class CalibCameraWorker(AsyncRequestWorker):
                 errors.append(exc)
         if errors:
             raise self._camera_error(RuntimeError("；".join(str(error) for error in errors))) from errors[0]
+        if any(getattr(camera, 'backend', None) == 'uvc' and
+               camera.actual_settings.get('device') != roles[name]
+               for name, camera in self.cameras.items()):
+            self.on_stop()
+            raise self._camera_error(RuntimeError('对刀相机插口在打开期间发生变化，请重试'))
         self.opened = True
 
     def execute(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:

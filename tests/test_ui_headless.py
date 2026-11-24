@@ -5,70 +5,6 @@ import pytest
 from nest_clear.ui.demo import write_demo
 
 
-def test_baseline_choose_refreshes_devices_each_time(monkeypatch):
-    from nest_clear.ui import app
-    from nest_clear.devices import v4l2_enum
-
-    discovered = iter([[], ['/dev/v4l/by-path/new-video-index0']])
-    monkeypatch.setattr(v4l2_enum, 'enumerate_capture_devices', lambda: next(discovered))
-    shown = []
-    monkeypatch.setattr(app.messagebox, 'showinfo', lambda *args, **kwargs: shown.append((args, kwargs)))
-    values = []
-    monkeypatch.setattr(app.tk, 'Toplevel', lambda root: Widget(root))
-    monkeypatch.setattr(app.tk, 'StringVar', lambda value: SimpleNamespace(get=lambda: value))
-    monkeypatch.setattr(app.ttk, 'Combobox', lambda parent, **kwargs: values.append(kwargs['values']) or SimpleNamespace(pack=lambda **kw: None))
-    monkeypatch.setattr(app.ttk, 'Button', lambda parent, **kwargs: SimpleNamespace(pack=lambda **kw: None))
-    monkeypatch.setattr(app.ttk, 'Frame', Widget)
-    instance = SimpleNamespace(root=Widget(), baseline_devices=['stale'], baseline_command=lambda *args: None)
-
-    app.App.baseline_choose(instance, 'front')
-    app.App.baseline_choose(instance, 'front')
-
-    assert shown
-    assert values == [['/dev/v4l/by-path/new-video-index0']]
-
-
-def test_baseline_choose_reports_enumeration_error(monkeypatch, caplog):
-    from nest_clear.ui import app
-    from nest_clear.devices import v4l2_enum
-    def fail():
-        raise OSError('camera enumeration failed')
-    monkeypatch.setattr(v4l2_enum, 'enumerate_capture_devices', fail)
-    shown = []
-    monkeypatch.setattr(app.messagebox, 'showerror', lambda *args, **kwargs: shown.append((args, kwargs)))
-    root = object()
-    app.App.baseline_choose(SimpleNamespace(root=root), 'front')
-    assert shown == [(('选择相机失败', 'camera enumeration failed'), {'parent': root})]
-    assert '枚举对刀相机失败' in caplog.text
-
-
-def test_baseline_choose_confirm_and_cancel_release_grab(monkeypatch):
-    from nest_clear.ui import app
-    from nest_clear.devices import v4l2_enum
-    monkeypatch.setattr(v4l2_enum, 'enumerate_capture_devices', lambda: ['/dev/camera'])
-    buttons, dialogs, commands = [], [], []
-    class Dialog(Widget):
-        def __init__(self, parent):
-            super().__init__(parent); self.released = False; dialogs.append(self)
-        def grab_release(self): self.released = True
-    monkeypatch.setattr(app.tk, 'Toplevel', Dialog)
-    monkeypatch.setattr(app.tk, 'StringVar', lambda value: SimpleNamespace(get=lambda: value))
-    monkeypatch.setattr(app.ttk, 'Frame', Widget)
-    monkeypatch.setattr(app.ttk, 'Combobox', Widget)
-    def button(parent, **kwargs):
-        buttons.append(kwargs)
-        return Widget(parent)
-    monkeypatch.setattr(app.ttk, 'Button', button)
-    ui = SimpleNamespace(root=Widget(), baseline_command=lambda *args: commands.append(args))
-    app.App.baseline_choose(ui, 'front')
-    buttons[0]['command']()
-    assert commands == [('tooltip_assign', {'camera': 'front', 'device': '/dev/camera'})]
-    assert dialogs[0].released and dialogs[0].destroyed
-    app.App.baseline_choose(ui, 'side')
-    buttons[3]['command']()
-    assert len(commands) == 1 and dialogs[1].released and dialogs[1].destroyed
-
-
 class Widget:
     def __init__(self, parent=None, **kwargs):
         self.parent = parent; self.master = parent; self.options = dict(kwargs); self.children = []; self.rows = {}; self.sel = ()
@@ -194,6 +130,8 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     for page in app.App.PAGE_NAMES:
         ui = app.App(tmp_path, page=page, ignore_before_ns=0)
         if page == '对刀基准建立':
+            assert not hasattr(ui, 'baseline_choose') and not hasattr(ui, 'baseline_swap')
+            assert all('choose' not in view for view in ui.baseline_views.values())
             from nest_clear.ui.model import supervisor_tooltip_main
             ui.baseline_pending = 8
             supervisor = {'pid': 123, 'child_pid': None, 'child_state': '停止'}
@@ -210,9 +148,7 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
                            ui.baseline_manual, ui.baseline_aux, ui.baseline_save, ui.baseline_end]:
                 assert button.options['state'] == 'disabled'
             assert '主程序未运行（等待 PLC 初始化）' in ui.baseline_message.options['text']
-            assert ui.baseline_views['front']['choose'].options['state'] == 'normal'
             assert ui.baseline_views['front']['toggle'].options['state'] == 'normal'
-            assert ui.baseline_swap.options['state'] == 'normal'
             ui.baseline_pending = 9; ui.baseline_pending_since = 0; ui.baseline_pending_name = 'tooltip_assign'
             ui.update_baseline({'command_seq': 9}, {'child_pid': 42})
             assert ui.baseline_pending == 0
@@ -323,19 +259,16 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
             'phase': 'live', 'preview': {'front': {'on': True}, 'side': {'on': True}}}}
         ui.update_baseline(active, supervisor)
         for view in ui.baseline_views.values():
-            assert all(view[key].options['state'] == 'disabled' for key in ('toggle', 'choose', 'exposure', 'reset'))
+            assert all(view[key].options['state'] == 'disabled' for key in ('toggle', 'exposure', 'reset'))
             assert '不可用：对刀基准建立中' in view['reason'].options['text']
             assert '不可用' not in view['toggle'].options['text']
-        assert ui.baseline_swap.options['state'] == 'disabled'
         active['mode'] = '挑毛中'
         ui.update_baseline(active, supervisor)
         for view in ui.baseline_views.values():
-            assert all(view[key].options['state'] == 'normal' for key in ('toggle', 'choose', 'exposure', 'reset'))
+            assert all(view[key].options['state'] == 'normal' for key in ('toggle', 'exposure', 'reset'))
             assert not view['reason'].visible
-        assert ui.baseline_swap.options['state'] == 'normal'
         active['baseline']['preview']['front']['on'] = False
         ui.update_baseline(active, supervisor)
-        assert ui.baseline_views['front']['choose'].options['state'] == 'normal'
         assert all(ui.baseline_views['front'][key].options['state'] == 'disabled' for key in ('exposure', 'reset'))
         ui.update_baseline({'mode':'对刀基准建立中', 'command_seq':0, 'baseline':{
             'phase':'prepare', 'preview':{'front':{'on':True},'side':{'on':True,'error':'USB 带宽不足'}},

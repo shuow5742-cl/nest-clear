@@ -40,13 +40,6 @@ def modal_window(top, parent):
     top.focus_force()
 
 
-def center_window(top, parent):
-    top.update_idletasks()
-    x = parent.winfo_rootx() + max(0, (parent.winfo_width() - top.winfo_reqwidth()) // 2)
-    y = parent.winfo_rooty() + max(0, (parent.winfo_height() - top.winfo_reqheight()) // 2)
-    top.geometry(f'+{x}+{y}')
-
-
 def select_font():
     """从 fontconfig 的实际字体族和字重中选择，避免合成粗体。"""
     try:
@@ -717,7 +710,6 @@ class App:
             actions = tk.Frame(body, bg=WHITE); actions.grid(row=1, column=0, sticky='w')
             toggle = tk.Button(actions, text=title+'预览：关', command=lambda n=name:self.baseline_toggle(n))
             toggle.grid(row=0, column=0)
-            choose = ttk.Button(actions, style='TooltipAction.TButton', text='选择相机', command=lambda n=name:self.baseline_choose(n)); choose.grid(row=0, column=1)
             exposure = ttk.Button(actions, style='TooltipAction.TButton', text='重新测曝光', command=lambda n=name:self.baseline_command('tooltip_exposure_retest', {'camera':n})); exposure.grid(row=0, column=2)
             reset = ttk.Button(actions, style='TooltipAction.TButton', text='清晰度峰值清零', command=lambda n=name:self.baseline_command('tooltip_peak_reset', {'camera':n})); reset.grid(row=0, column=3)
             reason = self.label(actions, '', fg=MUTED); reason.grid(row=1, column=0, columnspan=4, sticky='w')
@@ -727,9 +719,7 @@ class App:
             detail = self.label(body, ''); detail.grid(row=5, column=0, sticky='ew')
             graph = tk.Canvas(body, height=24, bg=WHITE, highlightthickness=0); graph.grid(row=6, column=0, sticky='ew')
             body.bind('<Configure>', lambda event, info=info, hint=hint: (info.config(wraplength=max(100, event.width-12)), hint.config(wraplength=max(100, event.width-12))))
-            self.baseline_views[name] = dict(path=path, toggle=toggle, choose=choose, exposure=exposure, reset=reset, reason=reason, info=info, hint=hint, detail=detail, graph=graph, picture=pic)
-        self.baseline_swap = ttk.Button(controls, text='主辅对调', command=lambda:self.baseline_command('tooltip_swap'))
-        self.baseline_swap.grid(row=0, column=9, padx=2)
+            self.baseline_views[name] = dict(path=path, toggle=toggle, exposure=exposure, reset=reset, reason=reason, info=info, hint=hint, detail=detail, graph=graph, picture=pic)
         results = self.card(self.baseline, '本次结果', 2, 0)
         self.baseline_results_card = results.master
         self.baseline_result = tk.Label(results, text='等待测量', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.table, width=1, wraplength=600)
@@ -744,34 +734,6 @@ class App:
     def baseline_toggle(self, name):
         item = getattr(self, 'baseline_preview', {}).get(name) or {}
         self.baseline_command('tooltip_preview', {'camera':name, 'on':True if item.get('error') else not item.get('on', False)})
-
-    def baseline_choose(self, name):
-        # 枚举结果会随 USB 热插拔变化，不能沿用主程序启动时的缓存。
-        from nest_clear.devices.v4l2_enum import enumerate_capture_devices
-        try:
-            devices = enumerate_capture_devices()
-        except Exception as exc:
-            logger.exception('枚举对刀相机失败')
-            messagebox.showerror('选择相机失败', str(exc), parent=self.root)
-            return
-        if not devices:
-            messagebox.showinfo('选择相机', '未检测到 capture 相机', parent=self.root); return
-        top = tk.Toplevel(self.root); top.title('选择对刀相机')
-        modal_window(top, self.root)
-        value = tk.StringVar(value=devices[0])
-        ttk.Combobox(top, textvariable=value, values=devices, state='readonly', width=70).pack(padx=12, pady=12)
-        def close():
-            top.grab_release()
-            top.destroy()
-        def choose():
-            self.baseline_command('tooltip_assign', {'camera':name, 'device':value.get()})
-            close()
-        row = ttk.Frame(top); row.pack()
-        ttk.Button(row, text='确定', command=choose).pack(side='left', padx=8, pady=8)
-        ttk.Button(row, text='取消', command=close).pack(side='left', padx=8, pady=8)
-        top.protocol('WM_DELETE_WINDOW', close)
-        center_window(top, self.root)
-        top.lift(); top.focus_force()
 
     def _send_page_command(self, page, name, params=None):
         from nest_clear.tooloffset.commands import send
@@ -856,7 +818,6 @@ class App:
             except OSError:
                 age = None
             permissions = {n: preview_eligibility(supervisor, age, main.get('mode'), n) for n in ('front', 'side')}
-        enable(self.baseline_swap, all(permissions[n][0] for n in permissions))
         preview_path = tooltip_preview_file(self.directory)
         preview_doc = self.file_data(preview_path)
         try:
@@ -869,7 +830,8 @@ class App:
             device = item.get('device') or '未分配'
             import re
             short = re.search(r'usb-[0-9]+:[0-9.]+', str(device))
-            widgets['path'].config(text='设备：' + (short.group(0) if short else str(device)))
+            rule = '口号小=正面' if name == 'front' else '口号大=侧面'
+            widgets['path'].config(text='设备：' + (short.group(0) if short else str(device)) + f'（自动：{rule}）')
             title = '主对刀相机（正面）' if name == 'front' else '辅助对刀相机（侧面）'
             live = extract_tooltip_preview(preview_doc, name, file_age=preview_age)
             display = baseline_preview_display(item, live=live, allow_inline=(preview_age is None and not preview_doc))
@@ -878,7 +840,7 @@ class App:
             if may_prepare: widgets['reason'].grid_remove()
             else: widgets['reason'].grid()
             widgets['toggle'].config(text=button_text, fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
-            enable(widgets['choose'], may_prepare); enable(widgets['exposure'], on and may_prepare); enable(widgets['reset'], on and may_prepare)
+            enable(widgets['exposure'], on and may_prepare); enable(widgets['reset'], on and may_prepare)
             def number(value): return f'{value:.2f}' if isinstance(value, (float,int)) else '—'
             if display['failed']:
                 text = display['message']; color = COLORS['red']

@@ -81,31 +81,24 @@ def test_capture_failure_identifies_camera(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_open_failure_releases_first_camera(monkeypatch: pytest.MonkeyPatch) -> None:
     """侧面相机预检失败时释放已打开的正面设备。"""
-    devices = []
-
-    class Device:
-        """模拟按顺序打开成功及失败的 UVC 设备。"""
-
-        def __init__(self, index: int) -> None:
-            """记录设备索引及释放状态。"""
-            self.index = index
-            self.released = False
-            devices.append(self)
-
-        def isOpened(self) -> bool:
-            """仅正面设备可打开。"""
-            return self.index == 0
-
-        def release(self) -> None:
-            """记录设备已释放。"""
-            self.released = True
-
-    monkeypatch.setattr("cv2.VideoCapture", Device)
-    worker = CalibCameraWorker({name: {"backend": "uvc", "device": index} for index, name in enumerate(("front", "side"))})
-    with pytest.raises(GuardError) as error:
+    from nest_clear.devices.calib_cameras import CalibCamera
+    closed = []
+    monkeypatch.setattr('nest_clear.workers.calib_camera.resolve_tooltip_roles', lambda *args: {
+        'front': '/dev/v4l/by-path/pci-usb-0:5:1.0-video-index0',
+        'side': '/dev/v4l/by-path/pci-usb-0:6:1.0-video-index0'})
+    def fail_open(camera):
+        if camera.name == 'side': raise RuntimeError('side uvc 打开失败')
+        camera.device = object()
+    def close(camera):
+        if camera.device is not None: closed.append(camera.name)
+        camera.device = None
+    monkeypatch.setattr(CalibCamera, 'open', fail_open)
+    monkeypatch.setattr(CalibCamera, 'close', close)
+    worker = CalibCameraWorker({name: {'backend': 'uvc', 'device': 'auto'} for name in ('front', 'side')})
+    with pytest.raises(GuardError, match='side uvc'):
         worker.open()
-    assert all(text in str(error.value) for text in ("side", "uvc", "检查"))
-    assert all(device.released for device in devices)
+    worker.on_stop()
+    assert closed == ['front']
 
 
 def test_application_attaches_and_closes_calibration_cameras(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

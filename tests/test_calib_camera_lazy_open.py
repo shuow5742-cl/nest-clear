@@ -110,3 +110,20 @@ def test_supervisor_owned_camera_returns_131_and_retries_after_release(rig):
     finally:
         owner.close()
     assert plc.start_tool_calibration(1, P0, timeout_s=5)[-1]['func_code'] == 111
+
+
+def test_one_auto_camera_causes_plc_reply_131(rig, monkeypatch):
+    from test_e2e_calibration import P0
+    plc, app, path = rig
+    app.calib_camera.on_stop()
+    for camera in app.calib_camera.cameras.values():
+        camera.backend = 'uvc'
+    def missing(*args):
+        raise ValueError('只检测到 1 台对刀相机（usb-0:6），需两台都接上才能区分正/侧')
+    monkeypatch.setattr('nest_clear.workers.calib_camera.resolve_tooltip_roles', missing)
+    plc.set_actual_xyz(P0)
+    task = plc.request(100)
+    assert plc.wait_reply(task, 5)['func_code'] == 131
+    import json
+    rows = [json.loads(line) for line in next((path / 'runs').glob('*/*/events.jsonl')).read_text().splitlines()]
+    assert any('只检测到 1 台对刀相机' in str(row) for row in rows)

@@ -11,7 +11,7 @@ import time
 import cv2
 
 from nest_clear.devices.calib_cameras import enumerate_capture_devices
-from nest_clear.devices.tooltip_camera_store import load_settings, save_assignments, save_measurement, measurement_for_device
+from nest_clear.devices.tooltip_camera_store import load_settings, save_measurement, measurement_for_device
 from nest_clear.devices.tooltip_exposure import auto_exposure
 from nest_clear.paths import tooltip_preview_file
 from nest_clear.tooltip.detector import SilhouetteTipDetector
@@ -53,12 +53,26 @@ class Preparation:
         return self.busy or any(self.enabled.values()) or any(t.is_alive() for n, t in self.threads.items() if not self.enabled[n])
 
     def _discover(self):
-        self.devices = enumerate_capture_devices()
-        path = self.worker.cameras['front'].config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
-        data = load_settings(path)
-        with self.lock:
-            for name in self.enabled:
-                self.state[name]['device'] = data.get('devices', {}).get(name) or self.worker.cameras[name].config.get('device')
+        try:
+            if hasattr(self.worker, 'resolve_roles') and any(
+                    camera.config.get('backend') == 'uvc' for camera in self.worker.cameras.values()):
+                roles = self.worker.resolve_roles()
+                devices = list(roles.values())
+            else:
+                devices = enumerate_capture_devices()
+                roles = {n: self.worker.cameras[n].config.get('device') for n in self.enabled}
+            with self.lock:
+                self.devices = devices
+                for name in self.enabled:
+                    self.state[name]['device'] = roles.get(name)
+                    if not self.enabled[name]: self.state[name].pop('error', None)
+        except Exception as exc:
+            if not isinstance(exc, ValueError): logger.exception('识别对刀相机失败')
+            with self.lock:
+                self.devices = []
+                for name in self.enabled:
+                    self.state[name]['device'] = None
+                    self.state[name]['error'] = str(exc)
         self.publish()
 
     def publish(self):
@@ -129,8 +143,10 @@ class Preparation:
                 self.events.emit('warning', reason=f'刷新对刀基准状态失败：{exc}')
 
     def command(self, name, params):
+        if name in ('tooltip_assign', 'tooltip_swap'):
+            raise ValueError('对刀相机已按插口固定，不可在界面修改')
         camera = params.get('camera')
-        if name != 'tooltip_swap' and camera not in self.enabled:
+        if camera not in self.enabled:
             raise ValueError('请选择主或辅助对刀相机')
         if name == 'tooltip_preview':
             on = params.get('on')
@@ -164,42 +180,9 @@ class Preparation:
             self.retest[camera].set()
         elif name == 'tooltip_peak_reset':
             self.reset_peak[camera].set()
-        elif name in ('tooltip_assign', 'tooltip_swap'):
-            if not self.worker: raise ValueError('对刀相机不可用')
-            if self.busy: raise ValueError('相机分配正在更新')
-            self.busy = True
-            self.assignment_thread = threading.Thread(target=self._assign, args=(name, params), daemon=True)
-            self.assignment_thread.start()
         else:
             raise ValueError('未知对刀相机命令')
         self.publish()
-
-    def _assign(self, name, params):
-        try:
-            path = self.worker.cameras['front'].config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
-            data = load_settings(path)
-            devices = {n: data.get('devices', {}).get(n) or self.worker.cameras[n].config.get('device') for n in self.enabled}
-            devices = {n: d if isinstance(d, str) and d.startswith('/dev/v4l/by-path/') else None for n, d in devices.items()}
-            previous_devices = dict(devices)
-            if name == 'tooltip_swap': devices['front'], devices['side'] = devices['side'], devices['front']
-            else:
-                if params.get('device') not in self.devices: raise ValueError('所选相机未检测到或不是 capture 节点')
-                devices[params['camera']] = params['device']
-            save_assignments(path, devices)
-            self.events.emit('tooltip_camera_assigned', devices=devices)
-            self.refresh_existing()
-            with self.lock:
-                for n, device in devices.items(): self.state[n]['device'] = device
-            for n in self.enabled:
-                if self.enabled[n] and devices[n] != previous_devices[n]:
-                    self.command('tooltip_preview', {'camera':n, 'on':False, '_internal':True})
-                    self.command('tooltip_preview', {'camera':n, 'on':True, '_internal':True})
-            self.busy = False
-            self.publish()
-        except Exception as exc:
-            self.busy = False
-            self.events.emit('tooltip_preview_error', reason=str(exc))
-            self.events.emit('baseline_state', message=str(exc))
 
     def _run(self, name, stop, previous):
         if previous: previous.join()

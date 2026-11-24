@@ -93,4 +93,4 @@ def test_baseline_detects_assignment_and_exposure_change(tmp_path):
     save_measurement(path, 'front', {'device':a, 'format':'YUYV', 'width':1920, 'height':1080, 'controls':{'exposure':200}}, {'exposure':200,'p99':220,'saturated_fraction':0,'contrast':100})
     assert 'front.controls.exposure' in baseline_differences(cfg, recorded)
     save_assignments(path, {'front':b,'side':a})
-    assert 'front.device' in baseline_differences(cfg, recorded)
+    assert 'front.device' not in baseline_differences(cfg, recorded)  # Legacy devices field is ignored.

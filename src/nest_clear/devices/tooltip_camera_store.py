@@ -13,7 +13,7 @@ def load_settings(path):
     path = Path(path)
     if not path.exists(): return {'cameras': {}}
     with path.open(encoding='utf-8') as f: data = yaml.safe_load(f)
-    if not isinstance(data, dict) or not isinstance(data.get('cameras', {}), dict) or not isinstance(data.get('devices', {}), dict): raise ValueError('相机标定文件格式无效')
+    if not isinstance(data, dict) or not isinstance(data.get('cameras', {}), dict): raise ValueError('相机标定文件格式无效')
     data.setdefault('cameras', {})
     return data
 
@@ -85,10 +85,16 @@ def baseline_differences(config, recorded):
     path = Path(config.tool_calibration.directory) / 'tooltip_cameras.yaml'
     data = load_settings(path)
     differences = []
+    roles = {}
+    if any(c.get('backend') == 'uvc' for c in config.tool_calibration.cameras.values()):
+        from .v4l2_enum import resolve_tooltip_roles
+        cfg = config.tool_calibration.cameras['front']
+        try: roles = resolve_tooltip_roles(cfg.get('usb_vendor_id', '05a3'), cfg.get('usb_product_id', '9230'))
+        except ValueError: pass
     for name, snapshot in recorded.items():
         if not isinstance(snapshot, dict) or not snapshot: continue
         cfg = config.tool_calibration.cameras.get(name, {})
-        device = data.get('devices', {}).get(name) or cfg.get('device')
+        device = roles.get(name) if cfg.get('backend') == 'uvc' else cfg.get('device')
         if snapshot.get('device') != device:
             differences.append(f'{name}.device')
         measured = measurement_for_device(data, device)

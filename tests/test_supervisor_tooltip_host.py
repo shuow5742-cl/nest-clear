@@ -72,7 +72,7 @@ def issue(rig, name, params):
     return seq
 
 
-def test_supervisor_preview_and_camera_assign_swap(rig):
+def test_supervisor_preview_rejects_camera_assign_swap(rig):
     seq = issue(rig, 'tooltip_preview', {'camera': 'front', 'on': True})
     wait_for(lambda: read(rig.root / 'state/tooltip_preview.json')['cameras'].get('front'))
     assert (rig.root / 'live/baseline_front.jpg').exists()
@@ -80,12 +80,13 @@ def test_supervisor_preview_and_camera_assign_swap(rig):
     assert state['command_seq'] == seq and state['baseline']['preview']['front']['on']
     assert state['baseline']['detected_cameras'] == rig.devices
     issue(rig, 'tooltip_preview', {'camera': 'front', 'on': False})
-    issue(rig, 'tooltip_assign', {'camera': 'front', 'device': rig.devices[2]})
-    wait_for(lambda: not rig.sup.tooltip_host.tooltip_preparation.busy)
-    issue(rig, 'tooltip_swap', {})
-    wait_for(lambda: not rig.sup.tooltip_host.tooltip_preparation.busy)
-    state = read(rig.root / 'state/supervisor_tooltip_status.json')
-    assert state['baseline']['preview']['side']['device'] == rig.devices[2]
+    for name, params in (('tooltip_assign', {'camera': 'front', 'device': rig.devices[2]}), ('tooltip_swap', {})):
+        seq = issue(rig, name, params)
+        state = read(rig.root / 'state/supervisor_tooltip_status.json')
+        assert state['command_seq'] == seq
+        assert state['baseline']['message'] == '对刀相机已按插口固定，不可在界面修改'
+        assert state['baseline']['preview']['side']['device'] == rig.devices[1]
+
 
 
 def test_start_joins_preview_before_child_and_preserves_command_boundary(rig, monkeypatch):

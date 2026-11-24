@@ -47,6 +47,9 @@ PREVIEW_COMMANDS = frozenset({'tooltip_preview', 'tooltip_exposure_retest', 'too
 
 
 def handle_preview_command(events, mode, name, params):
+    if name in ('tooltip_assign', 'tooltip_swap'):
+        events.emit('baseline_state', message='对刀相机已按插口固定，不可在界面修改')
+        return
     preparation = getattr(events, 'tooltip_preparation', None)
     if not preparation:
         return
@@ -111,7 +114,7 @@ class WaitRequest(CallWorker):
                 self._blackboard.write('mode', transition(Mode.BASELINE, Mode.IDLE), self.name)
                 self.events.emit('mode_change', previous_mode=Mode.BASELINE.value, mode=Mode.IDLE.value)
             self.events.baseline_session = baseline = None
-        if command and command[0] in preview_commands and preparation:
+        if command and command[0] in preview_commands:
             name, params = command
             handle_preview_command(self.events, self._blackboard.read('mode'), name, params)
         if command and command[0].startswith('baseline_'):

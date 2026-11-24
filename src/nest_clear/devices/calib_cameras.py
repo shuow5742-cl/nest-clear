@@ -6,7 +6,7 @@ import hashlib
 import fcntl
 import os
 from pathlib import Path
-from .v4l2_enum import _is_capture_device, enumerate_capture_devices
+from .v4l2_enum import _is_capture_device, enumerate_capture_devices, resolve_tooltip_roles
 from .v4l2_controls import V4L2Controls, DEFAULTS
 from .tooltip_camera_store import load_settings, measurement_for_device
 import cv2
@@ -33,15 +33,13 @@ class CalibCamera:
         self.exposure_status = "未测曝光"
         self._ownership_fd = None
 
-    def _lock_ownership(self):
+    def _lock_ownership(self, device=None):
         if self._ownership_fd is not None:
             return
         directory = self.config.get('_ownership_dir')
         if not directory:
             return
-        store = self.config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
-        assigned = load_settings(store).get('devices', {}).get(self.name) if self.backend == 'uvc' else None
-        identity = (self.config.get('sn') if self.backend == 'daheng' else assigned or self.config.get('device')) or self.config.get('sn') or self.name
+        identity = (self.config.get('sn') if self.backend == 'daheng' else device or self.config.get('device')) or self.config.get('sn') or self.name
         if isinstance(identity, int):
             identity = f'/dev/video{identity}'
         identity = os.path.realpath(str(identity)) if str(identity).startswith('/dev/') else str(identity)
@@ -58,7 +56,12 @@ class CalibCamera:
     def open(self) -> None:
         """打开指定设备，失败时报告相机身份和现场检查项。"""
         try:
-            self._lock_ownership()
+            device = None
+            if self.backend == 'uvc':
+                resolver = self.config.get('_role_resolver')
+                roles = resolver() if resolver else resolve_tooltip_roles(self.config.get('usb_vendor_id', '05a3'), self.config.get('usb_product_id', '9230'))
+                device = roles[self.name]
+            self._lock_ownership(device)
             if self.backend == "mock":
                 if self.position is None:
                     raise ValueError("mock 需要坐标来源")
@@ -66,10 +69,7 @@ class CalibCamera:
                 self.exposure_status = '未测曝光'
                 store = self.config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
                 data = load_settings(store)
-                device = data.get('devices', {}).get(self.name) or self.config["device"]
                 label = "主" if self.name == "front" else "辅助"
-                if isinstance(device, str) and device.startswith("待接入"):
-                    raise ValueError(f"{label}对刀相机未配置")
                 path = f"/dev/video{device}" if isinstance(device, int) else device
                 if not os.path.exists(path):
                     raise FileNotFoundError(f"未找到{label}对刀相机：{path}，检查线缆与插口")

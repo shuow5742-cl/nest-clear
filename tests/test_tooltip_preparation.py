@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import pytest
 from autoweaver.motion_policy.nodes.node import Status
 from nest_clear.flow.modes import Mode
 from nest_clear.flow.leaves import WaitRequest, CallWorker
@@ -156,27 +157,12 @@ def test_slow_open_does_not_block_tick(tmp_path, monkeypatch):
     gate.set(); prep.close(); prep.threads['front'].join(2)
 
 
-def test_assignment_and_swap_update_store(tmp_path, monkeypatch):
-    import time
-    from nest_clear.devices.tooltip_camera_store import load_settings
-    a='/dev/v4l/by-path/pci-usb-0:4:1.0-video-index0'
-    b='/dev/v4l/by-path/pci-usb-0:8:1.0-video-index0'
-    path=tmp_path/'cameras.yaml'
-    cameras={name:SimpleNamespace(config={'settings_path':str(path),'device':'待接入'}) for name in ('front','side')}
-    events=Events(); events.directory=tmp_path
-    monkeypatch.setattr('nest_clear.baseline.preparation.enumerate_capture_devices', lambda:[a,b])
-    prep=Preparation(events, SimpleNamespace(cameras=cameras))
-    prep.devices=[a,b]
-    def wait():
-        until=time.monotonic()+3
-        while prep.busy and time.monotonic()<until: time.sleep(.01)
-        assert not prep.busy
-    prep.command('tooltip_assign', {'camera':'front','device':a}); wait()
-    prep.command('tooltip_assign', {'camera':'side','device':b}); wait()
-    prep.command('tooltip_swap', {}); wait()
-    assert load_settings(path)['devices']=={'front':b,'side':a}
-    assert len(list((tmp_path/'history').glob('*.yaml'))) == 2
-    assert len([row for row in events.rows if row[0]=='tooltip_camera_assigned']) == 3
+def test_assignment_and_swap_are_rejected(tmp_path):
+    events = Events(); events.directory = tmp_path
+    prep = Preparation(events)
+    for name in ('tooltip_assign', 'tooltip_swap'):
+        with pytest.raises(ValueError, match='对刀相机已按插口固定，不可在界面修改'):
+            prep.command(name, {'camera': 'front'})
 
 
 def test_worker_reuses_handed_off_device(tmp_path, monkeypatch):

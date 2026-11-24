@@ -49,6 +49,11 @@ class CommandReader:
                 return None
         except (OSError, ValueError, KeyError, TypeError):
             return None
+        if name in ('tooltip_assign', 'tooltip_swap'):
+            self.last_seq = seq
+            self.events.emit('tooloffset_command', seq=seq, command=name, params=params, accepted=False)
+            self.events.emit('baseline_state', message='对刀相机已按插口固定，不可在界面修改')
+            return None
         if defer_unallowed and name not in allowed:
             return None
         self.last_seq = seq

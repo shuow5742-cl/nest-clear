@@ -59,7 +59,7 @@ def test_store_and_placeholder(tmp_path):
     assert load_settings(path)['cameras']['front']['exposure']==42
     assert len(list((tmp_path/'history').iterdir()))==1
     assert compare_settings({'x':1},{'x':2})[0]['field']=='x'
-    with pytest.raises(Exception, match='辅助对刀相机未配置'):
+    with pytest.raises(Exception, match='未检测到对刀相机'):
         CalibCamera('side', {'backend':'uvc','device':'待接入：插好后填路径','settings_path':str(tmp_path/'empty_cameras.yaml')}).open()
 
 def test_focus_exposure_invariance():
@@ -180,10 +180,9 @@ def test_open_error_messages(tmp_path, monkeypatch):
     import struct
     path = tmp_path / 'by-path-camera'
     settings = str(tmp_path / 'empty_cameras.yaml')
+    monkeypatch.setattr('nest_clear.devices.calib_cameras.resolve_tooltip_roles', lambda *args: {'front': str(path), 'side': str(path)})
     with pytest.raises(Exception, match='未找到主对刀相机：' + str(path) + '，检查线缆与插口'):
         CalibCamera('front', {'backend': 'uvc', 'device': str(path), 'settings_path': settings}).open()
-    with pytest.raises(Exception, match='辅助对刀相机未配置'):
-        CalibCamera('side', {'backend': 'uvc', 'device': '待接入：待确认', 'settings_path': settings}).open()
     path.touch()
     def querycap_non_capture(fd, request, buffer, mutate):
         struct.pack_into('II', buffer, 84, 0, 0)

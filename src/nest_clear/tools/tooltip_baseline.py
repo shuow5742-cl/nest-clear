@@ -217,8 +217,13 @@ def main(argv: list[str] | None = None) -> int:
                 """只读实时坐标，让模拟相机跟随平台而不控制 PLC。"""
                 return client.read_real32_block(address, 3)
 
+            from nest_clear.workers.calib_camera import CalibCameraWorker
+            role_worker = CalibCameraWorker(app.tool_calibration.cameras, events=events)
             for name in ("front", "side"):
-                camera = CalibCamera(name, config["cameras"][name], position)
+                camera_config = dict(config["cameras"][name])
+                if camera_config.get('backend') == 'uvc':
+                    camera_config['_role_resolver'] = role_worker.resolve_roles
+                camera = CalibCamera(name, camera_config, position)
                 cameras[name] = camera
                 camera.open()
             now = datetime.now().astimezone()

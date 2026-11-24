@@ -120,14 +120,13 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
   click_timeout_s: 120
   enabled: true  # 相机按需打开，未接时对刀请求回 131
   directory: config/calibration  # 基准和补偿文件目录
+  # 11-24 用户定：口号小=正面，大=侧面；按数字比较 USB 口号，每次打开前识别。
+  usb_vendor_id: '05a3'
+  usb_product_id: '9230'
+  # tooltip_cameras.yaml 的 devices/history 保留兼容但不用于分配；曝光测量仍按设备读取。
   cameras:  # 正面看 X/Z，侧面看 Y/Z
-    # 两台目前均在 Intel 00:14.0，正/侧面尚未确认：
-    # /dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0
-    # /dev/v4l/by-path/pci-0000:00:14.0-usb-0:8:1.0-video-index0
-    # xHCI 不同根端口各自独享 480M；经过 hub 时才共享。带宽不足时界面提示，再换口。
-    # 正侧关系须现场确认；分配写入 tooltip_cameras.yaml，换口后重新确认。
-    front: {backend: uvc, device: '待接入：确认主相机与插口后填写 by-path'}
-    side: {backend: uvc, device: '待接入：确认辅助相机与插口后填写 by-path'}
+    front: {backend: uvc, device: auto}
+    side: {backend: uvc, device: auto}
   camera_controls: {}  # 默认 YUYV 1920x1080、手动曝光及固定图像控制
   auto_exposure:  # P99 200–235，饱和率 < 0.1%
     max_exposure: 1600  # 160ms，约 6fps 的帧周期；再长会降帧，背光足够时不应需要（设备上限 5000）
