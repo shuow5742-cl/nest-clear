@@ -367,9 +367,9 @@ class Application:
         events = getattr(self, 'events', None)
         if events is not None:
             from nest_clear.flow.modes import Mode
-            mode = self.handle.batch.blackboard.read('mode') if self.handle is not None else Mode.IDLE
             main_preview = getattr(self, 'main_preview', None)
             if main_preview is not None:
+                mode = self.handle.batch.blackboard.read('mode') if self.handle is not None else Mode.IDLE
                 main_preview.poll(mode)
             from nest_clear.flow.leaves import PREVIEW_COMMANDS, handle_preview_command
             from nest_clear.flow.modes import Mode

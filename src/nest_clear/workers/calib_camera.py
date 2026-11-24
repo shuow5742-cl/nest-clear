@@ -43,6 +43,8 @@ class CalibCameraWorker(AsyncRequestWorker):
         self.opened = False
         for name in ("front", "side"):
             config = dict(cameras[name])
+            if events is not None and getattr(events, 'directory', None) is not None:
+                config['_ownership_dir'] = str(events.directory)
             if config.get("backend") == "mock":
                 config.setdefault("target_uv", [320, 240])
                 config.setdefault("p0", [0, 0, 0])

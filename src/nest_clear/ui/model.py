@@ -209,14 +209,14 @@ def supervisor_live(s, age):
 
 def parent_process_row(s, supervisor_age, now=None):
     live = supervisor_live(s, supervisor_age)
-    return ('父程序', s.get('pid') if live else '—', display_time(s.get('start_time')),
+    return ('父程序', s.get('pid') if live else '—', display_time(s.get('start_time'), _now_and_epoch(now)[0].date()),
             duration(s.get('start_time'), now) if live else '—', '运行' if live else '未运行', '—')
 
 
 def child_process_row(s, supervisor_age, now=None):
     live = supervisor_live(s, supervisor_age)
     pid = s.get('child_pid') if live else None
-    return ('主程序', pid or '—', display_time(s.get('child_start_time')),
+    return ('主程序', pid or '—', display_time(s.get('child_start_time'), _now_and_epoch(now)[0].date()),
             duration(s.get('child_start_time'), now) if pid else '—',
             (s.get('child_state') or '无数据') if live else '未运行',
             s.get('child_last_exit_reason') or '无')

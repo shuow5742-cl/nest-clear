@@ -56,6 +56,10 @@ class TooltipHost:
         self.tooltip_preparation.stop_previews(('front', 'side'))
         self.tooltip_preparation.close()
         self.closed = True
-        still_open = [name for name, camera in self.worker.cameras.items() if camera.device is not None]
+        for camera in self.worker.cameras.values():
+            if camera.device is not None or getattr(camera, '_ownership_fd', None) is not None:
+                camera.close()
+        still_open = [name for name, camera in self.worker.cameras.items()
+                      if camera.device is not None or getattr(camera, '_ownership_fd', None) is not None]
         if still_open:
             raise RuntimeError('对刀相机未释放：' + ', '.join(still_open))

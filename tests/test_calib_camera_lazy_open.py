@@ -91,3 +91,22 @@ def test_timeout_retries_after_capture_returns(monkeypatch):
     assert worker.capture_done["front"].wait(1)
     assert set(worker.execute({})) == {"front", "side"}
     worker.on_stop()
+
+
+def test_supervisor_owned_camera_returns_131_and_retries_after_release(rig):
+    from nest_clear.devices.calib_cameras import CalibCamera
+    from test_e2e_calibration import P0
+    import json
+    plc, app, path = rig
+    front = app.calib_camera.cameras['front']
+    owner = CalibCamera('front', dict(front.config), lambda: [0, 0, 0])
+    owner.open()
+    try:
+        plc.set_actual_xyz(P0)
+        task = plc.request(100)
+        assert plc.wait_reply(task, 5)['func_code'] == 131
+        rows = [json.loads(line) for line in next((path / 'runs').glob('*/*/events.jsonl')).read_text().splitlines()]
+        assert any('仍被父程序预览占用' in str(row) for row in rows)
+    finally:
+        owner.close()
+    assert plc.start_tool_calibration(1, P0, timeout_s=5)[-1]['func_code'] == 111

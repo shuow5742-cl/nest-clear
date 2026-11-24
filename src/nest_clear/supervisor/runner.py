@@ -80,6 +80,7 @@ class Supervisor:
         self._ui_disabled = False
         self.preview_process = None
         self.tooltip_host = None
+        self._tooltip_release_thread = None
         self.tooltip_seq = self._tooltip_command_seq()
         self.preview_seq = 0
         self.preview_mode = None
@@ -170,6 +171,8 @@ class Supervisor:
     def _tooltip_tick(self):
         if self.child is not None:
             return
+        if self._tooltip_release_thread and self._tooltip_release_thread.is_alive():
+            return
         if self.tooltip_host is None:
             from ..tooloffset.commands import command_path
             from ..flow.leaves import PREVIEW_COMMANDS
@@ -184,11 +187,46 @@ class Supervisor:
         self.tooltip_host.poll()
         self.tooltip_seq = self.tooltip_host.reader.last_seq
 
-    def _stop_tooltip(self):
-        if self.tooltip_host is not None:
-            self.tooltip_host.close()
-            self.tooltip_seq = max(self.tooltip_seq, self.tooltip_host.reader.last_seq)
-            self.tooltip_host = None
+    def _stop_tooltip(self, timeout=1.0):
+        """Request release, but do not prevent the child from starting on timeout."""
+        host = self.tooltip_host
+        if host is None:
+            return
+        self.tooltip_seq = max(self.tooltip_seq, host.reader.last_seq)
+        self.tooltip_host = None
+        started = time.monotonic()
+        prep = host.tooltip_preparation
+        cameras = [name for name in ('front', 'side')
+                   if prep.enabled[name] or (name in prep.threads and prep.threads[name].is_alive())
+                   or getattr(host.worker.cameras[name], 'device', None) is not None]
+        if prep.assignment_thread and prep.assignment_thread.is_alive():
+            cameras = ['front', 'side']
+        def release():
+            reported = False
+            while True:
+                try:
+                    host.close()
+                    break
+                except Exception as exc:
+                    if not reported:
+                        self.events.emit('error', operation='tooltip_handoff', code='TOOLTIP-RELEASE',
+                                         camera=cameras, reason=str(exc), hint='检查对刀相机连接、驱动及占用，等待释放后重试。')
+                        logger.error('错误码：TOOLTIP-RELEASE；对刀相机 %s 释放失败：%s；检查连接、驱动与占用。', cameras, exc)
+                        reported = True
+                    time.sleep(.5)
+            self.events.emit('tooltip_release_complete', camera=cameras,
+                             duration_s=time.monotonic() - started)
+        thread = threading.Thread(target=release, name='tooltip-release', daemon=True)
+        self._tooltip_release_thread = thread
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            elapsed = time.monotonic() - started
+            self.events.emit('error', operation='tooltip_handoff', code='TOOLTIP-RELEASE-TIMEOUT',
+                             camera=cameras, duration_s=elapsed,
+                             reason='对刀预览释放超时，后台继续等待',
+                             hint='检查对刀相机连接、驱动及占用，等待释放后重试。')
+            logger.error('错误码：TOOLTIP-RELEASE-TIMEOUT；对刀相机 %s 等待 %.2f 秒仍未释放；检查连接、驱动与占用。', cameras, elapsed)
 
     def _discard_preview_command(self):
         """Do not replay a command belonging to the child after ownership changes."""
@@ -337,12 +375,7 @@ class Supervisor:
 
     def _start(self) -> None:
         """清除旧活性点并启动配置的命令，失败后等待下一条边沿。"""
-        try:
-            self._stop_tooltip()
-        except Exception as exc:
-            logger.error('对刀预览未能释放，拒绝启动主程序：%s', exc)
-            self.events.emit('error', operation='tooltip_handoff', reason=str(exc))
-            return
+        self._stop_tooltip()
         if not self._stop_preview("child_start"):
             logger.error("预览进程未退出，拒绝启动主程序")
             return

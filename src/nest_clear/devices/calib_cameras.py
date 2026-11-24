@@ -2,6 +2,7 @@
 
 from typing import Any, Callable
 import errno
+import hashlib
 import fcntl
 import os
 import struct
@@ -48,10 +49,34 @@ class CalibCamera:
         self.controls = None
         self.actual_settings = {}
         self.exposure_status = "未测曝光"
+        self._ownership_fd = None
+
+    def _lock_ownership(self):
+        if self._ownership_fd is not None:
+            return
+        directory = self.config.get('_ownership_dir')
+        if not directory:
+            return
+        store = self.config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
+        assigned = load_settings(store).get('devices', {}).get(self.name) if self.backend == 'uvc' else None
+        identity = (self.config.get('sn') if self.backend == 'daheng' else assigned or self.config.get('device')) or self.config.get('sn') or self.name
+        if isinstance(identity, int):
+            identity = f'/dev/video{identity}'
+        identity = os.path.realpath(str(identity)) if str(identity).startswith('/dev/') else str(identity)
+        lockdir = Path(directory) / 'state' / 'camera_locks'
+        lockdir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lockdir / (hashlib.sha256(identity.encode()).hexdigest() + '.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            raise RuntimeError(f'{self.name} 对刀相机仍被父程序预览占用，请等待相机释放后重试')
+        self._ownership_fd = fd
 
     def open(self) -> None:
         """打开指定设备，失败时报告相机身份和现场检查项。"""
         try:
+            self._lock_ownership()
             if self.backend == "mock":
                 if self.position is None:
                     raise ValueError("mock 需要坐标来源")
@@ -179,3 +204,7 @@ class CalibCamera:
             else:
                 self.device.close()
             self.device = None
+        if self._ownership_fd is not None:
+            fcntl.flock(self._ownership_fd, fcntl.LOCK_UN)
+            os.close(self._ownership_fd)
+            self._ownership_fd = None
