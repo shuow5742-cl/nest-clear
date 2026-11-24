@@ -171,6 +171,7 @@ def test_ui_controls_and_result():
     class Widget:
         def config(self, **kwargs): self.values = kwargs
     ui = SimpleNamespace(wb_button=Widget(), wb_message=Widget(), wb_pending=False)
+    ui._expire_focus_request = lambda name, label: App._expire_focus_request(ui, name, label)
     App.update_white_balance(ui, {'white_balance': {'state': 'success', 'balance_ratio': [1., 1., 1.], 'metrics': {'r_g': 1., 'b_g': 1., 'warnings': []}}})
     assert '白平衡成功' in ui.wb_message.values['text']
     App.update_white_balance(ui, {'white_balance': {'state': 'fail', 'reason': '请用 18% 灰卡做白平衡'}})

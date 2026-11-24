@@ -7,17 +7,18 @@ from nest_clear.ui.demo import write_demo
 
 def test_baseline_choose_refreshes_devices_each_time(monkeypatch):
     from nest_clear.ui import app
-    from nest_clear.devices import calib_cameras
+    from nest_clear.devices import v4l2_enum
 
     discovered = iter([[], ['/dev/v4l/by-path/new-video-index0']])
-    monkeypatch.setattr(calib_cameras, 'enumerate_capture_devices', lambda: next(discovered))
+    monkeypatch.setattr(v4l2_enum, 'enumerate_capture_devices', lambda: next(discovered))
     shown = []
-    monkeypatch.setattr(app.messagebox, 'showinfo', lambda *args: shown.append(args))
+    monkeypatch.setattr(app.messagebox, 'showinfo', lambda *args, **kwargs: shown.append((args, kwargs)))
     values = []
     monkeypatch.setattr(app.tk, 'Toplevel', lambda root: Widget(root))
     monkeypatch.setattr(app.tk, 'StringVar', lambda value: SimpleNamespace(get=lambda: value))
     monkeypatch.setattr(app.ttk, 'Combobox', lambda parent, **kwargs: values.append(kwargs['values']) or SimpleNamespace(pack=lambda **kw: None))
     monkeypatch.setattr(app.ttk, 'Button', lambda parent, **kwargs: SimpleNamespace(pack=lambda **kw: None))
+    monkeypatch.setattr(app.ttk, 'Frame', Widget)
     instance = SimpleNamespace(root=Widget(), baseline_devices=['stale'], baseline_command=lambda *args: None)
 
     app.App.baseline_choose(instance, 'front')
@@ -25,6 +26,47 @@ def test_baseline_choose_refreshes_devices_each_time(monkeypatch):
 
     assert shown
     assert values == [['/dev/v4l/by-path/new-video-index0']]
+
+
+def test_baseline_choose_reports_enumeration_error(monkeypatch, caplog):
+    from nest_clear.ui import app
+    from nest_clear.devices import v4l2_enum
+    def fail():
+        raise OSError('camera enumeration failed')
+    monkeypatch.setattr(v4l2_enum, 'enumerate_capture_devices', fail)
+    shown = []
+    monkeypatch.setattr(app.messagebox, 'showerror', lambda *args, **kwargs: shown.append((args, kwargs)))
+    root = object()
+    app.App.baseline_choose(SimpleNamespace(root=root), 'front')
+    assert shown == [(('选择相机失败', 'camera enumeration failed'), {'parent': root})]
+    assert '枚举对刀相机失败' in caplog.text
+
+
+def test_baseline_choose_confirm_and_cancel_release_grab(monkeypatch):
+    from nest_clear.ui import app
+    from nest_clear.devices import v4l2_enum
+    monkeypatch.setattr(v4l2_enum, 'enumerate_capture_devices', lambda: ['/dev/camera'])
+    buttons, dialogs, commands = [], [], []
+    class Dialog(Widget):
+        def __init__(self, parent):
+            super().__init__(parent); self.released = False; dialogs.append(self)
+        def grab_release(self): self.released = True
+    monkeypatch.setattr(app.tk, 'Toplevel', Dialog)
+    monkeypatch.setattr(app.tk, 'StringVar', lambda value: SimpleNamespace(get=lambda: value))
+    monkeypatch.setattr(app.ttk, 'Frame', Widget)
+    monkeypatch.setattr(app.ttk, 'Combobox', Widget)
+    def button(parent, **kwargs):
+        buttons.append(kwargs)
+        return Widget(parent)
+    monkeypatch.setattr(app.ttk, 'Button', button)
+    ui = SimpleNamespace(root=Widget(), baseline_command=lambda *args: commands.append(args))
+    app.App.baseline_choose(ui, 'front')
+    buttons[0]['command']()
+    assert commands == [('tooltip_assign', {'camera': 'front', 'device': '/dev/camera'})]
+    assert dialogs[0].released and dialogs[0].destroyed
+    app.App.baseline_choose(ui, 'side')
+    buttons[3]['command']()
+    assert len(commands) == 1 and dialogs[1].released and dialogs[1].destroyed
 
 
 class Widget:
@@ -39,6 +81,14 @@ class Widget:
     def winfo_width(self): return 600
     def winfo_height(self): return 300
     def winfo_reqheight(self): return 22
+    def winfo_reqwidth(self): return 100
+    def transient(self, *args): pass
+    def grab_set(self): pass
+    def grab_release(self): pass
+    def lift(self): pass
+    def focus_force(self): pass
+    def protocol(self, *args): pass
+    def pack(self, *args, **kwargs): pass
     def winfo_rootx(self): return 5
     def winfo_rooty(self): return 7
     def rowconfigure(self, index, **kwargs): self.row_options.setdefault(index, {}).update(kwargs)
@@ -143,6 +193,29 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     monkeypatch.setattr(app, 'KeyValueGrid', FakeKeyValueGrid)
     for page in app.App.PAGE_NAMES:
         ui = app.App(tmp_path, page=page, ignore_before_ns=0)
+        if page == '对刀基准建立':
+            from nest_clear.ui.model import supervisor_tooltip_main
+            ui.baseline_pending = 8
+            supervisor = {'pid': 123, 'child_pid': None, 'child_state': '停止'}
+            main = {'command_seq': 99}
+            host = {'pid': 123, 'command_seq': 7, 'baseline': {'phase': 'prepare'}}
+            ui.update_baseline(supervisor_tooltip_main(main, supervisor, host), supervisor)
+            assert ui.baseline_ack == 7 and ui.baseline_pending == 8
+            host['command_seq'] = 8
+            ui.update_baseline(supervisor_tooltip_main(main, supervisor, host), supervisor)
+            assert ui.baseline_ack == 8 and ui.baseline_pending == 0
+            host['baseline'] = {'phase': 'live', 'candidate': {'p0': [1, 2, 3]}}
+            ui.update_baseline(supervisor_tooltip_main(main, supervisor, host), supervisor)
+            for button in [ui.baseline_start, *ui.baseline_tools, ui.baseline_measure,
+                           ui.baseline_manual, ui.baseline_aux, ui.baseline_save, ui.baseline_end]:
+                assert button.options['state'] == 'disabled'
+            assert '主程序未运行（等待 PLC 初始化）' in ui.baseline_message.options['text']
+            assert ui.baseline_views['front']['choose'].options['state'] == 'normal'
+            assert ui.baseline_views['front']['toggle'].options['state'] == 'normal'
+            assert ui.baseline_swap.options['state'] == 'normal'
+            ui.baseline_pending = 9; ui.baseline_pending_since = 0; ui.baseline_pending_name = 'tooltip_assign'
+            ui.update_baseline({'command_seq': 9}, {'child_pid': 42})
+            assert ui.baseline_pending == 0
         left = ui.home.children[0]
         device_content = ui.bits[0].parent
         pick_content = ui.pick_values['盘号'].parent
@@ -695,3 +768,82 @@ def test_cam_scroll_geometry_coalesces_feedback_and_ignores_content_width():
     geometry.content_changed(None)
     canvas.queue.pop(0)()
     assert not canvas.queue and len(canvas.regions) == 1
+
+
+def test_page_commands_timeout_and_recover(tmp_path, monkeypatch, caplog):
+    from nest_clear.ui import app
+    now = [100.0]
+    monkeypatch.setattr(app.time, 'monotonic', lambda: now[0])
+    ui = object.__new__(app.App)
+    ui.directory = tmp_path
+    for page in ('baseline', 'offset', 'pickacc', 'tip'):
+        setattr(ui, page + '_message', Widget())
+        setattr(ui, page + '_pending', 0)
+        ui._send_page_command(page, page + '_test')
+        seq = getattr(ui, page + '_pending')
+        ui._send_page_command(page, 'second')
+        assert getattr(ui, page + '_pending') == seq
+        assert getattr(ui, page + '_message').options['text'] == '上一条命令处理中'
+        now[0] += 5.1
+        ui._check_page_command(page, 0)
+        assert getattr(ui, page + '_pending') == 0
+        assert page + '_test' in getattr(ui, page + '_command_message')
+        ui._send_page_command(page, 'retry')
+        ui._check_page_command(page, getattr(ui, page + '_pending'))
+        assert not getattr(ui, page + '_pending')
+    assert '未被确认' in caplog.text
+
+
+def test_system_python_ui_imports_without_vision_dependencies(tmp_path):
+    import os
+    import subprocess
+    code = '''
+import sys
+for name in ('cv2', 'numpy', 'scipy', 'yaml'):
+    sys.modules[name] = None
+from nest_clear.ui import app
+from nest_clear.ui.__main__ import add_view_arguments
+from nest_clear.devices.v4l2_enum import enumerate_capture_devices
+from nest_clear.tooloffset.commands import send
+from nest_clear.preview.eligibility import preview_eligibility
+from nest_clear.film_mode import may_change_mode, read_mode, write_mode, mode_lock, tray_active
+from nest_clear.record.events import EventRecorder
+from nest_clear.ui.model import supervisor_tooltip_main
+from nest_clear.preview.focus_record import write_record
+assert enumerate_capture_devices(sys.argv[1]) == []
+'''
+    env = dict(os.environ, PYTHONPATH=str(__import__('pathlib').Path(__file__).resolve().parents[1] / 'src'))
+    result = subprocess.run(['/usr/bin/python3', '-c', code, str(tmp_path)], env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_focus_requests_timeout(tmp_path, monkeypatch, caplog):
+    from nest_clear.ui import app
+    monkeypatch.setattr(app.time, 'monotonic', lambda: 10)
+    ui = object.__new__(app.App)
+    for name in ('temporary', 'wb', 'sweep'):
+        label = Widget()
+        setattr(ui, name + '_pending', True)
+        setattr(ui, name + '_pending_since', 4)
+        ui._expire_focus_request(name, label)
+        assert not getattr(ui, name + '_pending')
+        assert '未被确认' in label.options['text']
+    assert '未被确认' in caplog.text
+
+
+def test_exposure_sweep_ack_matches_request(monkeypatch):
+    import json
+    from nest_clear.ui import app
+    monkeypatch.setattr(app.time, 'monotonic', lambda: 10)
+    ui = object.__new__(app.App)
+    ui.sweep_pending = True; ui.sweep_pending_since = 9; ui.sweep_request = 42
+    ui.wb_pending = False; ui.exposure_button = Widget(); ui.exposure_mode = Widget()
+    ui.exposure_message = Widget(); ui.exposure_visible = True
+    stale = {'state': 'done', 'request_seq': 41}
+    ui.exposure_cache = json.dumps([stale, None], ensure_ascii=False, sort_keys=True)
+    ui.update_exposure({'exposure_sweep': stale})
+    assert ui.sweep_pending
+    completed = {'state': 'done', 'request_seq': 42}
+    ui.exposure_cache = json.dumps([completed, None], ensure_ascii=False, sort_keys=True)
+    ui.update_exposure({'exposure_sweep': completed})
+    assert not ui.sweep_pending

@@ -41,7 +41,7 @@ class CommandReader:
     def __init__(self, root, events, *, last_seq=0):
         self.path, self.events, self.last_seq = command_path(root), events, last_seq
 
-    def poll(self, allowed, *, defer_unallowed=False):
+    def poll(self, allowed, *, defer_unallowed=False, rejection_message=None):
         try:
             cmd = json.loads(self.path.read_text(encoding='utf-8'))
             seq, name, params = cmd['seq'], cmd['command'], cmd['params']
@@ -55,7 +55,7 @@ class CommandReader:
         accepted = name in allowed
         self.events.emit('tooloffset_command', seq=seq, command=name, params=params, accepted=accepted)
         if name == 'baseline_start' and not accepted:
-            self.events.emit('baseline_state', message='当前正在挑毛或标定，忽略开始请求')
+            self.events.emit('baseline_state', message=rejection_message or '当前正在挑毛或标定，忽略开始请求')
         return (name, params) if accepted else None
 
 

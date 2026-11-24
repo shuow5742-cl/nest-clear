@@ -81,7 +81,7 @@ def run_preview_session(config, mode, worker, stop, *, shared=False):
                             values.pop('exposure_apply', None)
                             request_seq = last_action
                             def publish_sweep(result):
-                                values['exposure_sweep'] = dict(result, configured_us=config.exposure_us, exposure_source=config.exposure_source)
+                                values['exposure_sweep'] = dict(result, request_seq=request_seq, configured_us=config.exposure_us, exposure_source=config.exposure_source)
                                 snapshot = dict(values, mode=mode, frames=frames, fps=round(frames / max(time.monotonic()-started, .001), 2), error=None)
                                 atomic_write(status_path, json.dumps(snapshot, ensure_ascii=False).encode())
                             def is_cancelled():
@@ -97,7 +97,7 @@ def run_preview_session(config, mode, worker, stop, *, shared=False):
                             except ExposureRestoreError:
                                 raise
                             except Exception as exc:
-                                values['exposure_sweep'] = {'state': 'error', 'reason': str(exc), 'rows': []}
+                                values['exposure_sweep'] = {'state': 'error', 'reason': str(exc), 'rows': [], 'request_seq': request_seq}
                             try:
                                 pending = json.loads(action_path.read_text(encoding='utf-8'))
                                 if pending.get('seq') != request_seq and pending.get('action') in ('set_exposure', 'restore_exposure'):

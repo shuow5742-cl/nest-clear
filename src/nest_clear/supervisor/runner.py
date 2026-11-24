@@ -175,10 +175,9 @@ class Supervisor:
             return
         if self.tooltip_host is None:
             from ..tooloffset.commands import command_path
-            from ..flow.leaves import PREVIEW_COMMANDS
             try:
                 command = json.loads(command_path(self.config.record_directory).read_text(encoding='utf-8'))
-                if command.get('command') not in PREVIEW_COMMANDS or type(command.get('seq')) is not int or command['seq'] <= self.tooltip_seq:
+                if not isinstance(command.get('command'), str) or not isinstance(command.get('params'), dict) or type(command.get('seq')) is not int or command['seq'] <= self.tooltip_seq:
                     return
             except (OSError, ValueError, AttributeError):
                 return

@@ -41,6 +41,7 @@ def test_controls_and_message():
     class Widget:
         def config(self, **kwargs): self.__dict__.update(kwargs)
     ui = SimpleNamespace(temporary_set=Widget(), temporary_restore=Widget(), temporary_message=Widget(), wb_pending=False, sweep_pending=False, temporary_pending=False)
+    ui._expire_focus_request = lambda name, label: App._expire_focus_request(ui, name, label)
     App.update_temporary_exposure(ui, {'white_balance': {'state': 'running'}})
     assert ui.temporary_set.state == ui.temporary_restore.state == 'disabled'
     App.update_temporary_exposure(ui, {'temporary_exposure': {'state': 'done', 'message': '曝光回读 20000 us'}})

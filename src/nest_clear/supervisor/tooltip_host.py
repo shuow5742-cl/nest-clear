@@ -42,12 +42,14 @@ class TooltipHost:
                 self._write()
             elif event == 'tooloffset_command':
                 self.status['command_seq'] = fields['seq']
+                if not fields.get('accepted'):
+                    self.status['baseline']['message'] = '对刀基准建立需要主程序运行，请先让 PLC 初始化'
                 self._write()
 
     def poll(self):
         if self.closed:
             return
-        command = self.reader.poll(PREVIEW_COMMANDS, defer_unallowed=True)
+        command = self.reader.poll(PREVIEW_COMMANDS, rejection_message='对刀基准建立需要主程序运行，请先让 PLC 初始化')
         if command:
             handle_preview_command(self, Mode.IDLE, *command)
 

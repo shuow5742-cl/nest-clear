@@ -32,6 +32,21 @@ logger = logging.getLogger(__name__)
 WHITE = '#ffffff'
 
 
+def modal_window(top, parent):
+    """Keep a dialog above its parent, including when the parent is fullscreen."""
+    top.transient(parent)
+    top.grab_set()
+    top.lift()
+    top.focus_force()
+
+
+def center_window(top, parent):
+    top.update_idletasks()
+    x = parent.winfo_rootx() + max(0, (parent.winfo_width() - top.winfo_reqwidth()) // 2)
+    y = parent.winfo_rooty() + max(0, (parent.winfo_height() - top.winfo_reqheight()) // 2)
+    top.geometry(f'+{x}+{y}')
+
+
 def select_font():
     """从 fontconfig 的实际字体族和字重中选择，避免合成粗体。"""
     try:
@@ -225,7 +240,9 @@ class Picture(tk.Label):
     def enlarge(self, _event=None):
         if self.image is None:
             return
-        top = tk.Toplevel(self)
+        parent = self.winfo_toplevel()
+        top = tk.Toplevel(parent)
+        modal_window(top, parent)
         top.title(str(self.path))
         top.rowconfigure(0, weight=1); top.columnconfigure(0, weight=1)
         canvas = tk.Canvas(top, width=1000, height=700, scrollregion=(0, 0, *self.image.size))
@@ -730,32 +747,78 @@ class App:
 
     def baseline_choose(self, name):
         # 枚举结果会随 USB 热插拔变化，不能沿用主程序启动时的缓存。
-        from nest_clear.devices.calib_cameras import enumerate_capture_devices
-        devices = enumerate_capture_devices()
+        from nest_clear.devices.v4l2_enum import enumerate_capture_devices
+        try:
+            devices = enumerate_capture_devices()
+        except Exception as exc:
+            logger.exception('枚举对刀相机失败')
+            messagebox.showerror('选择相机失败', str(exc), parent=self.root)
+            return
         if not devices:
-            messagebox.showinfo('选择相机', '未检测到 capture 相机'); return
+            messagebox.showinfo('选择相机', '未检测到 capture 相机', parent=self.root); return
         top = tk.Toplevel(self.root); top.title('选择对刀相机')
+        modal_window(top, self.root)
         value = tk.StringVar(value=devices[0])
         ttk.Combobox(top, textvariable=value, values=devices, state='readonly', width=70).pack(padx=12, pady=12)
+        def close():
+            top.grab_release()
+            top.destroy()
         def choose():
-            self.baseline_command('tooltip_assign', {'camera':name, 'device':value.get()}); top.destroy()
-        ttk.Button(top, text='确定', command=choose).pack(pady=8)
+            self.baseline_command('tooltip_assign', {'camera':name, 'device':value.get()})
+            close()
+        row = ttk.Frame(top); row.pack()
+        ttk.Button(row, text='确定', command=choose).pack(side='left', padx=8, pady=8)
+        ttk.Button(row, text='取消', command=close).pack(side='left', padx=8, pady=8)
+        top.protocol('WM_DELETE_WINDOW', close)
+        center_window(top, self.root)
+        top.lift(); top.focus_force()
+
+    def _send_page_command(self, page, name, params=None):
+        from nest_clear.tooloffset.commands import send
+        if getattr(self, page + '_pending', 0):
+            setattr(self, page + '_command_message', '上一条命令处理中')
+            getattr(self, page + '_message').config(text='上一条命令处理中', fg=COLORS['yellow'])
+            return
+        try:
+            seq = send(self.directory, name, params, acknowledged=getattr(self, page + '_ack', 0))
+        except OSError:
+            logger.exception('写命令失败：%s', name)
+            setattr(self, page + '_command_message', '命令写入失败，请重试')
+            return
+        setattr(self, page + '_pending', seq)
+        setattr(self, page + '_pending_name', name)
+        setattr(self, page + '_pending_since', time.monotonic())
+        setattr(self, page + '_command_message', '')
+        getattr(self, page + '_message').config(text='上一条命令处理中', fg=COLORS['yellow'])
+
+    def _check_page_command(self, page, ack):
+        pending = getattr(self, page + '_pending', 0)
+        if not pending:
+            return
+        if ack >= pending:
+            setattr(self, page + '_pending', 0)
+            setattr(self, page + '_command_message', '')
+        elif time.monotonic() - getattr(self, page + '_pending_since', time.monotonic()) >= 5:
+            name = getattr(self, page + '_pending_name', '未知')
+            message = f'上一条命令【{name}】未被确认（主程序/父程序可能未运行），已放弃，可重新操作'
+            logger.warning(message)
+            setattr(self, page + '_pending', 0)
+            setattr(self, page + '_command_message', message)
 
     def baseline_command(self, name, params=None):
-        from nest_clear.tooloffset.commands import send
-        if not self.baseline_pending:
-            try: self.baseline_pending = send(self.directory, name, params, acknowledged=getattr(self, 'baseline_ack', 0))
-            except OSError: logger.exception('写对刀基准命令失败')
+        self._send_page_command('baseline', name, params)
 
     def update_baseline(self, main, supervisor=None):
         data = main.get('baseline') or {}; phase = data.get('phase') or 'idle'
         self.baseline_ack = main.get('command_seq', 0)
-        if self.baseline_pending and self.baseline_ack >= self.baseline_pending: self.baseline_pending = 0
+        self._check_page_command('baseline', self.baseline_ack)
         tool = data.get('tool'); candidate = data.get('candidate') or {}; existing = data.get('existing') or {}
         self.baseline_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else '#667085')
-        message = data.get('message') or '请开始对刀基准建立'
+        no_main = supervisor is not None and not supervisor.get('child_pid')
+        message = getattr(self, 'baseline_command_message', '') or ('上一条命令处理中' if self.baseline_pending else data.get('message') or '请开始对刀基准建立')
+        if no_main: message = '主程序未运行（等待 PLC 初始化）　' + message
         msg_color = COLORS['red'] if phase == 'fail' or (phase == 'done' and any(word in message for word in ('失败', '异常'))) else COLORS['green'] if phase in ('success', 'saved') else INK
-        self.baseline_message.config(text=message, fg=msg_color)
+        self.baseline_message.config(text=message, fg=COLORS['red'] if getattr(self, 'baseline_command_message', '') else COLORS['yellow'] if self.baseline_pending else msg_color)
         live = data.get('live_delta')
         self.baseline_live.config(text=f'实时辅助：离中心 横向 {live[0]:+.3f} mm / 竖向 {live[1]:+.3f} mm' if isinstance(live, list) and len(live) == 2 else '实时辅助：等待针尖', fg=COLORS['green'] if data.get('live_inside') else COLORS['red'] if live else MUTED)
         notice = data.get('notice') or ''
@@ -847,12 +910,13 @@ class App:
                 points=[coord for i,v in enumerate(values) for coord in (i*width/(len(values)-1), height-max(0,min(100,v))*height/100)]
                 graph.create_line(*points, fill=COLORS['blue'], width=2)
 
+        def enable_main(widget, condition): enable(widget, condition and not no_main)
         for i, button in enumerate(self.baseline_tools, 1):
-            enable(button, phase == 'select'); button.config(style='OffsetSelected.TButton' if i == tool else 'TButton')
-        for b in (self.baseline_measure, self.baseline_manual): enable(b, phase in ('live','fail','success','saved'))
-        enable(self.baseline_aux, phase in ('success','saved') and bool(candidate.get('p0')))
-        enable(self.baseline_save, phase == 'success')
-        enable(self.baseline_end, phase not in ('idle','done'))
+            enable_main(button, phase == 'select'); button.config(style='OffsetSelected.TButton' if i == tool else 'TButton')
+        for b in (self.baseline_measure, self.baseline_manual): enable_main(b, phase in ('live','fail','success','saved'))
+        enable_main(self.baseline_aux, phase in ('success','saved') and bool(candidate.get('p0')))
+        enable_main(self.baseline_save, phase == 'success')
+        enable_main(self.baseline_end, phase not in ('idle','done'))
         pixels = candidate.get('pixels') or {}; focus = candidate.get('focus') or {}; click = candidate.get('click') or {}
         def vector(value, digits=2):
             return '(' + ', '.join(f'{x:.{digits}f}' for x in value) + ')' if isinstance(value, (list,tuple)) else '—'
@@ -883,8 +947,7 @@ class App:
     def baseline_confirm(self, data):
         tool = data.get('tool'); candidate = data.get('candidate') or {}; old = (data.get('existing') or {}).get(f'tool{tool}') or {}
         top = tk.Toplevel(self.root); self.baseline_dialog = top; top.title(f'确认覆盖【工具{tool}】的对刀基准')
-        if hasattr(top, 'transient'): top.transient(self.root)
-        if hasattr(top, 'grab_set'): top.grab_set()
+        modal_window(top, self.root)
         tk.Label(top, text=f'确认覆盖【工具{tool}】的对刀基准', bg='#2563eb' if tool == 1 else '#d56713', fg=WHITE, font=(self.theme.title[0], 20, 'bold'), padx=20, pady=8).pack(fill='x')
         def difference(a, b):
             return [round(x-y, 4) for x,y in zip(a,b)] if isinstance(a, (tuple,list)) and isinstance(b, (tuple,list)) and len(a)==len(b) else '—'
@@ -937,19 +1000,17 @@ class App:
     def choose_pickacc_tool(self, tool):
         self.pickacc_tool=tool
 
-    def pickacc_command(self,name,params=None):
-        from nest_clear.tooloffset.commands import send
-        if not self.pickacc_pending:
-            self.pickacc_pending=send(self.directory,name,params,acknowledged=getattr(self,'pickacc_ack',0))
+    def pickacc_command(self, name, params=None):
+        self._send_page_command('pickacc', name, params)
 
     def update_pickacc(self,main):
         data=main.get('pickacc') or {}; phase=data.get('phase'); self.pickacc_ack=main.get('command_seq',0)
         if phase=='select' and self.pickacc_last_phase!='select': self.pickacc_tool=None
         self.pickacc_last_phase=phase
-        if self.pickacc_pending and self.pickacc_ack>=self.pickacc_pending: self.pickacc_pending=0
+        self._check_page_command('pickacc', self.pickacc_ack)
         tool=data.get('tool') or self.pickacc_tool
         self.pickacc_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择',bg='#2563eb' if tool==1 else '#d56713' if tool==2 else '#667085')
-        self.pickacc_message.config(text=data.get('message') or '等待 PLC 请求')
+        self.pickacc_message.config(text=getattr(self, 'pickacc_command_message', '') or ('上一条命令处理中' if self.pickacc_pending else data.get('message')) or '等待 PLC 请求', fg=COLORS['red'] if getattr(self, 'pickacc_command_message', '') else INK)
         for i,b in enumerate(self.pickacc_buttons,1): b.config(state='normal' if phase=='select' and not self.pickacc_pending else 'disabled',style='OffsetSelected.TButton' if i==tool else 'TButton')
         self.pickacc_start.config(state='normal' if phase=='select' and self.pickacc_tool and not self.pickacc_pending else 'disabled')
         for b in (self.pickacc_calculate,self.pickacc_discard): b.config(state='normal' if phase=='tool_in_place' and not self.pickacc_pending else 'disabled')
@@ -985,19 +1046,10 @@ class App:
         candidate=data.get('candidate') or {}; nodes=candidate.get('nodes') or []
         if candidate.get('type')=='table' and len(nodes)>=3:
             cells=[(80+(gx+.5)*5,-10+(gy+.5)*8) for gx in range(20) for gy in range(20)]
-            try:
-                import numpy as np
-                from scipy.interpolate import LinearNDInterpolator
-                points=np.asarray([[n['x'],n['y']] for n in nodes]); values=np.asarray([[n['dx'],n['dy']] for n in nodes]); grid=np.asarray(cells)
-                vectors=LinearNDInterpolator(points,values)(grid)
-                missing=~np.isfinite(vectors).all(axis=1)
-                if missing.any(): vectors[missing]=values[np.linalg.norm(grid[missing,None,:]-points[None,:,:],axis=2).argmin(axis=1)]
-                magnitudes=np.linalg.norm(vectors,axis=1).tolist()
-            except Exception:
-                magnitudes=[]
-                for px,py in cells:
-                    nearest=min(nodes,key=lambda n:(n['x']-px)**2+(n['y']-py)**2)
-                    magnitudes.append(math.hypot(nearest['dx'],nearest['dy']))
+            magnitudes=[]
+            for px,py in cells:
+                nearest=min(nodes,key=lambda n:(n['x']-px)**2+(n['y']-py)**2)
+                magnitudes.append(math.hypot(nearest['dx'],nearest['dy']))
             for gx in range(20):
                 for gy in range(20):
                     value=magnitudes[gx*20+gy]
@@ -1041,7 +1093,7 @@ class App:
 
     def pickacc_confirm(self,data):
         tool=data.get('tool'); candidate=data.get('candidate') or {}; old=(data.get('existing') or {}).get(f'tool{tool}') or {}
-        top=tk.Toplevel(self.root); self.pickacc_dialog=top; top.title(f'确认覆盖【工具{tool}】挑取补偿'); top.transient(self.root); top.grab_set()
+        top=tk.Toplevel(self.root); self.pickacc_dialog=top; top.title(f'确认覆盖【工具{tool}】挑取补偿'); modal_window(top, self.root)
         tk.Label(top,text=f'确认覆盖【工具{tool}】挑取补偿',bg='#2563eb' if tool==1 else '#d56713',fg=WHITE,font=self.theme.large,padx=16).pack(fill='x')
         prior=old.get('constant_xy'); current=candidate.get('constant_xy')
         def mean_value(value,nodes):
@@ -1074,12 +1126,7 @@ class App:
         if self.offset_tool: self.choose_offset_tool(self.offset_tool)
 
     def offset_command(self, name, params=None):
-        from nest_clear.tooloffset.commands import send
-        if self.offset_pending: return
-        try:
-            self.offset_pending = send(self.directory, name, params, acknowledged=getattr(self, 'offset_ack', 0))
-        except OSError:
-            logger.exception('写工具偏移命令失败')
+        self._send_page_command('offset', name, params)
 
     def start_offset(self):
         if self.offset_tool:
@@ -1091,7 +1138,7 @@ class App:
             self.offset_tool, self.offset_mode = None, 'center'
         self.offset_last_phase = phase
         self.offset_ack = main.get('command_seq', 0)
-        if self.offset_pending and self.offset_ack >= self.offset_pending: self.offset_pending = 0
+        self._check_page_command('offset', self.offset_ack)
         tool = data.get('tool') or self.offset_tool
         mode = data.get('mode') or self.offset_mode
         self.offset_heading.config(text=f"当前：{'工具' + str(tool) if tool else '未选择'}", bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else '#667085')
@@ -1100,7 +1147,7 @@ class App:
         for i, button in enumerate(self.offset_mode_buttons): button.config(style='OffsetSelected.TButton' if mode == ('center','center_edge')[i] else 'TButton')
         skipped = data.get('skipped') or []
         skip_text = '；跳过：' + '、'.join(f"{x.get('target')} {x.get('reason')}" for x in skipped) if skipped else ''
-        self.offset_message.config(text=(data.get('message') or '等待 PLC 请求') + skip_text)
+        self.offset_message.config(text=(getattr(self, 'offset_command_message', '') or ('上一条命令处理中' if self.offset_pending else data.get('message')) or '等待 PLC 请求') + skip_text, fg=COLORS['red'] if getattr(self, 'offset_command_message', '') else INK)
         selection_state = 'normal' if phase == 'select' and not self.offset_pending else 'disabled'
         for button in self.offset_tool_buttons + self.offset_mode_buttons:
             button.config(state=selection_state)
@@ -1137,8 +1184,7 @@ class App:
         tool = data.get('tool')
         heading = f'确认覆盖【工具{tool}】的偏移标定结果'
         top = tk.Toplevel(self.root); self.offset_dialog = top; top.title(heading)
-        if hasattr(top, 'transient'): top.transient(self.root)
-        if hasattr(top, 'grab_set'): top.grab_set()
+        modal_window(top, self.root)
         candidate = data.get('candidate') or {}
         prior, new = old.get('offset_xy_mm'), candidate.get('offset_xy_mm')
         delta = [round(new[i]-prior[i], 5) for i in range(2)] if isinstance(prior, list) and isinstance(new, list) and len(prior)==len(new)==2 else '—'
@@ -1188,10 +1234,7 @@ class App:
         self.tip_details.grid(row=0, column=0, sticky='nsew')
 
     def tip_command(self, name):
-        from nest_clear.tooloffset.commands import send
-        if not self.tip_pending:
-            try: self.tip_pending = send(self.directory, name, acknowledged=self.tip_ack)
-            except OSError: logger.exception('写对刀命令失败')
+        self._send_page_command('tip', name)
 
     def build_placeholder(self, parent, title):
         parent.columnconfigure(0, weight=1); parent.columnconfigure(1, weight=1)
@@ -1201,7 +1244,7 @@ class App:
             tk.Label(body, text='流程待定', bg=WHITE, fg=MUTED, font=self.theme.title).grid(row=0, column=0)
 
     def show_status(self, name):
-        top = tk.Toplevel(self.root); top.title(name + ' 状态详情')
+        top = tk.Toplevel(self.root); top.title(name + ' 状态详情'); modal_window(top, self.root)
         top.rowconfigure(0, weight=1); top.columnconfigure(0, weight=1)
         text = tk.Text(top, width=90, height=20, font=self.theme.mono)
         text.grid(row=0, column=0, sticky='nsew')
@@ -1213,7 +1256,7 @@ class App:
         selected = self.table.selection()
         if not selected: return
         row = self.events[int(selected[0])]['raw']
-        top = tk.Toplevel(self.root); top.title('异常详情')
+        top = tk.Toplevel(self.root); top.title('异常详情'); modal_window(top, self.root)
         top.rowconfigure(0, weight=1); top.columnconfigure(0, weight=1)
         text = tk.Text(top, width=100, height=24, font=self.theme.mono)
         text.grid(row=0, column=0, sticky='nsew')
@@ -1231,7 +1274,7 @@ class App:
         if not selected: return
         values = self.reply_table.item(selected[0], 'values')
         if not values: return
-        top = tk.Toplevel(self.root); top.title('应答详情')
+        top = tk.Toplevel(self.root); top.title('应答详情'); modal_window(top, self.root)
         top.rowconfigure(0, weight=1); top.columnconfigure(0, weight=1)
         text = tk.Text(top, width=80, height=16, wrap='word', font=self.theme.mono)
         text.grid(row=0, column=0, sticky='nsew')
@@ -1253,10 +1296,12 @@ class App:
         self.reply_hover_close()
         values = self.reply_table.item(row, 'values')
         if len(values) < 4: return
-        tip = self._reply_tip = tk.Toplevel(self.root); self._reply_tip_row = row
-        tip.wm_overrideredirect(True)
-        tip.geometry(f'+{event.x_root + 12}+{event.y_root + 16}')
-        tk.Label(tip, text=str(values[3]), justify='left', wraplength=600, bg='#fffbe6', relief='solid', borderwidth=1).pack()
+        tip = self._reply_tip = tk.Label(self.root, text=str(values[3]), justify='left',
+                                         wraplength=600, bg='#fffbe6', relief='solid', borderwidth=1)
+        self._reply_tip_row = row
+        tip.place(x=event.x_root - self.root.winfo_rootx() + 12,
+                  y=event.y_root - self.root.winfo_rooty() + 16)
+        tip.lift()
 
     def open_image(self, path):
         try:
@@ -1357,7 +1402,7 @@ class App:
         self.update_cam(camcal_progress(main))
         self.update_preview(supervisor, main)
         self.tip_ack = main.get('command_seq', 0)
-        if self.tip_pending and self.tip_ack >= self.tip_pending: self.tip_pending = 0
+        self._check_page_command('tip', self.tip_ack)
         tip_data = tooltip_progress(main)
         self.update_tip(tip_data)
         self.update_offset(main)
@@ -1526,24 +1571,40 @@ class App:
 
     def change_temporary_exposure(self, restore):
         self.temporary_pending = True
+        self.temporary_timeout_message = ''
+        self.temporary_pending_since = time.monotonic()
         self.temporary_set.config(state='disabled'); self.temporary_restore.config(state='disabled')
         self.temporary_message.config(text='设置中…')
         self.temporary_request = self.focus_action('restore_exposure' if restore else 'set_exposure', exposure_us=self.temporary_entry.get())
+
+    def _expire_focus_request(self, name, label):
+        if getattr(self, name + '_pending', False) and time.monotonic() - getattr(self, name + '_pending_since', time.monotonic()) >= 5:
+            setattr(self, name + '_pending', False)
+            message = '上一条命令未被确认（主程序/父程序可能未运行），已放弃，可重新操作'
+            logger.warning('%s：%s', name, message)
+            setattr(self, name + '_timeout_message', message)
+            label.config(text=message, fg=COLORS['red'])
+            return True
+        return False
 
     def update_temporary_exposure(self, p):
         result = p.get('temporary_exposure') or {}
         if result.get('request_seq') == getattr(self, 'temporary_request', None) and result.get('state'):
             self.temporary_pending = False
+            self.temporary_timeout_message = ''
+        expired = self._expire_focus_request('temporary', self.temporary_message)
         busy = (p.get('white_balance') or {}).get('state') == 'running' or (p.get('exposure_sweep') or {}).get('state') == 'running' or self.wb_pending or self.sweep_pending or self.temporary_pending
         self.temporary_set.config(state='disabled' if busy else 'normal')
         self.temporary_restore.config(state='disabled' if busy else 'normal')
-        if result.get('state') and not self.temporary_pending:
+        if result.get('state') and not self.temporary_pending and not expired and not getattr(self, 'temporary_timeout_message', ''):
             self.temporary_message.config(text=result.get('message', ''), fg=COLORS['red'] if result['state'] == 'error' else INK)
 
     def start_white_balance(self):
         from tkinter import messagebox
-        if messagebox.askokcancel('白平衡', '请在视野中央放置 18% 灰卡并保持光源与标定/挑毛时一致'):
+        if messagebox.askokcancel('白平衡', '请在视野中央放置 18% 灰卡并保持光源与标定/挑毛时一致', parent=self.root):
             self.wb_pending = True
+            self.wb_timeout_message = ''
+            self.wb_pending_since = time.monotonic()
             self.wb_button.config(state='disabled', text='白平衡中…')
             self.temporary_set.config(state='disabled'); self.temporary_restore.config(state='disabled')
             self.wb_message.config(text='白平衡中…', fg=INK)
@@ -1552,10 +1613,15 @@ class App:
     def update_white_balance(self, p):
         wb = p.get('white_balance') or {}
         state = wb.get('state')
-        if wb.get('request_seq') == getattr(self, 'wb_request', None) and state: self.wb_pending = False
+        if wb.get('request_seq') == getattr(self, 'wb_request', None) and state:
+            self.wb_pending = False
+            self.wb_timeout_message = ''
+        expired = self._expire_focus_request('wb', self.wb_message)
         running = state == 'running' or self.wb_pending
         sweep_running = (p.get('exposure_sweep') or {}).get('state') == 'running'
         self.wb_button.config(state='disabled' if running or sweep_running else 'normal', text='白平衡中…' if running else '白平衡')
+        if expired or getattr(self, 'wb_timeout_message', ''):
+            return
         if running:
             self.wb_message.config(text='白平衡中…', fg=INK)
         elif state == 'success':
@@ -1574,8 +1640,10 @@ class App:
             mode = 'brightness' if self.exposure_mode.get() == '亮度目标' else 'calibration'
             self.exposure_cache = None
             self.sweep_pending = True
+            self.sweep_timeout_message = ''
+            self.sweep_pending_since = time.monotonic()
             self.temporary_set.config(state='disabled'); self.temporary_restore.config(state='disabled')
-            self.focus_action('exposure_sweep', mode=mode)
+            self.sweep_request = self.focus_action('exposure_sweep', mode=mode)
             self.exposure_message.config(text='正在启动曝光自测…')
             self.show_exposure_results()
 
@@ -1602,11 +1670,14 @@ class App:
     def update_exposure(self, p):
         sweep = p.get('exposure_sweep') or {}
         running = sweep.get('state') == 'running'
-        if running: self.sweep_pending = False
+        if sweep.get('request_seq') == getattr(self, 'sweep_request', None) and sweep.get('state'):
+            self.sweep_pending = False
+            self.sweep_timeout_message = ''
+        expired = self._expire_focus_request('sweep', self.exposure_message)
         self.exposure_button.config(text='取消' if running else '曝光自测', state='disabled' if (p.get('white_balance') or {}).get('state') == 'running' or self.wb_pending else 'normal')
         self.exposure_mode.config(state='disabled' if running else 'readonly')
         if (running or (p.get('demo_exposure') and self.exposure_cache is None)) and not self.exposure_visible: self.show_exposure_results()
-        if not sweep: return
+        if expired or getattr(self, 'sweep_timeout_message', '') or not sweep: return
         key = json.dumps([sweep, p.get('exposure_apply')], ensure_ascii=False, sort_keys=True)
         if key == self.exposure_cache: return
         self.exposure_cache = key
@@ -1645,7 +1716,7 @@ class App:
         if not p.get('scores') or p.get('mode') != 'focus' or not p.get('on'):
             return
         try:
-            from nest_clear.preview.focus import write_record
+            from nest_clear.preview.focus_record import write_record
             record = write_record(self.directory, p, live_image_file(self.directory, 'preview_latest').read_bytes(), self.focus_note.get())
             self.focus_table.insert('', 'end', values=(record['time'][11:19], record['note'], f"{p['center']:.4f}", f"{p['median']:.4f}", f"{p['mean']:.1f}", f"{p['saturated_pct']:.2f}"))
         except OSError:
@@ -1700,7 +1771,7 @@ class App:
         c.create_text(right, h-2, text='现在', anchor='se', fill='#475569', font=self.theme.table)
 
     def update_tip(self, data):
-        key = json.dumps([data, self.tip_pending], ensure_ascii=False, default=str)
+        key = json.dumps([data, self.tip_pending, getattr(self, 'tip_command_message', '')], ensure_ascii=False, default=str)
         if key == self.cache.get('tip'): return
         self.cache['tip'] = key
         self.tiptable.delete(*self.tiptable.get_children())
@@ -1709,7 +1780,7 @@ class App:
         phase = data.get('phase', 'idle'); tool = data.get('tool')
         self.tip_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else COLORS['gray'])
         warning = data.get('camera_settings_warning')
-        self.tip_message.config(text=warning or data.get('message') or '等待 PLC 100/101', fg=COLORS['yellow'] if warning else COLORS['red'] if phase in ('limit','fail') else COLORS['green'] if phase == 'done' else INK)
+        self.tip_message.config(text=getattr(self, 'tip_command_message', '') or ('上一条命令处理中' if self.tip_pending else warning or data.get('message')) or '等待 PLC 100/101', fg=COLORS['red'] if getattr(self, 'tip_command_message', '') else COLORS['yellow'] if warning else COLORS['red'] if phase in ('limit','fail') else COLORS['green'] if phase == 'done' else INK)
         for name, button in self.tip_buttons.items():
             enabled = (name == 'tooltip_confirm_move' and phase in ('probe','confirm_move') or name == 'tooltip_confirm_result' and phase == 'in_range' or name in ('tooltip_click','tooltip_abort') and phase in ('probe','confirm_move','in_range','limit','click_failed'))
             button.config(state='normal' if enabled and not self.tip_pending else 'disabled')

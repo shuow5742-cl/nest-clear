@@ -246,3 +246,11 @@ def test_preview_reports_camera_held_by_other_process(tmp_path, monkeypatch):
         prep.stop_previews(('front', 'side'))
         prep.close()
         owner.close()
+
+
+def test_supervisor_rejects_and_acknowledges_non_preview_commands(rig):
+    for name in ('baseline_end', 'baseline_start', 'other_command'):
+        seq = issue(rig, name, {})
+        state = read(rig.root / 'state/supervisor_tooltip_status.json')
+        assert state['command_seq'] == seq
+        assert '主程序运行' in state['baseline']['message']
