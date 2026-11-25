@@ -9,16 +9,69 @@ import tempfile
 import threading
 import time
 import cv2
+import numpy as np
 
 from nest_clear.devices.calib_cameras import enumerate_capture_devices
 from nest_clear.devices.tooltip_camera_store import load_settings, save_measurement, measurement_for_device
 from nest_clear.devices.tooltip_exposure import auto_exposure
+from nest_clear.devices.v4l2_controls import DEFAULTS as CAMERA_DEFAULTS
 from nest_clear.paths import tooltip_preview_file
 from nest_clear.tooltip.detector import SilhouetteTipDetector
-from nest_clear.tooltip.focus_metrics import focus_metrics, PeakTracker
+from nest_clear.tooltip.focus_metrics import focus_metrics, EdgeWidthTracker
+from nest_clear.baseline.latest_capture import FrameBroker
 
 logger = logging.getLogger(__name__)
-LOW_FREQUENCY_PREVIEW_KEYS = ('on', 'device', 'error', 'exposure_source', 'exposure_error')
+LOW_FREQUENCY_PREVIEW_KEYS = ('on', 'device', 'error', 'exposure_source', 'exposure_error', 'exposure_limits', 'exposure_result', 'exposure_busy')
+
+
+def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127):
+    tip = detection.point_uv
+    status = '未识别' if tip is None else '粗定位' if detection.coarse else '精定位'
+    reason = detection.diagnostic or ('未识别到针尖' if tip is None else '针尖为粗定位' if detection.coarse else '')
+    metrics = {'tenengrad': None, 'edge_width_px': None, 'edge_width_um': None, 'contrast': None,
+               'source': 'none' if tip is None else 'coarse' if detection.coarse else 'tip'}
+    if status == '精定位':
+        count, labels, stats, _ = cv2.connectedComponentsWithStats((frame <= threshold).astype(np.uint8), connectivity=8)
+        silhouette = labels == (1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])) if count > 1 else np.zeros(frame.shape, dtype=bool)
+        metrics = focus_metrics(frame, tip=tip, um_per_px=scale, silhouette_mask=silhouette)
+        if metrics['contrast'] < min_contrast:
+            reason = f'对比度不足（{metrics["contrast"]:.1f} < {min_contrast:g}）'
+        elif metrics['edge_width_px'] is None or metrics['edge_width_px'] <= 0:
+            reason = '针尖附近无有效边缘'
+        else:
+            reason = ''
+    valid = status == '精定位' and not reason
+    if not valid:
+        metrics['edge_width_px'] = metrics['edge_width_um'] = None
+    tracked = tracker.update(metrics['edge_width_px'], tip if valid else None)
+    return status, reason, metrics, tracked
+
+
+def draw_tip_preview(frame, name, detection, ui_config, scale):
+    from nest_clear.baseline.session import _draw_labels
+    image = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    height, width = frame.shape[:2]
+    tip = detection.point_uv
+    center = ui_config.get('main_target_uv') or ((width - 1) / 2, (height - 1) / 2)
+    if name == 'front':
+        x, y = map(round, center)
+        cv2.drawMarker(image, (x, y), (255, 0, 255), cv2.MARKER_CROSS, 40, 2)
+        radius = round(ui_config.get('main_tol_mm', .1) * 1000 / scale)
+        cv2.circle(image, (x, y), max(1, radius), (255, 0, 255), 2)
+    labels = []
+    if tip is None:
+        labels.append(((20, 20), '未识别到针尖：' + (detection.diagnostic or '无结果'), 'Tip not detected: ' + detection.diagnostic, (0, 0, 255), 36))
+    else:
+        x, y = map(round, tip)
+        color = (0, 220, 255) if detection.coarse else (0, 220, 0)
+        cv2.drawMarker(image, (x, y), color, cv2.MARKER_CROSS, 48, 4)
+        cv2.rectangle(image, (max(0, x-80), max(0, y-80)), (min(width-1, x+80), min(height-1, y+80)), color, 3)
+        status = '粗定位' if detection.coarse else '精定位'
+        position = f'{status} ({tip[0]:.1f}, {tip[1]:.1f})'
+        if name == 'front':
+            position += f'  Δu={tip[0]-center[0]:+.1f}（右+） Δv={tip[1]-center[1]:+.1f}（下+）'
+        labels.append(((20, 20), position, f'{status} ({tip[0]:.1f}, {tip[1]:.1f})', color, 36))
+    return _draw_labels(image, labels)
 
 
 class Preparation:
@@ -37,10 +90,13 @@ class Preparation:
         self.busy = False
         self.assignment_thread = None
         self.devices = []
-        self.trackers = {n: PeakTracker(reset_distance=50) for n in self.enabled}
+        self.trackers = {n: EdgeWidthTracker(reset_distance=50) for n in self.enabled}
         self.reset_peak = {n: threading.Event() for n in self.enabled}
         self.history = {n: [] for n in self.enabled}
         self._preview_cameras = {}
+        self.streams = {}
+        self.capture_threads = {}
+        self.exposure_requests = {name: None for name in self.enabled}
         self._preview_last_write = None
         self._preview_timer = None
         self._last_summary = {n: None for n in self.enabled}
@@ -142,6 +198,177 @@ class Preparation:
             except Exception as exc:
                 self.events.emit('warning', reason=f'刷新对刀基准状态失败：{exc}')
 
+    def capture_after(self, name, t_mono, count, timeout):
+        """Return count new frames; timestamps mark the start of each read.
+
+        Frames are collected from the latest slot and subsequent reads, not a
+        historical queue. Raises TimeoutError unless the full batch arrives.
+        """
+        with self.lock:
+            stream = self.streams.get(name)
+        if stream is None:
+            raise RuntimeError(f'{name} 对刀相机预览未采集')
+        return stream.capture_after(t_mono, count, timeout)
+
+    def exposure_reply(self, name, seq, state, message):
+        if name not in self.state:
+            return
+        with self.lock:
+            self.state[name]['exposure_result'] = {'seq': seq, 'state': state, 'message': message}
+        self.publish()
+
+    def _change_exposure(self, name, camera, stream, request, path, device, stop):
+        seq = request.get('_seq')
+        try:
+            limits = camera.exposure_limits()
+            if request['action'] == 'tooltip_exposure_restore':
+                measured = measurement_for_device(load_settings(path), device)
+                value = measured.get('exposure') if measured else camera.config.get('camera_controls', {}).get('exposure', CAMERA_DEFAULTS['exposure'])
+                source = ('已测（取最接近值）' if measured.get('approximate') else '已测') if measured else '默认'
+            else:
+                from decimal import Decimal, InvalidOperation
+                try:
+                    units = Decimal(str(request.get('exposure_ms'))) * 10
+                    if not units.is_finite() or units != units.to_integral_value():
+                        raise ValueError('曝光须按 0.1 ms 单位输入')
+                    value = int(units)
+                except (InvalidOperation, ValueError, TypeError):
+                    raise ValueError('请输入有效曝光，单位 0.1 ms') from None
+                source = '临时'
+            if type(value) is not int or not limits['min'] <= value <= limits['max'] or (value - limits['min']) % limits['step']:
+                raise ValueError(f"曝光范围 {limits['min']/10:g}–{limits['max']/10:g} ms，步进 {limits['step']/10:g} ms")
+            stream.invalidate()
+            self.reset_peak[name].set()
+            camera.set_exposure(value)
+            actual = camera.get_exposure()
+            if stop.is_set():
+                raise RuntimeError('预览已关闭，曝光操作未确认')
+            if actual != value:
+                raise ValueError(f'曝光回读不一致：期望 {value}，实际 {actual}')
+            with self.lock:
+                self.state[name]['exposure_source'] = source
+                self.state[name].pop('exposure_error', None)
+            self.exposure_reply(name, seq, 'done', f'曝光回读 {actual/10:.1f} ms（{source}）')
+        except Exception as exc:
+            self.exposure_reply(name, seq, 'error', str(exc))
+
+    def _capture_loop(self, name, stop, stream, camera):
+        class ExposureCamera:
+            def __init__(self, owner):
+                self.owner = owner
+                self.config = camera.config
+                self.after_seq = 0
+                self.after_time = 0.
+            def get_exposure(self):
+                return camera.get_exposure()
+            def exposure_limits(self):
+                return limits
+            def set_exposure(self, value):
+                camera.set_exposure(value)
+                self.after_time = time.monotonic()
+                with stream.condition:
+                    self.after_seq = stream.seq
+            def capture(self):
+                while True:
+                    item = self.owner._capture_frame(camera, stream, stop, preview=False)
+                    if item.seq > self.after_seq and item.captured_mono >= self.after_time:
+                        self.after_seq = item.seq
+                        return item.frame
+        try:
+            camera.open()
+            self.events.emit('tooltip_preview_open', camera=name)
+            path = camera.config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
+            device = camera.settings_snapshot().get('device', camera.config.get('device'))
+            measured = measurement_for_device(load_settings(path), device)
+            try:
+                limits = camera.exposure_limits()
+            except (AttributeError, RuntimeError, OSError, ValueError):
+                limits = None
+            with self.lock:
+                source = ('已测（取最接近值）' if measured.get('approximate') else '已测') if measured else '默认'
+                self.state[name].update(device=device, exposure_limits=limits, exposure_source=source, exposure_busy=not bool(measured))
+            self.publish()
+            if not measured:
+                self.retest[name].set()
+            while not stop.is_set():
+                if self.retest[name].is_set():
+                    with self.lock:
+                        self.state[name]['exposure_busy'] = True
+                        self.retest[name].clear()
+                    stream.invalidate()
+                    self.reset_peak[name].set()
+                    with self.lock:
+                        previous_source = self.state[name].get('exposure_source', '默认')
+                        self.state[name]['exposure_source'] = '正在测曝光…'; self.state[name].pop('exposure_error', None)
+                    self.publish()
+                    try:
+                        initial = camera.get_exposure()
+                        try:
+                            options = dict(getattr(self.config.tool_calibration, 'auto_exposure', {}) if self.config else {})
+                            if not measured:
+                                options['initial_exposure'] = max(1, limits['min'] if limits else 1)
+                            result = auto_exposure(ExposureCamera(self), **options)
+                        except Exception:
+                            camera.set_exposure(initial); raise
+                        camera.exposure_status = '已测曝光'
+                        if hasattr(camera, 'actual_settings'): camera.actual_settings['exposure_status'] = '已测曝光'
+                        save_measurement(path, name, camera.settings_snapshot(), result)
+                        with self.lock:
+                            self.state[name]['exposure_source'] = '已测（取最接近值）' if result.get('approximate') else '已测'
+                            measured = measurement_for_device(load_settings(path), device)
+                        self.events.emit('tooltip_exposure_measured', camera=name, device=device, exposure=result['exposure'])
+                        self.publish()
+                        self.refresh_existing()
+                    except Exception as exc:
+                        if stop.is_set():
+                            break
+                        with self.lock:
+                            self.state[name]['exposure_source'] = previous_source; self.state[name]['exposure_error'] = str(exc)
+                        self.events.emit('tooltip_exposure_failed', camera=name, reason=str(exc))
+                        self.publish()
+                    finally:
+                        self.reset_peak[name].set()
+                        with self.lock:
+                            self.state[name]['exposure_busy'] = False
+                        self.publish()
+                with self.lock:
+                    request = self.exposure_requests[name]
+                    self.exposure_requests[name] = None
+                if request:
+                    if stop.is_set():
+                        self.exposure_reply(name, request.get('_seq'), 'error', '预览已关闭')
+                    else:
+                        self._change_exposure(name, camera, stream, request, path, device, stop)
+                if not stop.is_set():
+                    self._capture_frame(camera, stream, stop)
+        except Exception as exc:
+            if not stop.is_set():
+                stream.finish(exc)
+        finally:
+            with self.lock:
+                request = self.exposure_requests[name]
+                self.exposure_requests[name] = None
+                self.state[name]['exposure_busy'] = False
+            if request:
+                self.exposure_reply(name, request.get('_seq'), 'error', '预览已关闭')
+            stream.finish()
+            if stop not in self.retained:
+                camera.close()
+
+    def _capture_frame(self, camera, stream, stop, preview=True):
+        if stop.is_set():
+            raise RuntimeError('预览采集已停止')
+        captured_mono = time.monotonic()
+        captured_at = self._clock().isoformat()
+        frame = camera.capture()
+        if stop.is_set():
+            raise RuntimeError('预览采集已停止')
+        try:
+            exposure = camera.get_exposure() / 10
+        except Exception:
+            exposure = None
+        return stream.publish(frame, captured_mono, captured_at, exposure, preview=preview)
+
     def command(self, name, params):
         if name in ('tooltip_assign', 'tooltip_swap'):
             raise ValueError('对刀相机已按插口固定，不可在界面修改')
@@ -159,6 +386,8 @@ class Preparation:
             with self.lock:
                 self.enabled[camera] = on
                 self.state[camera].update(on=on, error=None)
+                self.state[camera]['exposure_busy'] = on
+                self.state[camera].pop('exposure_limits', None)
                 for key in ('tenengrad','peak','percent','edge_width_um','edge_width_px','contrast','source','tip_uv','history','exposure_error','exposure_ms','fps'):
                     self.state[camera].pop(key, None)
                 self._preview_cameras.pop(camera, None)
@@ -178,6 +407,17 @@ class Preparation:
             if not on: self.events.emit('tooltip_preview_close', camera=camera)
         elif name == 'tooltip_exposure_retest':
             self.retest[camera].set()
+        elif name in ('tooltip_exposure_set', 'tooltip_exposure_restore'):
+            with self.lock:
+                if not self.enabled[camera] or camera not in self.streams:
+                    error = '预览未打开'
+                elif self.state[camera].get('exposure_busy') or self.retest[camera].is_set() or self.exposure_requests[camera] is not None:
+                    error = '曝光操作进行中，请稍后重试'
+                else:
+                    error = None
+                    self.exposure_requests[camera] = {**params, 'action': name}
+            if error:
+                self.exposure_reply(camera, params.get('_seq'), 'error', error)
         elif name == 'tooltip_peak_reset':
             self.reset_peak[camera].set()
         else:
@@ -192,87 +432,70 @@ class Preparation:
         self._last_summary[name] = None
         target = Path(self.events.directory) / 'live' / f'baseline_{name}.jpg'
         target.unlink(missing_ok=True)
+        stream = FrameBroker()
+        with self.lock:
+            self.streams[name] = stream
+        capture_thread = threading.Thread(target=self._capture_loop, args=(name, stop, stream, camera), daemon=True, name='tooltip-capture-'+name)
+        self.capture_threads[name] = capture_thread
+        capture_thread.start()
         try:
-            camera.open()
-            self.events.emit('tooltip_preview_open', camera=name)
-            path = camera.config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
-            device = camera.settings_snapshot().get('device', camera.config.get('device'))
-            measured = measurement_for_device(load_settings(path), device)
-            with self.lock:
-                self.state[name].update(device=device, exposure_source=('已测 '+str(measured.get('time', '')) if measured else '未测'))
-            self.publish()
-            if not measured: self.retest[name].set()
             last = None
+            last_exposure = None
+            last_seq = 0
             while not stop.is_set():
-                if self.retest[name].is_set():
-                    self.retest[name].clear()
-                    with self.lock:
-                        self.state[name]['exposure_source'] = '正在测曝光…'; self.state[name].pop('exposure_error', None)
-                    self.publish()
-                    try:
-                        initial = camera.get_exposure()
-                        try:
-                            result = auto_exposure(camera, **(getattr(self.config.tool_calibration, 'auto_exposure', {}) if self.config else {}))
-                        except Exception:
-                            camera.set_exposure(initial); raise
-                        camera.exposure_status = '已测曝光'
-                        if hasattr(camera, 'actual_settings'): camera.actual_settings['exposure_status'] = '已测曝光'
-                        save_measurement(path, name, camera.settings_snapshot(), result)
-                        with self.lock:
-                            self.state[name]['exposure_source'] = '已测 ' + str(load_settings(path)['cameras'][name]['time'])
-                        self.events.emit('tooltip_exposure_measured', camera=name, device=device, exposure=result['exposure'])
-                        self.publish()
-                        self.refresh_existing()
-                    except Exception as exc:
-                        with self.lock:
-                            self.state[name]['exposure_source'] = '未测'; self.state[name]['exposure_error'] = str(exc)
-                        self.events.emit('tooltip_exposure_failed', camera=name, reason=str(exc))
-                        self.publish()
-                frame = camera.capture()
+                if last is not None:
+                    delay = .2 - (self._monotonic() - last)
+                    if delay > 0 and stop.wait(delay):
+                        break
+                item = stream.next_latest(last_seq, stop)
+                if item is None:
+                    break
+                frame, exposure, last_seq = item.frame, item.exposure_ms, item.seq
+                processing_start = time.monotonic()
+                if exposure is not None and last_exposure is not None and exposure != last_exposure:
+                    self.trackers[name].reset()
+                    self.history[name] = []
+                if exposure is not None:
+                    last_exposure = exposure
                 now = self._monotonic()
-                if last is not None and now - last < .2:
-                    stop.wait(.2 - (now - last))
-                    continue
                 fps = round(1 / (now - last), 1) if last is not None and now > last else None
                 last = now
                 detector_cfg = self.config.tool_calibration.detection[name] if self.config else {}
-                tip = SilhouetteTipDetector(**detector_cfg).detect(frame).point_uv
+                detection = SilhouetteTipDetector(**detector_cfg).detect(frame)
+                tip = detection.point_uv
+                target_uv = self.ui_config.get('main_target_uv') or ((frame.shape[1]-1)/2, (frame.shape[0]-1)/2)
+                delta_uv = [tip[0] - target_uv[0], tip[1] - target_uv[1]] if name == 'front' and tip is not None else None
                 scale = self.ui_config.get('main_um_per_px' if name == 'front' else 'aux_um_per_px', 15.2)
-                metrics = focus_metrics(frame, tip=tip, um_per_px=scale)
                 if self.reset_peak[name].is_set():
                     self.trackers[name].reset(); self.reset_peak[name].clear()
-                tracked = self.trackers[name].update(metrics['tenengrad'], tip)
+                    self.history[name] = []
+                status, reason, metrics, tracked = analyze_tip(frame, detection, self.trackers[name], scale, self.ui_config.get('min_focus_contrast', 40), detector_cfg.get('threshold', 127))
                 self.history[name] = [(t,v) for t,v in self.history[name] if now-t <= 30]
-                self.history[name].append((now, tracked['percent']))
+                if tracked['percent'] is not None:
+                    self.history[name].append((now, tracked['percent']))
                 with self.lock:
-                    if tracked['current'] == tracked['peak']:
-                        self.state[name]['peak_edge_width_um'] = metrics['edge_width_um']
-                    self.state[name].update(tenengrad=metrics['tenengrad'], peak=tracked['peak'], percent=tracked['percent'],
+                    self.state[name]['peak_edge_width_um'] = tracked['best'] * scale if tracked['best'] is not None else None
+                    self.state[name].update(tenengrad=metrics['tenengrad'], peak=tracked['best'], percent=tracked['percent'],
                         edge_width_um=metrics['edge_width_um'], edge_width_px=metrics['edge_width_px'], contrast=metrics['contrast'],
                         source=metrics['source'], tip_uv=list(tip) if tip is not None else None,
+                        detection_status=status, detection_reason=detection.diagnostic, focus_reason=reason,
                         history=[v for _,v in self.history[name]], fps=fps)
-                image = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                h, w = frame.shape[:2]
-                if name == 'front':
-                    center = self.ui_config.get('main_target_uv') or ((w-1)/2, (h-1)/2)
-                    x,y = map(round, center)
-                    cv2.drawMarker(image, (x,y), (255,0,255), cv2.MARKER_CROSS, 40, 1)
-                    radius = round(self.ui_config.get('main_tol_mm', .1)*1000/scale)
-                    cv2.circle(image, (x,y), max(1,radius), (255,0,255), 1)
-                if tip is not None: cv2.circle(image, tuple(map(round, tip)), 5, (0,200,255), 2)
+                image = draw_tip_preview(frame, name, detection, self.ui_config, scale)
                 image = cv2.resize(image, (960, max(1, round(frame.shape[0]*960/frame.shape[1]))), interpolation=cv2.INTER_AREA)
                 ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                with stream.condition:
+                    if item.generation != stream.generation:
+                        continue
                 if ok:
                     target = Path(self.events.directory) / 'live' / f'baseline_{name}.jpg'
                     target.parent.mkdir(parents=True, exist_ok=True)
                     temporary = target.with_suffix('.preview.tmp'); temporary.write_bytes(encoded.tobytes()); os.replace(temporary, target)
-                try: exposure = camera.get_exposure() / 10
-                except Exception: exposure = None
                 with self.lock:
                     self.state[name].update(exposure_ms=exposure)
+                    published = time.monotonic()
                     self._preview_cameras[name] = {
                         'tenengrad': metrics['tenengrad'],
-                        'peak': tracked['peak'],
+                        'peak': tracked['best'],
                         'percent': tracked['percent'],
                         'edge_width_um': metrics['edge_width_um'],
                         'edge_width_px': metrics['edge_width_px'],
@@ -280,8 +503,17 @@ class Preparation:
                         'contrast': metrics['contrast'],
                         'source': metrics['source'],
                         'tip_uv': list(tip) if tip is not None else None,
+                        'detection_status': status,
+                        'detection_reason': detection.diagnostic,
+                        'focus_reason': reason,
+                        'delta_uv': delta_uv,
                         'history': list(self.state[name]['history']),
                         'fps': fps,
+                        'frame_seq': item.seq,
+                        'captured_mono': item.captured_mono,
+                        'captured_at': item.captured_at,
+                        'frame_age_ms': max(0., (published - item.captured_mono) * 1000),
+                        'processing_ms': max(0., (published - processing_start) * 1000),
                         'exposure_ms': exposure,
                         'updated_at': self._clock().isoformat(),
                     }
@@ -292,8 +524,8 @@ class Preparation:
                     self.events.emit(
                         'tooltip_focus_summary',
                         camera=name,
-                        current=metrics['tenengrad'],
-                        peak=tracked['peak'],
+                        current=metrics['edge_width_px'],
+                        peak=tracked['best'],
                         percent=tracked['percent'],
                         edge_width_um=metrics['edge_width_um'],
                         source=metrics['source'],
@@ -307,8 +539,12 @@ class Preparation:
             self._write_preview_file(force=True)
             self.events.emit('tooltip_preview_error', camera=name, reason=detail); self.publish()
         finally:
+            stop.set()
+            capture_thread.join()
+            with self.lock:
+                if self.streams.get(name) is stream:
+                    self.streams.pop(name, None)
             if stop not in self.retained:
-                camera.close()
                 target.unlink(missing_ok=True)
 
     def _record_finished(self):

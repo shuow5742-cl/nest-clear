@@ -109,9 +109,12 @@ def test_demo_images_use_camera_aspect_ratio(tmp_path):
 def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     from nest_clear.ui import app
     write_demo(tmp_path, initial=True)
+    import sys
+    for module in ('cv2', 'numpy', 'yaml'):
+        monkeypatch.setitem(sys.modules, module, None)
     for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
         monkeypatch.setattr(app.tk, name, Widget)
-    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox'):
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox', 'Spinbox'):
         monkeypatch.setattr(app.ttk, name, Widget)
     monkeypatch.setattr(app.ttk, 'Style', Style)
     monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
@@ -314,8 +317,28 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
                                             'side': {'on': True, 'device': 'usb-0:8', 'exposure_source': '已测 2026-11-23'}}}}
         ui.update_baseline(low_main)
         assert '98%' in ui.baseline_views['front']['info'].options['text']
+        low_main['baseline']['preview']['front']['exposure_limits'] = {'min': 1, 'max': 50, 'step': 1}
+        ui.baseline_exposure_pending['front'] = (123, time.monotonic())
+        low_main['command_seq'] = 123
+        ui.update_baseline(low_main)
+        assert 'front' in ui.baseline_exposure_pending
+        low_main['baseline']['preview']['front']['exposure_result'] = {'seq': 123, 'state': 'done', 'message': '曝光回读 0.3 ms'}
+        ui.update_baseline(low_main)
+        assert 'front' not in ui.baseline_exposure_pending
+        assert '0.3 ms' in ui.baseline_views['front']['exposure_result'].options['text']
+        ui.baseline_exposure_pending['front'] = (124, time.monotonic() - 6)
+        ui.update_baseline(low_main)
+        assert '未完成' in ui.baseline_views['front']['exposure_result'].options['text']
         assert ui.baseline_views['side']['info'].options['text'] == '无实时数据'
         assert '对比度 —' in ui.baseline_views['side']['detail'].options['text']
+        preview_file.write_text(json.dumps({'updated_at': now_iso, 'cameras': {'front': {
+            'percent': None, 'detection_status': '未识别', 'detection_reason': 'no dark component',
+            'focus_reason': '未识别到针尖', 'frame_age_ms': 1100, 'updated_at': now_iso}}}), encoding='utf-8')
+        ui.update_baseline(low_main)
+        assert '—%' in ui.baseline_views['front']['info'].options['text']
+        assert '未识别到针尖' in ui.baseline_views['front']['detail'].options['text']
+        assert '画面延迟' in ui.baseline_views['front']['detail'].options['text']
+        assert ui.baseline_views['front']['detail'].options['fg'] == app.COLORS['red']
         old_t = time.time() - 5.0
         os.utime(preview_file, (old_t, old_t))
         ui.update_baseline(low_main)
@@ -585,7 +608,7 @@ def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
 
     for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
         monkeypatch.setattr(app.tk, name, Widget)
-    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox'):
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox', 'Spinbox'):
         monkeypatch.setattr(app.ttk, name, Widget)
     monkeypatch.setattr(app.ttk, 'Style', Style)
     monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])

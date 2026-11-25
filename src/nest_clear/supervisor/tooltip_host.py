@@ -29,7 +29,9 @@ class TooltipHost:
         self.reader = CommandReader(self.directory, self, last_seq=last_seq)
         self.worker = CalibCameraWorker(config.tool_calibration.cameras,
                                         timeout_s=config.capture_timeout_s, events=self)
-        self.tooltip_preparation = Preparation(self, self.worker, config)
+        from nest_clear.baseline.session import settings as baseline_settings
+        root = Path(__file__).resolve().parents[3]
+        self.tooltip_preparation = Preparation(self, self.worker, config, baseline_settings(root / 'config/tooltip_baseline.yaml'))
         self._write()
 
     def _write(self):

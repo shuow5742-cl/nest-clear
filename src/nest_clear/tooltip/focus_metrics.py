@@ -1,8 +1,9 @@
 """Exposure-normalized focus and silhouette edge measurements."""
 import cv2
 import numpy as np
+from collections import deque
 
-def focus_metrics(image, tip=None, roi_size=160, um_per_px=15.2):
+def focus_metrics(image, tip=None, roi_size=160, um_per_px=15.2, silhouette_mask=None):
     image = np.asarray(image)
     if image.ndim != 2 or not image.size or image.dtype != np.uint8: raise ValueError('须为非空 uint8 灰度图')
     h, w = image.shape; x, y = tip if tip is not None else (w/2, h/2)
@@ -16,6 +17,10 @@ def focus_metrics(image, tip=None, roi_size=160, um_per_px=15.2):
     ten = float(np.mean(gx*gx+gy*gy)/contrast**2) if contrast > 0 else 0.
     # Sample along the local Sobel normal, rejecting profiles without stable plateaus.
     magnitude = cv2.magnitude(gx, gy); candidates = (magnitude > max(1., contrast * 0.5))
+    if silhouette_mask is not None:
+        mask_roi = silhouette_mask[max(0,y-half):min(h,y+half), max(0,x-half):min(w,x+half)].astype(np.uint8)
+        boundary = cv2.morphologyEx(mask_roi, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+        candidates &= cv2.dilate(boundary, np.ones((7, 7), np.uint8)) != 0
     coords = np.argwhere(candidates)[::max(1, int(candidates.sum()/300))]; widths = []
     t = np.arange(-20, 20.01, .1, dtype=np.float32)
     for yy, xx in coords:
@@ -46,3 +51,28 @@ class PeakTracker:
         self.current = float(value); self.peak = max(self.current, self.peak if self.peak is not None else self.current)
         self.position = np.asarray(position, dtype=float) if position is not None else None
         return {'current': self.current, 'peak': self.peak, 'percent': 100*self.current/self.peak if self.peak else 0.}
+
+
+class EdgeWidthTracker:
+    def __init__(self, reset_distance=50):
+        self.reset_distance = reset_distance
+        self.reset()
+
+    def reset(self):
+        self.best = None
+        self.position = None
+        self.widths = deque(maxlen=3)
+
+    def update(self, width, position=None):
+        if width is None or not np.isfinite(width) or width <= 0:
+            return {'best': self.best, 'percent': None}
+        if position is not None and self.position is not None and np.linalg.norm(np.asarray(position) - self.position) > self.reset_distance:
+            self.reset()
+        if position is not None:
+            self.position = np.asarray(position, dtype=float)
+        self.widths.append(float(width))
+        if len(self.widths) < 3:
+            return {'best': self.best, 'percent': None}
+        median = float(np.median(self.widths))
+        self.best = min(median, self.best if self.best is not None else median)
+        return {'best': self.best, 'percent': min(100., 100. * self.best / width)}

@@ -30,6 +30,7 @@ DEFAULTS: dict[str, Any] = {
     "main_tol_mm": 0.05,
     "main_um_per_px": 15.2,
     "aux_um_per_px": 15.2,
+    "min_focus_contrast": 40,
 }
 
 _FONT_PATHS = (
@@ -91,7 +92,7 @@ def settings(path: str | Path) -> dict[str, Any]:
     """读取并校验 config/tooltip_baseline.yaml 中的 baseline_ui 参数。"""
     data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     cfg = {**DEFAULTS, **(data.get("baseline_ui") or {})}
-    for key in ("main_tol_mm", "main_um_per_px", "aux_um_per_px"):
+    for key in ("main_tol_mm", "main_um_per_px", "aux_um_per_px", "min_focus_contrast"):
         value = cfg[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"{key} 必须为有限正数")
