@@ -778,6 +778,7 @@ class App:
         self.baseline_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else '#667085')
         no_main = supervisor is not None and not supervisor.get('child_pid')
         message = getattr(self, 'baseline_command_message', '') or ('上一条命令处理中' if self.baseline_pending else data.get('message') or '请开始对刀基准建立')
+        if phase == 'unknown': message = '对刀状态未知或已过期'
         if no_main: message = '主程序未运行（等待 PLC 初始化）　' + message
         msg_color = COLORS['red'] if phase == 'fail' or (phase == 'done' and any(word in message for word in ('失败', '异常'))) else COLORS['green'] if phase in ('success', 'saved') else INK
         self.baseline_message.config(text=message, fg=COLORS['red'] if getattr(self, 'baseline_command_message', '') else COLORS['yellow'] if self.baseline_pending else msg_color)
@@ -835,8 +836,9 @@ class App:
             title = '主对刀相机（正面）' if name == 'front' else '辅助对刀相机（侧面）'
             live = extract_tooltip_preview(preview_doc, name, file_age=preview_age)
             display = baseline_preview_display(item, live=live, allow_inline=(preview_age is None and not preview_doc))
-            button_text = title+'预览：'+('开' if on else '关')
+            button_text = title+'预览：'+('未知' if phase == 'unknown' else '开' if on else '关')
             widgets['reason'].config(text='' if may_prepare else '不可用：' + (blocked_reason or '会话进行中'))
+            if phase == 'unknown': may_prepare = False
             if may_prepare: widgets['reason'].grid_remove()
             else: widgets['reason'].grid()
             widgets['toggle'].config(text=button_text, fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
@@ -846,7 +848,7 @@ class App:
                 text = display['message']; color = COLORS['red']
                 detail = '清晰度 —　边缘 — µm / — px　对比度 —　识别来源 —　曝光 —'
             elif not display['on']:
-                text = '预览关闭'; color = MUTED
+                text = '状态未知或已过期' if phase == 'unknown' else '预览关闭'; color = MUTED
                 detail = f'边缘 — µm / — px　对比度 —　识别来源 —　曝光 — ms {item.get("exposure_source", "未测")}'
             elif display['no_live_data']:
                 text = display['message']
@@ -1371,7 +1373,7 @@ class App:
         self.update_pickacc(main)
         from nest_clear.ui.model import supervisor_tooltip_main
         tooltip = self.file_data(self.directory / 'state' / 'supervisor_tooltip_status.json')
-        self.update_baseline(supervisor_tooltip_main(main, supervisor, tooltip), supervisor)
+        self.update_baseline(supervisor_tooltip_main(main, supervisor, tooltip, supervisor_age=supervisor_age), supervisor)
         key = (date.today(), json.dumps(rows, ensure_ascii=False, default=str))
         if key != self.cache.get('events'):
             self.events = list(rows); self.table.delete(*self.table.get_children())

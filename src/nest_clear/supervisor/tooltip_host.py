@@ -3,6 +3,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from datetime import datetime
 
 from nest_clear.baseline.preparation import Preparation
 from nest_clear.flow.leaves import PREVIEW_COMMANDS, handle_preview_command
@@ -13,14 +14,15 @@ from nest_clear.workers.calib_camera import CalibCameraWorker
 
 
 class TooltipHost:
-    def __init__(self, config, events, last_seq=0):
+    def __init__(self, config, events, last_seq=0, *, start_time=None):
         self.config, self.events = config, events
         self.directory = Path(config.record_directory)
         self.clock, self.monotonic = events.clock, events.monotonic
         self.lock = threading.RLock()
-        self.status = {'pid': os.getpid(), 'command_seq': last_seq,
+        self.status = {'pid': os.getpid(), 'start_time': start_time, 'status': 'running', 'command_seq': last_seq,
                        'baseline': {'phase': 'idle', 'message': '请开始对刀基准建立'}}
         self.status_path = self.directory / 'state' / 'supervisor_tooltip_status.json'
+        self.writes_enabled = True
         self.request_pending = False
         self.closed = False
         self.baseline_session = None
@@ -32,6 +34,9 @@ class TooltipHost:
 
     def _write(self):
         with self.lock:
+            if not self.writes_enabled:
+                return
+            self.status['updated_at'] = datetime.now().astimezone().isoformat()
             atomic_write(self.status_path, json.dumps(self.status, ensure_ascii=False).encode())
 
     def emit(self, event, **fields):

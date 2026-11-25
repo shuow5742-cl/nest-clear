@@ -161,11 +161,14 @@ class Supervisor:
         except (OSError, ValueError, AttributeError):
             return 0
 
-    def _reset_tooltip_status(self):
+    def _reset_tooltip_status(self, stopped=False):
         from ..preview.process import atomic_write
         path = Path(self.config.record_directory) / 'state' / 'supervisor_tooltip_status.json'
-        state = {'pid': os.getpid(), 'command_seq': self.tooltip_seq,
-                 'baseline': {'phase': 'idle', 'message': '请开始对刀基准建立', 'preview': {}}}
+        state = {'pid': os.getpid(), 'start_time': self._wall_start,
+                 'updated_at': datetime.now().astimezone().isoformat(),
+                 'status': 'stopped' if stopped else 'running', 'command_seq': self.tooltip_seq,
+                 'baseline': {'phase': 'idle', 'message': '已停止' if stopped else '请开始对刀基准建立',
+                              'preview': {name: {'on': False} for name in ('front', 'side', 'main')}}}
         atomic_write(path, json.dumps(state, ensure_ascii=False).encode())
 
     def _tooltip_tick(self):
@@ -182,7 +185,7 @@ class Supervisor:
             except (OSError, ValueError, AttributeError):
                 return
             from .tooltip_host import TooltipHost
-            self.tooltip_host = TooltipHost(self.config, self.events, self.tooltip_seq)
+            self.tooltip_host = TooltipHost(self.config, self.events, self.tooltip_seq, start_time=self._wall_start)
         self.tooltip_host.poll()
         self.tooltip_seq = self.tooltip_host.reader.last_seq
 
@@ -192,6 +195,8 @@ class Supervisor:
         if host is None:
             return
         self.tooltip_seq = max(self.tooltip_seq, host.reader.last_seq)
+        with host.lock:
+            host.writes_enabled = False
         self.tooltip_host = None
         started = time.monotonic()
         prep = host.tooltip_preparation
@@ -621,6 +626,7 @@ class Supervisor:
 
     def run(self) -> None:
         """持续运行直至中断，并在退出时释放子进程与连接。"""
+        self._reset_tooltip_status()
         self.events.emit("process_start", **self.metadata)
         if self.config.ui.enabled and not os.environ.get("DISPLAY"):
             logger.warning("无 DISPLAY，显示界面不会启动")
@@ -638,6 +644,12 @@ class Supervisor:
                     logger.exception("显示界面管理失败，父程序继续运行")
                 self.tick()
                 self._publish()
+                if time.monotonic() >= getattr(self, '_tooltip_heartbeat_next', 0):
+                    if self.tooltip_host is not None:
+                        self.tooltip_host._write()
+                    else:
+                        self._reset_tooltip_status()
+                    self._tooltip_heartbeat_next = time.monotonic() + 1.0
                 time.sleep(self.config.supervisor.poll_s)
         except KeyboardInterrupt:
             logger.info("收到退出信号")
@@ -661,4 +673,5 @@ class Supervisor:
             self._stop("父程序退出")
             self._reply_after_failure("父程序退出", retry=False)
             self.plc.close()
+            self._reset_tooltip_status(stopped=True)
             self.events.emit("process_stop")

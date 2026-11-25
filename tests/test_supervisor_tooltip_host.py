@@ -1,4 +1,6 @@
 import json
+import os
+from datetime import datetime, timedelta
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -116,13 +118,14 @@ def test_start_joins_preview_before_child_and_preserves_command_boundary(rig, mo
 
 def test_supervisor_status_overlay_only_without_child():
     main = {'mode': '挑毛中', 'baseline': {'phase': 'live'}, 'command_seq': 3}
-    host = {'pid': 5, 'baseline': {'phase': 'prepare', 'preview': {'front': {'on': True}}}, 'command_seq': 8}
-    parent = {'pid': 5, 'child_pid': None}
-    result = supervisor_tooltip_main(main, parent, host)
+    stamp = datetime.now().astimezone().isoformat()
+    host = {'pid': os.getpid(), 'start_time': stamp, 'updated_at': stamp, 'status': 'running', 'baseline': {'phase': 'prepare', 'preview': {'front': {'on': True}}}, 'command_seq': 8}
+    parent = {'pid': os.getpid(), 'start_time': stamp, 'child_pid': None}
+    result = supervisor_tooltip_main(main, parent, host, supervisor_age=0)
     assert result['mode'] == '空闲' and result['command_seq'] == 8
     assert result['baseline']['preview']['front']['on']
-    assert supervisor_tooltip_main(main, {**parent, 'child_pid': 42}, host) is main
-    assert not supervisor_tooltip_main(main, parent, {**host, 'pid': 6})['baseline']['preview']
+    assert supervisor_tooltip_main(main, {**parent, 'child_pid': 42}, host, supervisor_age=0) is main
+    assert not supervisor_tooltip_main(main, parent, {**host, 'pid': 6}, supervisor_age=0)['baseline']['preview']
 
 
 def test_supervisor_routes_retest_and_peak_reset(rig, monkeypatch):
@@ -180,7 +183,7 @@ def test_child_exit_does_not_replay_its_last_command(rig, monkeypatch):
     rig.sup._tooltip_tick()
     assert rig.sup.tooltip_host is None and not rig.history
     state = read(rig.root / 'state/supervisor_tooltip_status.json')
-    assert state['command_seq'] == seq and not state['baseline']['preview']
+    assert state['command_seq'] == seq and all(not p['on'] for p in state['baseline']['preview'].values())
 
 
 def test_camera_exclusive_lock_and_release(tmp_path):
@@ -255,3 +258,50 @@ def test_supervisor_rejects_and_acknowledges_non_preview_commands(rig):
         state = read(rig.root / 'state/supervisor_tooltip_status.json')
         assert state['command_seq'] == seq
         assert '主程序运行' in state['baseline']['message']
+
+
+def test_start_replaces_old_status_and_exit_stops(rig, monkeypatch):
+    path = rig.root / 'state/supervisor_tooltip_status.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({'pid': -99, 'baseline': {'preview': {'front': {'on': True}}}}))
+    def tick():
+        state = read(path)
+        assert state['pid'] == os.getpid()
+        assert state['start_time'] == rig.sup._wall_start
+        assert all(not item['on'] for item in state['baseline']['preview'].values())
+        raise KeyboardInterrupt
+    monkeypatch.setattr(rig.sup, 'tick', tick)
+    monkeypatch.setattr(rig.sup, '_reply_after_failure', lambda *a, **k: None)
+    monkeypatch.setattr(rig.sup.plc, 'close', lambda: None, raising=False)
+    rig.sup.run()
+    assert read(path)['status'] == 'stopped'
+
+
+def test_tooltip_status_invalid_is_unknown(monkeypatch):
+    now = datetime.now().astimezone()
+    stamp = now.isoformat()
+    parent = {'pid': os.getpid(), 'start_time': stamp}
+    host = {'pid': os.getpid(), 'start_time': stamp, 'updated_at': stamp, 'status': 'running',
+            'baseline': {'preview': {'front': {'on': True}}}}
+    for p, h, age in [(parent, {**host, 'pid': -1}, 0),
+                      ({**parent, 'pid': 99999999}, {**host, 'pid': 99999999}, 0),
+                      (parent, {**host, 'updated_at': (now - timedelta(seconds=31)).isoformat()}, 0),
+                      (parent, host, 31)]:
+        result = supervisor_tooltip_main({}, p, h, supervisor_age=age, now=now)
+        assert result['baseline']['phase'] == 'unknown'
+        assert '未知' in result['baseline']['message']
+        assert not result['baseline']['preview']
+
+
+def test_atomic_tooltip_write_keeps_complete_old_file_on_replace_failure(rig, monkeypatch):
+    path = rig.root / 'state/supervisor_tooltip_status.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"old": true}')
+    def fail(src, dst):
+        assert json.loads(path.read_text()) == {'old': True}
+        assert json.loads(src.read_text())['pid'] == os.getpid()
+        raise OSError('replace failed')
+    monkeypatch.setattr('nest_clear.preview.process.os.replace', fail)
+    with pytest.raises(OSError):
+        rig.sup._reset_tooltip_status()
+    assert json.loads(path.read_text()) == {'old': True}

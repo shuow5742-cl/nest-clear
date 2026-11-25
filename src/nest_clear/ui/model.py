@@ -1,6 +1,7 @@
 """文件和事件到显示数据的转换，不依赖 tkinter。"""
 import json
 import math
+import os
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -368,16 +369,31 @@ def tooltip_time(value):
     return dt.strftime('%H:%M:%S') if dt else '—'
 
 
-def supervisor_tooltip_main(main, supervisor, tooltip):
-    """Overlay supervisor-owned preparation state only while no child exists."""
-    if supervisor.get('child_pid') or supervisor.get('child_state') in ('启动中', '运行', '就绪'):
+def supervisor_tooltip_main(main, supervisor, tooltip, *, supervisor_age=None, now=None):
+    """Only show preparation state from the live, current supervisor."""
+    if supervisor_live(supervisor, supervisor_age) and (supervisor.get('child_pid') or supervisor.get('child_state') in ('启动中', '运行', '就绪')):
         return main
     result = dict(main)
     result['mode'] = '空闲'
-    if supervisor.get('pid') and tooltip.get('pid') == supervisor.get('pid'):
+    pid = supervisor.get('pid')
+    alive = False
+    if type(pid) is int and pid > 0:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except PermissionError:
+            alive = True
+        except (ProcessLookupError, OSError):
+            pass
+    updated = parse_time(tooltip.get('updated_at'))
+    now_dt, _ = _now_and_epoch(now)
+    fresh = updated is not None and (now_dt - updated).total_seconds() <= SUPERVISOR_STALE_SECONDS
+    if (supervisor_live(supervisor, supervisor_age) and alive and fresh
+            and tooltip.get('pid') == pid and tooltip.get('status') == 'running'
+            and tooltip.get('start_time') == supervisor.get('start_time')):
         result['baseline'] = tooltip.get('baseline') or {}
         result['command_seq'] = tooltip.get('command_seq', 0)
     else:
-        result['baseline'] = {'phase': 'idle', 'preview': {}}
+        result['baseline'] = {'phase': 'unknown', 'message': '对刀状态未知或已过期', 'preview': {}}
         result['command_seq'] = 0
     return result

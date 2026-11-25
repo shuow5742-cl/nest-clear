@@ -134,16 +134,22 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
             assert all('choose' not in view for view in ui.baseline_views.values())
             from nest_clear.ui.model import supervisor_tooltip_main
             ui.baseline_pending = 8
-            supervisor = {'pid': 123, 'child_pid': None, 'child_state': '停止'}
+            import os
+            from datetime import datetime
+            stamp = datetime.now().astimezone().isoformat()
+            supervisor = {'pid': os.getpid(), 'start_time': stamp, 'child_pid': None, 'child_state': '停止'}
             main = {'command_seq': 99}
-            host = {'pid': 123, 'command_seq': 7, 'baseline': {'phase': 'prepare'}}
-            ui.update_baseline(supervisor_tooltip_main(main, supervisor, host), supervisor)
+            host = {'pid': os.getpid(), 'start_time': stamp, 'updated_at': stamp, 'status': 'running', 'command_seq': 7, 'baseline': {'phase': 'prepare'}}
+            ui.update_baseline(supervisor_tooltip_main(main, supervisor, host, supervisor_age=0), supervisor)
             assert ui.baseline_ack == 7 and ui.baseline_pending == 8
+            ui.update_baseline(supervisor_tooltip_main(main, supervisor, {**host, 'pid': -1}, supervisor_age=0), supervisor)
+            assert '未知' in ui.baseline_message.options['text']
+            assert '未知' in ui.baseline_views['front']['toggle'].options['text']
             host['command_seq'] = 8
-            ui.update_baseline(supervisor_tooltip_main(main, supervisor, host), supervisor)
+            ui.update_baseline(supervisor_tooltip_main(main, supervisor, host, supervisor_age=0), supervisor)
             assert ui.baseline_ack == 8 and ui.baseline_pending == 0
             host['baseline'] = {'phase': 'live', 'candidate': {'p0': [1, 2, 3]}}
-            ui.update_baseline(supervisor_tooltip_main(main, supervisor, host), supervisor)
+            ui.update_baseline(supervisor_tooltip_main(main, supervisor, host, supervisor_age=0), supervisor)
             for button in [ui.baseline_start, *ui.baseline_tools, ui.baseline_measure,
                            ui.baseline_manual, ui.baseline_aux, ui.baseline_save, ui.baseline_end]:
                 assert button.options['state'] == 'disabled'
@@ -744,6 +750,7 @@ from nest_clear.record.events import EventRecorder
 from nest_clear.ui.model import supervisor_tooltip_main
 from nest_clear.preview.focus_record import write_record
 assert enumerate_capture_devices(sys.argv[1]) == []
+assert supervisor_tooltip_main({}, {'pid': 99999999}, {'pid': 99999999}, supervisor_age=0)['baseline']['phase'] == 'unknown'
 '''
     env = dict(os.environ, PYTHONPATH=str(__import__('pathlib').Path(__file__).resolve().parents[1] / 'src'))
     result = subprocess.run(['/usr/bin/python3', '-c', code, str(tmp_path)], env=env, text=True, capture_output=True)
