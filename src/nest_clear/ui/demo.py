@@ -178,7 +178,7 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
                 return {'on': True, 'device': f'/dev/v4l/by-path/pci-0000:00:14.0-usb-0:{port}:1.0-video-index0', 'exposure_source': '已测 2026-11-23'}
             def live_view(current, peak):
                 percent = 100 * current / peak
-                return {'percent': percent, 'tenengrad': current, 'peak': 1.60, 'peak_edge_width_um': 24.32, 'edge_width_um': 27.2, 'edge_width_px': 1.79, 'contrast': 210, 'source': 'tip', 'detection_status': '精定位', 'detection_reason': '', 'focus_reason': '', 'delta_uv': [12.0, -8.0], 'exposure_ms': 10.0, 'fps': 5.0, 'tip_uv': [320, 240], 'history': [60, 65, 73, 82, 90, percent], 'updated_at': stamp}
+                return {'percent': percent, 'tenengrad': current, 'peak': 1.60, 'peak_edge_width_um': 24.32, 'edge_width_um': 27.2, 'edge_width_px': 1.79, 'contrast': 210, 'source': 'tip', 'detection_status': '精定位', 'detection_reason': '', 'focus_reason': '', 'delta_uv': [12.0, -8.0], 'exposure_ms': 10.0, 'fps': 5.0, 'frame_seq': 20, 'frame_age_ms': 80, 'processing_ms': 45, 'tip_uv': [320, 240], 'history': [60, 65, 73, 82, 90, percent], 'updated_at': stamp}
             data['baseline']['tool'] = None
             data['baseline']['preview'] = {'front': low_view(4), 'side': low_view(8)}
             data['baseline']['detected_cameras'] = [data['baseline']['preview'][n]['device'] for n in ('front', 'side')]

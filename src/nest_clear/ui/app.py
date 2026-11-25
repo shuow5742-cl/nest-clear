@@ -842,6 +842,7 @@ class App:
             widgets['toggle'].config(text=button_text, fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
             enable(widgets['exposure'], on and may_prepare); enable(widgets['reset'], on and may_prepare)
             def number(value): return f'{value:.2f}' if isinstance(value, (float,int)) else '—'
+            delay_warning = False
             if display['failed']:
                 text = display['message']; color = COLORS['red']
                 detail = '清晰度 —　边缘 — µm / — px　对比度 —　识别来源 —　曝光 —'
@@ -852,6 +853,15 @@ class App:
                 text = display['message']
                 color = COLORS['red'] if item.get('exposure_error') else MUTED
                 detail = (str(item.get('exposure_error')) + '　' if item.get('exposure_error') else '') + f'边缘 — µm / — px　对比度 —　识别来源 —　曝光 — ms {item.get("exposure_source", "未测")}'
+                cameras = preview_doc.get('cameras') if isinstance(preview_doc, dict) else None
+                stale = cameras.get(name, {}) if isinstance(cameras, dict) else {}
+                try:
+                    age = max(0, (datetime.now().astimezone() - datetime.fromisoformat(stale['captured_at'])).total_seconds() * 1000)
+                    if age > 1000:
+                        detail += f'　帧龄 {age:.0f} ms　画面延迟'
+                        delay_warning = True
+                except (KeyError, ValueError, TypeError):
+                    pass
             else:
                 src = display['live']
                 pct = src.get('percent')
@@ -867,12 +877,20 @@ class App:
                     source += '　清晰度无效：' + src['focus_reason']
                 exposure_source = item.get('exposure_source') or src.get('exposure_source') or '未测'
                 detail = (str(item.get('exposure_error')) + '\n' if item.get('exposure_error') else '') + f'{source}\n边缘 {number(src.get("edge_width_um"))} µm / {number(src.get("edge_width_px"))} px　最佳 {number(src.get("peak_edge_width_um"))} µm　对比度 {number(src.get("contrast"))}　曝光 {number(src.get("exposure_ms"))} ms {exposure_source}'
+                age = src.get('frame_age_ms')
+                if isinstance(age, (int, float)):
+                    try:
+                        age += max(0, (datetime.now().astimezone() - datetime.fromisoformat(src['updated_at'])).total_seconds() * 1000)
+                    except (KeyError, ValueError, TypeError):
+                        pass
+                    detail += f'　帧龄 {age:.0f} ms' + ('　画面延迟' if age > 1000 else '')
+                    delay_warning = age > 1000
             widgets['info'].config(text=text, fg=color)
             hint_text = display.get('hint', '')
             widgets['hint'].config(text=hint_text)
             if hint_text: widgets['hint'].grid()
             else: widgets['hint'].grid_remove()
-            widgets['detail'].config(text=detail)
+            widgets['detail'].config(text=detail, fg=COLORS['red'] if delay_warning else INK)
             graph=widgets['graph']; graph.delete('all'); values=display.get('history') or []
             if len(values)>1:
                 width=max(2, graph.winfo_width()); height=max(2, graph.winfo_height())

@@ -315,10 +315,12 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert '对比度 —' in ui.baseline_views['side']['detail'].options['text']
         preview_file.write_text(json.dumps({'updated_at': now_iso, 'cameras': {'front': {
             'percent': None, 'detection_status': '未识别', 'detection_reason': 'no dark component',
-            'focus_reason': '未识别到针尖', 'updated_at': now_iso}}}), encoding='utf-8')
+            'focus_reason': '未识别到针尖', 'frame_age_ms': 1100, 'updated_at': now_iso}}}), encoding='utf-8')
         ui.update_baseline(low_main)
         assert '—%' in ui.baseline_views['front']['info'].options['text']
         assert '未识别到针尖' in ui.baseline_views['front']['detail'].options['text']
+        assert '画面延迟' in ui.baseline_views['front']['detail'].options['text']
+        assert ui.baseline_views['front']['detail'].options['fg'] == app.COLORS['red']
         old_t = time.time() - 5.0
         os.utime(preview_file, (old_t, old_t))
         ui.update_baseline(low_main)

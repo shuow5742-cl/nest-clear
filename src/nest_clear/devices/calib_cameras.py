@@ -5,6 +5,7 @@ import errno
 import hashlib
 import fcntl
 import os
+import logging
 from pathlib import Path
 from .v4l2_enum import _is_capture_device, enumerate_capture_devices, resolve_tooltip_roles
 from .v4l2_controls import V4L2Controls, DEFAULTS
@@ -76,6 +77,11 @@ class CalibCamera:
                 if not _is_capture_device(path): raise ValueError(f"{path} 不是视频 capture 节点（可能是元数据节点）")
                 self.device = cv2.VideoCapture(device, cv2.CAP_V4L2)
                 if not self.device.isOpened(): raise OSError("VideoCapture 无法打开")
+                try:
+                    if not self.device.set(cv2.CAP_PROP_BUFFERSIZE, 1):
+                        logging.getLogger(__name__).warning('%s 对刀相机不支持设置缓冲区大小为 1', self.name)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning('%s 对刀相机无法设置缓冲区大小为 1: %s', self.name, exc)
                 settings = {**DEFAULTS, **self.config.get("camera_controls", {})}
                 self.device.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
                 self.device.set(cv2.CAP_PROP_FRAME_WIDTH, settings['width'])

@@ -1,6 +1,7 @@
 """Exposure-normalized focus and silhouette edge measurements."""
 import cv2
 import numpy as np
+from collections import deque
 
 def focus_metrics(image, tip=None, roi_size=160, um_per_px=15.2, silhouette_mask=None):
     image = np.asarray(image)
@@ -60,12 +61,18 @@ class EdgeWidthTracker:
     def reset(self):
         self.best = None
         self.position = None
+        self.widths = deque(maxlen=3)
 
     def update(self, width, position=None):
-        if position is not None and self.position is not None and np.linalg.norm(np.asarray(position) - self.position) > self.reset_distance:
-            self.reset()
-        self.position = np.asarray(position, dtype=float) if position is not None else None
         if width is None or not np.isfinite(width) or width <= 0:
             return {'best': self.best, 'percent': None}
-        self.best = min(float(width), self.best if self.best is not None else float(width))
+        if position is not None and self.position is not None and np.linalg.norm(np.asarray(position) - self.position) > self.reset_distance:
+            self.reset()
+        if position is not None:
+            self.position = np.asarray(position, dtype=float)
+        self.widths.append(float(width))
+        if len(self.widths) < 3:
+            return {'best': self.best, 'percent': None}
+        median = float(np.median(self.widths))
+        self.best = min(median, self.best if self.best is not None else median)
         return {'best': self.best, 'percent': min(100., 100. * self.best / width)}

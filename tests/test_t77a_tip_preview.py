@@ -25,6 +25,9 @@ def test_validity_and_best_with_synthetic_frames():
     sharp = frame(.5)
     blur = frame(3)
     status, reason, metrics, result = analyze_tip(sharp, detector.detect(sharp), tracker, 15.2, 40)
+    assert result['percent'] is None
+    for _ in range(2):
+        status, reason, metrics, result = analyze_tip(sharp, detector.detect(sharp), tracker, 15.2, 40)
     assert status == '精定位' and not reason and result['percent'] == 100
     best = result['best']
     for image in (np.full_like(sharp, 255), np.random.default_rng(13).integers(99, 102, sharp.shape, dtype=np.uint8)):
@@ -44,11 +47,13 @@ def test_validity_and_best_with_synthetic_frames():
 def test_tracker_consecutive_movement_and_reset():
     tracker = EdgeWidthTracker()
     tracker.update(1, (10, 10))
-    assert tracker.update(3, (70, 10))['percent'] == 100
+    tracker.update(1, (10, 10)); tracker.update(1, (10, 10))
+    assert tracker.update(3, (70, 10))['percent'] is None
+    tracker.update(3, (70, 10)); tracker.update(3, (70, 10))
     tracker.update(None, None)
-    assert tracker.update(4, (200, 10))['best'] == 3
+    assert tracker.update(4, (200, 10))['best'] is None
     tracker.reset()
-    assert tracker.update(4, (200, 10))['percent'] == 100
+    assert tracker.update(4, (200, 10))['percent'] is None
 
 
 def test_preview_overlay_uses_tip_roi_only():
@@ -119,7 +124,7 @@ def test_exposure_change_and_retest_reset_best(tmp_path, monkeypatch):
         camera.exposure = 200
         wait_for(lambda: prep.state['front'].get('exposure_ms') == 20 and prep.state['front'].get('percent') == 100)
         camera.sigma = .5
-        wait_for(lambda: prep.state['front'].get('edge_width_px') is not None and prep.state['front']['edge_width_px'] < 2)
+        wait_for(lambda: prep.state['front'].get('peak') is not None and prep.state['front']['peak'] < 2)
         camera.sigma = 3
         wait_for(lambda: prep.state['front'].get('percent') is not None and prep.state['front']['percent'] < 90)
         prep.command('tooltip_exposure_retest', {'camera': 'front'})

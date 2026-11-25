@@ -17,6 +17,7 @@ from nest_clear.devices.tooltip_exposure import auto_exposure
 from nest_clear.paths import tooltip_preview_file
 from nest_clear.tooltip.detector import SilhouetteTipDetector
 from nest_clear.tooltip.focus_metrics import focus_metrics, EdgeWidthTracker
+from nest_clear.baseline.latest_capture import FrameBroker
 
 logger = logging.getLogger(__name__)
 LOW_FREQUENCY_PREVIEW_KEYS = ('on', 'device', 'error', 'exposure_source', 'exposure_error')
@@ -92,6 +93,8 @@ class Preparation:
         self.reset_peak = {n: threading.Event() for n in self.enabled}
         self.history = {n: [] for n in self.enabled}
         self._preview_cameras = {}
+        self.streams = {}
+        self.capture_threads = {}
         self._preview_last_write = None
         self._preview_timer = None
         self._last_summary = {n: None for n in self.enabled}
@@ -193,6 +196,104 @@ class Preparation:
             except Exception as exc:
                 self.events.emit('warning', reason=f'刷新对刀基准状态失败：{exc}')
 
+    def capture_after(self, name, t_mono, count, timeout):
+        """Return count new frames; timestamps mark the start of each read.
+
+        Frames are collected from the latest slot and subsequent reads, not a
+        historical queue. Raises TimeoutError unless the full batch arrives.
+        """
+        with self.lock:
+            stream = self.streams.get(name)
+        if stream is None:
+            raise RuntimeError(f'{name} 对刀相机预览未采集')
+        return stream.capture_after(t_mono, count, timeout)
+
+    def _capture_loop(self, name, stop, stream, camera):
+        class ExposureCamera:
+            def __init__(self, owner):
+                self.owner = owner
+                self.config = camera.config
+                self.after_seq = 0
+                self.after_time = 0.
+            def get_exposure(self):
+                return camera.get_exposure()
+            def set_exposure(self, value):
+                camera.set_exposure(value)
+                self.after_time = time.monotonic()
+                with stream.condition:
+                    self.after_seq = stream.seq
+            def capture(self):
+                while True:
+                    item = self.owner._capture_frame(camera, stream, stop, preview=False)
+                    if item.seq > self.after_seq and item.captured_mono >= self.after_time:
+                        self.after_seq = item.seq
+                        return item.frame
+        try:
+            camera.open()
+            self.events.emit('tooltip_preview_open', camera=name)
+            path = camera.config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
+            device = camera.settings_snapshot().get('device', camera.config.get('device'))
+            measured = measurement_for_device(load_settings(path), device)
+            with self.lock:
+                self.state[name].update(device=device, exposure_source=('已测 '+str(measured.get('time', '')) if measured else '未测'))
+            self.publish()
+            if not measured:
+                self.retest[name].set()
+            while not stop.is_set():
+                if self.retest[name].is_set():
+                    self.retest[name].clear()
+                    stream.invalidate()
+                    self.reset_peak[name].set()
+                    with self.lock:
+                        self.state[name]['exposure_source'] = '正在测曝光…'; self.state[name].pop('exposure_error', None)
+                    self.publish()
+                    try:
+                        initial = camera.get_exposure()
+                        try:
+                            result = auto_exposure(ExposureCamera(self), **(getattr(self.config.tool_calibration, 'auto_exposure', {}) if self.config else {}))
+                        except Exception:
+                            camera.set_exposure(initial); raise
+                        camera.exposure_status = '已测曝光'
+                        if hasattr(camera, 'actual_settings'): camera.actual_settings['exposure_status'] = '已测曝光'
+                        save_measurement(path, name, camera.settings_snapshot(), result)
+                        with self.lock:
+                            self.state[name]['exposure_source'] = '已测 ' + str(load_settings(path)['cameras'][name]['time'])
+                        self.events.emit('tooltip_exposure_measured', camera=name, device=device, exposure=result['exposure'])
+                        self.publish()
+                        self.refresh_existing()
+                    except Exception as exc:
+                        if stop.is_set():
+                            break
+                        with self.lock:
+                            self.state[name]['exposure_source'] = '未测'; self.state[name]['exposure_error'] = str(exc)
+                        self.events.emit('tooltip_exposure_failed', camera=name, reason=str(exc))
+                        self.publish()
+                    finally:
+                        self.reset_peak[name].set()
+                if not stop.is_set():
+                    self._capture_frame(camera, stream, stop)
+        except Exception as exc:
+            if not stop.is_set():
+                stream.finish(exc)
+        finally:
+            stream.finish()
+            if stop not in self.retained:
+                camera.close()
+
+    def _capture_frame(self, camera, stream, stop, preview=True):
+        if stop.is_set():
+            raise RuntimeError('预览采集已停止')
+        captured_mono = time.monotonic()
+        captured_at = self._clock().isoformat()
+        frame = camera.capture()
+        if stop.is_set():
+            raise RuntimeError('预览采集已停止')
+        try:
+            exposure = camera.get_exposure() / 10
+        except Exception:
+            exposure = None
+        return stream.publish(frame, captured_mono, captured_at, exposure, preview=preview)
+
     def command(self, name, params):
         if name in ('tooltip_assign', 'tooltip_swap'):
             raise ValueError('对刀相机已按插口固定，不可在界面修改')
@@ -243,59 +344,32 @@ class Preparation:
         self._last_summary[name] = None
         target = Path(self.events.directory) / 'live' / f'baseline_{name}.jpg'
         target.unlink(missing_ok=True)
+        stream = FrameBroker()
+        with self.lock:
+            self.streams[name] = stream
+        capture_thread = threading.Thread(target=self._capture_loop, args=(name, stop, stream, camera), daemon=True, name='tooltip-capture-'+name)
+        self.capture_threads[name] = capture_thread
+        capture_thread.start()
         try:
-            camera.open()
-            self.events.emit('tooltip_preview_open', camera=name)
-            path = camera.config.get('settings_path', 'config/calibration/tooltip_cameras.yaml')
-            device = camera.settings_snapshot().get('device', camera.config.get('device'))
-            measured = measurement_for_device(load_settings(path), device)
-            with self.lock:
-                self.state[name].update(device=device, exposure_source=('已测 '+str(measured.get('time', '')) if measured else '未测'))
-            self.publish()
-            if not measured: self.retest[name].set()
             last = None
             last_exposure = None
+            last_seq = 0
             while not stop.is_set():
-                if self.retest[name].is_set():
-                    self.retest[name].clear()
-                    self.trackers[name].reset()
-                    self.history[name] = []
-                    with self.lock:
-                        self.state[name]['exposure_source'] = '正在测曝光…'; self.state[name].pop('exposure_error', None)
-                    self.publish()
-                    try:
-                        initial = camera.get_exposure()
-                        try:
-                            result = auto_exposure(camera, **(getattr(self.config.tool_calibration, 'auto_exposure', {}) if self.config else {}))
-                        except Exception:
-                            camera.set_exposure(initial); raise
-                        camera.exposure_status = '已测曝光'
-                        if hasattr(camera, 'actual_settings'): camera.actual_settings['exposure_status'] = '已测曝光'
-                        save_measurement(path, name, camera.settings_snapshot(), result)
-                        with self.lock:
-                            self.state[name]['exposure_source'] = '已测 ' + str(load_settings(path)['cameras'][name]['time'])
-                        self.events.emit('tooltip_exposure_measured', camera=name, device=device, exposure=result['exposure'])
-                        self.publish()
-                        self.refresh_existing()
-                    except Exception as exc:
-                        with self.lock:
-                            self.state[name]['exposure_source'] = '未测'; self.state[name]['exposure_error'] = str(exc)
-                        self.events.emit('tooltip_exposure_failed', camera=name, reason=str(exc))
-                        self.publish()
-                frame = camera.capture()
-                try:
-                    exposure = camera.get_exposure() / 10
-                except Exception:
-                    exposure = None
+                if last is not None:
+                    delay = .2 - (self._monotonic() - last)
+                    if delay > 0 and stop.wait(delay):
+                        break
+                item = stream.next_latest(last_seq, stop)
+                if item is None:
+                    break
+                frame, exposure, last_seq = item.frame, item.exposure_ms, item.seq
+                processing_start = time.monotonic()
                 if exposure is not None and last_exposure is not None and exposure != last_exposure:
                     self.trackers[name].reset()
                     self.history[name] = []
                 if exposure is not None:
                     last_exposure = exposure
                 now = self._monotonic()
-                if last is not None and now - last < .2:
-                    stop.wait(.2 - (now - last))
-                    continue
                 fps = round(1 / (now - last), 1) if last is not None and now > last else None
                 last = now
                 detector_cfg = self.config.tool_calibration.detection[name] if self.config else {}
@@ -321,12 +395,16 @@ class Preparation:
                 image = draw_tip_preview(frame, name, detection, self.ui_config, scale)
                 image = cv2.resize(image, (960, max(1, round(frame.shape[0]*960/frame.shape[1]))), interpolation=cv2.INTER_AREA)
                 ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                with stream.condition:
+                    if item.generation != stream.generation:
+                        continue
                 if ok:
                     target = Path(self.events.directory) / 'live' / f'baseline_{name}.jpg'
                     target.parent.mkdir(parents=True, exist_ok=True)
                     temporary = target.with_suffix('.preview.tmp'); temporary.write_bytes(encoded.tobytes()); os.replace(temporary, target)
                 with self.lock:
                     self.state[name].update(exposure_ms=exposure)
+                    published = time.monotonic()
                     self._preview_cameras[name] = {
                         'tenengrad': metrics['tenengrad'],
                         'peak': tracked['best'],
@@ -343,6 +421,11 @@ class Preparation:
                         'delta_uv': delta_uv,
                         'history': list(self.state[name]['history']),
                         'fps': fps,
+                        'frame_seq': item.seq,
+                        'captured_mono': item.captured_mono,
+                        'captured_at': item.captured_at,
+                        'frame_age_ms': max(0., (published - item.captured_mono) * 1000),
+                        'processing_ms': max(0., (published - processing_start) * 1000),
                         'exposure_ms': exposure,
                         'updated_at': self._clock().isoformat(),
                     }
@@ -368,8 +451,12 @@ class Preparation:
             self._write_preview_file(force=True)
             self.events.emit('tooltip_preview_error', camera=name, reason=detail); self.publish()
         finally:
+            stop.set()
+            capture_thread.join()
+            with self.lock:
+                if self.streams.get(name) is stream:
+                    self.streams.pop(name, None)
             if stop not in self.retained:
-                camera.close()
                 target.unlink(missing_ok=True)
 
     def _record_finished(self):
