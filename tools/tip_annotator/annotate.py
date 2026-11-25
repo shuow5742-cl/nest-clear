@@ -35,6 +35,8 @@ class App:
         for text, value in [('黑胶 (1)', 1), ('针身 (2)', 2), ('针尖 (3)', 3)]: ttk.Radiobutton(bar, text=text, variable=self.cls, value=value).pack(side='left')
         for text, value in [('画笔 B', 'brush'), ('橡皮 E', 'erase'), ('多边形 P', 'polygon'), ('人工点 T', 'manual')]: ttk.Radiobutton(bar, text=text, variable=self.tool, value=value, command=self.cancel_polygon).pack(side='left')
         ttk.Button(bar, text='清除人工点', command=self.clear_manual).pack(side='left')
+        ttk.Button(bar, text='清除当前类别', command=self.clear_class).pack(side='left')
+        ttk.Button(bar, text='清除本张全部', command=self.clear_all).pack(side='left')
         controls = ttk.Frame(right); controls.pack(fill='x')
         ttk.Button(controls, text='适应窗口', command=self.fit).pack(side='left')
         ttk.Label(controls, text='笔尺寸').pack(side='left'); ttk.Spinbox(controls, from_=1, to=60, width=4, textvariable=self.size).pack(side='left')
@@ -161,6 +163,13 @@ class App:
     def cancel_polygon(self): self.poly = []; self.render()
     def set_tool(self, tool): self.tool.set(tool); self.cancel_polygon()
     def clear_manual(self): self.doc.manual = None; self.dirty = True; self.render()
+    def clear_class(self):
+        value = self.cls.get(); name = {1: '黑胶', 2: '针身', 3: '针尖'}[value]
+        if messagebox.askyesno('确认清除', f'清除本张的{name}标注？', parent=self.root):
+            self.doc.clear_class(value); self.dirty = True; self.derive(); self.render()
+    def clear_all(self):
+        if messagebox.askyesno('确认清除', '清除本张全部标注和人工点？', parent=self.root):
+            self.doc.clear_all(); self.dirty = True; self.derive(); self.render()
     def history(self, redo):
         (self.doc.redo if redo else self.doc.undo)(); self.dirty = True; self.derive(); self.render()
 

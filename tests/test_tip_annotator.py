@@ -7,6 +7,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools' / 'tip_anno
 from core import Document, load, save, paths
 
 
+def test_clear_class_and_all_history():
+    doc = Document(Image.new('L', (3, 1)))
+    doc.labels.putdata([1, 2, 3]); doc.manual = [1.5, 0]
+    doc.clear_class(2)
+    assert list(doc.labels.getdata()) == [1, 0, 3] and doc.manual == [1.5, 0]
+    doc.undo()
+    assert list(doc.labels.getdata()) == [1, 2, 3]
+    doc.redo()
+    assert list(doc.labels.getdata()) == [1, 0, 3]
+    doc.clear_all()
+    assert list(doc.labels.getdata()) == [0, 0, 0] and doc.manual is None
+    doc.undo()
+    assert list(doc.labels.getdata()) == [1, 0, 3] and doc.manual == [1.5, 0]
+    doc.redo()
+    assert list(doc.labels.getdata()) == [0, 0, 0] and doc.manual is None
+    count = len(doc.undo_stack)
+    doc.clear_all(); doc.clear_class(2)
+    assert len(doc.undo_stack) == count
+    doc.manual = [0, 0]; doc.clear_all(); doc.undo()
+    assert doc.manual == [0, 0]
+
+
 def test_brush_polygon_threshold_and_history():
     image = Image.new('L', (40, 40), 200)
     ImageDraw.Draw(image).rectangle((0, 0, 19, 39), fill=60)

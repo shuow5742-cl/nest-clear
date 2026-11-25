@@ -44,13 +44,34 @@ class Document:
         ImageDraw.Draw(mask).polygon(points, fill=255)
         self.apply(mask, value, threshold)
 
+    def clear_class(self, value):
+        self.apply(self.labels.point(lambda p: 255 if p == value else 0), 0)
+
+    def clear_all(self):
+        if self.labels.getbbox() or self.manual is not None:
+            self.undo_stack.append((self.labels.copy(), self.manual[:] if self.manual is not None else None))
+            self.undo_stack = self.undo_stack[-30:]
+            self.redo_stack.clear()
+            self.labels.paste(0, (0, 0, *self.labels.size))
+            self.manual = None
+
     def undo(self):
         if self.undo_stack:
-            self.redo_stack.append(self.labels.copy()); self.labels = self.undo_stack.pop()
+            state = self.undo_stack.pop()
+            if isinstance(state, tuple):
+                self.redo_stack.append((self.labels.copy(), self.manual[:] if self.manual is not None else None))
+                self.labels, self.manual = state
+            else:
+                self.redo_stack.append(self.labels.copy()); self.labels = state
 
     def redo(self):
         if self.redo_stack:
-            self.undo_stack.append(self.labels.copy()); self.labels = self.redo_stack.pop()
+            state = self.redo_stack.pop()
+            if isinstance(state, tuple):
+                self.undo_stack.append((self.labels.copy(), self.manual[:] if self.manual is not None else None))
+                self.labels, self.manual = state
+            else:
+                self.undo_stack.append(self.labels.copy()); self.labels = state
 
     def derive(self):
         # Principal axis of the body, oriented toward the tip-mask centroid.
