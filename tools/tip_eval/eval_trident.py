@@ -89,10 +89,10 @@ def evaluate():
     root=Path('/home/shuow/nest-clear-field/20261124_tipsweep')
     for device,i,y in groups:
         for camera in ('front','side'):
-            results=[detector.detect(cv2.imread(str(root/device/f'set_{i:03d}'/f'{camera}_{j}.png'),0)) for j in range(1,6)]
+            results=detector.detect_sequence([cv2.imread(str(root/device/f'set_{i:03d}'/f'{camera}_{j}.png'),0) for j in range(1,6)])
             valid=[r for r in results if r.point_uv is not None]
             for j,r in enumerate(results,1):
-                frame_rows.append([device,i,camera,j,r.status,*(r.point_uv or (None,None)),*(r.farthest_prong_uv or (None,None))])
+                frame_rows.append([device,i,camera,j,r.status,r.diagnostic,r.axis_rms_px,r.tip_contrast,*(r.point_uv or (None,None)),*(r.farthest_prong_uv or (None,None))])
                 if device=='device' and i in (3,10) and camera=='side' and r.point_uv is not None:
                     image=cv2.imread(str(root/device/f'set_{i:03d}'/f'{camera}_{j}.png'))
                     cv2.drawMarker(image,tuple(np.round(r.point_uv).astype(int)),(0,0,255),cv2.MARKER_CROSS,15,2)
@@ -109,7 +109,7 @@ def evaluate():
     with (OUT/'scan.csv').open('w',newline='') as f:
         wr=csv.DictWriter(f,['device','set','y_mm','camera','metric','mean','std','n']); wr.writeheader(); wr.writerows(scan)
     with (OUT/'frames.csv').open('w',newline='') as f:
-        wr=csv.writer(f); wr.writerow(['device','set','camera','frame','status','u','v','far_u','far_v']); wr.writerows(frame_rows)
+        wr=csv.writer(f); wr.writerow(['device','set','camera','frame','status','diagnostic','axis_rms_px','tip_contrast','u','v','far_u','far_v']); wr.writerows(frame_rows)
     with (OUT/'repeatability.csv').open('w',newline='') as f:
         wr=csv.writer(f); wr.writerow(['device','set','camera','n','std_u_px','std_v_px']); wr.writerows(repeats)
     fig,axs=plt.subplots(2,1,figsize=(9,8))
@@ -137,7 +137,7 @@ def evaluate():
     ordered=sorted(front,key=lambda x:x['y_mm']); k=ordered.index(peak)
     violations=sum(ordered[i+1]['mean']<ordered[i]['mean'] for i in range(k))+sum(ordered[i+1]['mean']>ordered[i]['mean'] for i in range(k,len(ordered)-1))
     lines += [f'正面梯度曲线相对峰值两侧共有 {violations} 处违反单调趋势；侧面波动亦较大，因此两个指标均未证明满足清晰度验收要求，暂不推荐用于对刀。', '', '失败样例：' + '、'.join(f'[{r["image"]}](overlays/{r["image"]}.png)' for r in sorted(rows,key=lambda x:x.get('error',-1),reverse=True)[:5]), '', '验收：精定位数量、误差、五帧重复性未达标；耗时为单线程 OpenCV 下的标注帧测量；离心量差见上。当前粗定位结果不可当作精定位使用。', '', '针身和针尖 IoU 使用检测末端前 75 px 的固定分界，仅用于暴露分割不足；算法没有独立的语义分割。人工参考是像素掩膜 PCA 和最远整数像素，存在标注边界与亚像素定义差异。叠加图蓝十字为参考，红十字为检测，绿线为轴，黄圈为连通末端，紫线为清晰度采样位置。', '', '局限：局部阈值、断齿和背景暗物可能造成漏检或误检；指标未经过独立数据验证，不宜作为实际对刀判据。']
-    lines += ['', '## 第一项：五帧异常', '', '旧版最大波动为 device/set_010/side，u 标准差 7.628 px；次大为 set_003/side，7.279 px。前十组各帧轴线、末端与工具尖坐标见 round1_worst_frames.csv；本版逐帧坐标见 frames.csv。原始版本和本版的异常组叠加图分别以 old_ 和 round2_ 为前缀。', 'set_010/side 第 1 帧针身较直，第 2–5 帧呈周期性锯齿（见 [五帧针身拼图](round1_set010_side_montage.png)）；旧版轴线外推位置约 775 至 796 px，变化并非仅仅选中了不同齿。不能仅凭图像确定是逐行成像、振动还是其他原因，也不能通过强行跨帧对齐声称原始坐标重复性达标。', '本版沿轴平行扫描局部中间灰度穿越，要求五个连续采样点，并限制在原连通域末端之后 5 px 内以减少背景暗物误报；该限制也可能漏掉完全断开的更长灰齿。', '', '## 第二项：参考轴和补充亚像素参考', '']
+    lines += ['', '## 第三项：质量状态', '', f'标注图中单帧精定位 {sum(r["status"]=="精定位" for r in rows)}/{len(rows)}；单帧精定位不代表五帧一致性已验证。原始组经五帧一致性检查后，精定位帧 {sum(r[4]=="精定位" for r in frame_rows)}/{len(frame_rows)}。', '单帧门限：全部有效针身中点对拟合轴的 RMS ≤0.7 px，最远穿越对比度 ≥40 灰度、有效扫描线 ≥3，且端点不处于搜索窗口末 2 px。五帧检验分别要求 u/v 总体标准差 ≤0.1 px；不合格组降级而不丢弃坐标，具体原因见 frames.csv。门限为实验性质量筛查，尚未证明定位误差满足验收。', '', '## 第一项：五帧异常', '', '旧版最大波动为 device/set_010/side，u 标准差 7.628 px；次大为 set_003/side，7.279 px。前十组各帧轴线、末端与工具尖坐标见 round1_worst_frames.csv；本版逐帧坐标见 frames.csv。原始版本和本版的异常组叠加图分别以 old_ 和 round2_ 为前缀。', 'set_010/side 第 1 帧针身较直，第 2–5 帧呈周期性锯齿（见 [五帧针身拼图](round1_set010_side_montage.png)）；旧版轴线外推位置约 775 至 796 px，变化并非仅仅选中了不同齿。不能仅凭图像确定是逐行成像、振动还是其他原因，也不能通过强行跨帧对齐声称原始坐标重复性达标。', '本版沿轴平行扫描局部中间灰度穿越，要求五个连续采样点，并限制在原连通域末端之后 5 px 内以减少背景暗物误报；该限制也可能漏掉完全断开的更长灰齿。', '', '## 第二项：参考轴和补充亚像素参考', '']
     subrows=[r for r in rows if 'subref_shift' in r]
     lines.append(f'成功构造 {len(subrows)}/{len(rows)} 张补充参考。先使用检测轴的同一批轴向剖面候选，再保留位于人工针尖掩膜膨胀 2 px 内的候选，将最远者投影到人工笔直段 PCA 轴。它受检测器采样范围与人工掩膜约束，不是独立真值。原始参考及误差保持不变。')
     lines.append(f'补充参考相对整数像素参考位移中位 {np.median([r["subref_shift"] for r in subrows]):.3f} px，最大 {max(r["subref_shift"] for r in subrows):.3f} px；差值包含轴与边缘定义差异，不能作为统计置信区间。')

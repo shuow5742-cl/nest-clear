@@ -1,5 +1,5 @@
 """三棱针背光图像检测。坐标为 (u, v)，方向指向针尖。"""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 import cv2
 import numpy as np
@@ -8,6 +8,9 @@ import numpy as np
 class TridentConfig:
     x_range: tuple[int, int] | None = None
     min_height: int = 100
+    max_axis_rms_px: float = 0.7
+    min_tip_contrast: float = 40.0
+    max_sequence_std_px: float = 0.1
 
 @dataclass
 class TridentResult:
@@ -21,6 +24,8 @@ class TridentResult:
     sharpness: dict | None = None
     elapsed_ms: float = 0.0
     sampling_rows: tuple = ()
+    axis_rms_px: float | None = None
+    tip_contrast: float | None = None
 
 class TridentTipDetector:
     def __init__(self, config=None):
@@ -84,6 +89,7 @@ class TridentTipDetector:
         good=np.abs(residual-np.median(residual))<max(1.,3*np.median(np.abs(residual-np.median(residual))))
         slope,intercept=np.polyfit(np.asarray(rows)[good],np.asarray(centers)[good],1)
         d=np.array([slope,1.]); d/=np.linalg.norm(d); origin=np.array([intercept+slope*np.mean(rows),np.mean(rows)])
+        axis_rms=float(np.sqrt(np.mean((np.asarray(centers)-(slope*np.asarray(rows)+intercept))**2)))
         # Sample axis-parallel profiles inside the body envelope. This is independent
         # of whether thin prongs remain attached in the thresholded component.
         normal=np.array([d[1],-d[0]])
@@ -107,7 +113,7 @@ class TridentTipDetector:
         supported[:4] = False
         for k in range(1,5): supported[4:] &= dark[4-k:len(dark)-k]
         supported &= contrast>=30
-        tips=[]
+        tips=[]; tip_contrasts=[]
         for col in range(len(offsets)):
             ys=np.flatnonzero(supported[:,col])
             if not len(ys): continue
@@ -118,8 +124,32 @@ class TridentTipDetector:
             yy=float(sample_y[j]+frac)
             tt=(yy-origin[1])/d[1]
             pt=origin+d*tt+normal*float(offsets[col])
-            tips.append(tuple(pt))
+            tips.append(tuple(pt)); tip_contrasts.append(float(contrast[j,col]))
         if not tips: return done(diagnostic='针尖区域缺少可靠的轴向灰度穿越')
-        far=max(tips,key=lambda p: np.dot(np.asarray(p)-origin,d)); point=origin+np.dot(np.asarray(far)-origin,d)*d
+        far_index=max(range(len(tips)),key=lambda i:np.dot(np.asarray(tips[i])-origin,d)); far=tips[far_index]; tip_contrast=tip_contrasts[far_index]; point=origin+np.dot(np.asarray(far)-origin,d)*d
+        reasons=[]
+        if axis_rms>self.config.max_axis_rms_px: reasons.append('针身轴拟合残差过大')
+        if tip_contrast<self.config.min_tip_contrast: reasons.append('末端对比度不足')
+        if len(tips)<3: reasons.append('末端有效剖面不足')
+        if far[1]>=end+4: reasons.append('末端靠近搜索边界，可能存在断齿或背景干扰')
+        status='粗定位' if reasons else '精定位'
+        diagnostic='；'.join(reasons) if reasons else '单帧质量检查通过；尚未验证五帧一致性'
         mask=np.zeros_like(gray); mask[:,lo:hi]=comp.astype(np.uint8)
-        return done(point_uv=tuple(point),axis={'point':tuple(origin),'direction':tuple(d)},farthest_prong_uv=far,prong_tips=tuple(tips),status='粗定位',diagnostic='轴向剖面估计末端；质量判定待验证',tool_mask=mask,sharpness={'edge_width_px':float(np.median(widths)) if widths else None,'normalized_gradient':float(np.median(gradients))},sampling_rows=tuple(rows))
+        return done(point_uv=tuple(point),axis={'point':tuple(origin),'direction':tuple(d)},farthest_prong_uv=far,prong_tips=tuple(tips),status=status,diagnostic=diagnostic,tool_mask=mask,sharpness={'edge_width_px':float(np.median(widths)) if widths else None,'normalized_gradient':float(np.median(gradients))},sampling_rows=tuple(rows),axis_rms_px=axis_rms,tip_contrast=tip_contrast)
+
+    def detect_sequence(self, images):
+        """Evaluate five independent frames, retaining positions even on rejection."""
+        images=list(images)
+        if len(images)!=5:
+            raise ValueError('五帧一致性检查需要恰好五帧')
+        results=[self.detect(image) for image in images]
+        if any(r.point_uv is None for r in results):
+            reason='五帧中存在未识别帧'
+        else:
+            spread=np.std(np.asarray([r.point_uv for r in results]),axis=0)
+            reason=(f'五帧坐标标准差超限（u={spread[0]:.3f}，v={spread[1]:.3f} px）'
+                    if np.any(spread>self.config.max_sequence_std_px) else '')
+        if reason:
+            return [replace(r,status='粗定位' if r.point_uv is not None else r.status,
+                            diagnostic=r.diagnostic+'；'+reason) for r in results]
+        return [replace(r,diagnostic=r.diagnostic.replace('尚未验证五帧一致性','五帧一致性检查通过')) for r in results]

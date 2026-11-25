@@ -44,3 +44,15 @@ def test_missing_and_invalid():
     assert result.status == '未识别' and result.point_uv is None
     with pytest.raises(ValueError):
         TridentTipDetector().detect(np.zeros((20, 20, 3), np.uint8))
+
+
+def test_sequence_quality_gates_motion_without_hiding_positions():
+    detector = TridentTipDetector()
+    image = scene()
+    stable = detector.detect_sequence([image] * 5)
+    assert all(r.status == '精定位' and '五帧一致性检查通过' in r.diagnostic for r in stable)
+    moved = detector.detect_sequence([np.roll(image, i, axis=1) for i in range(5)])
+    assert all(r.status == '粗定位' and '标准差超限' in r.diagnostic for r in moved)
+    assert all(r.point_uv is not None for r in moved)
+    with pytest.raises(ValueError):
+        detector.detect_sequence([image])
