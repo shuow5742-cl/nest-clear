@@ -64,13 +64,21 @@ def evaluate():
             if f is None or s is None: return None
             result=session.add_press([f],[s],np.eye(2)*.0135,np.eye(2)*.0135)
         return result['max_deviation_um']
-    scan=[]; repeats=[]; rotation_frames={}
+    scan=[]; repeats=[]; frame_rows=[]; rotation_frames={}
     groups=[('device',i,float('nan')) for i in range(1,13)]+[('device',i,-.503+(i-13)*.04) for i in range(13,29)]+[('device2',i, .062 if i==1 else .060+(i-2)*(.479/12)) for i in range(1,15)]
     root=Path('/home/shuow/nest-clear-field/20261124_tipsweep')
     for device,i,y in groups:
         for camera in ('front','side'):
             results=[detector.detect(cv2.imread(str(root/device/f'set_{i:03d}'/f'{camera}_{j}.png'),0)) for j in range(1,6)]
             valid=[r for r in results if r.point_uv is not None]
+            for j,r in enumerate(results,1):
+                frame_rows.append([device,i,camera,j,r.status,*(r.point_uv or (None,None)),*(r.farthest_prong_uv or (None,None))])
+                if device=='device' and i in (3,10) and camera=='side' and r.point_uv is not None:
+                    image=cv2.imread(str(root/device/f'set_{i:03d}'/f'{camera}_{j}.png'))
+                    cv2.drawMarker(image,tuple(np.round(r.point_uv).astype(int)),(0,0,255),cv2.MARKER_CROSS,15,2)
+                    cv2.circle(image,tuple(np.round(r.farthest_prong_uv).astype(int)),4,(0,255,255),1)
+                    cv2.imwrite(str(OUT/f'round2_{i}_{camera}_{j}.png'),image)
+
             if device=='device' and i<=12: rotation_frames[(i,camera)]=[r.point_uv for r in results]
             if valid:
                 pts=np.array([r.point_uv for r in valid]); std=np.std(pts,axis=0); repeats.append((device,i,camera,len(valid),*std))
@@ -80,6 +88,8 @@ def evaluate():
                     scan.append({'device':device,'set':i,'y_mm':y,'camera':camera,'metric':metric,'mean':np.mean(vals) if vals else np.nan,'std':np.std(vals) if vals else np.nan,'n':len(vals)})
     with (OUT/'scan.csv').open('w',newline='') as f:
         wr=csv.DictWriter(f,['device','set','y_mm','camera','metric','mean','std','n']); wr.writeheader(); wr.writerows(scan)
+    with (OUT/'frames.csv').open('w',newline='') as f:
+        wr=csv.writer(f); wr.writerow(['device','set','camera','frame','status','u','v','far_u','far_v']); wr.writerows(frame_rows)
     with (OUT/'repeatability.csv').open('w',newline='') as f:
         wr=csv.writer(f); wr.writerow(['device','set','camera','n','std_u_px','std_v_px']); wr.writerows(repeats)
     fig,axs=plt.subplots(2,1,figsize=(9,8))

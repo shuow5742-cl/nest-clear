@@ -84,20 +84,42 @@ class TridentTipDetector:
         good=np.abs(residual-np.median(residual))<max(1.,3*np.median(np.abs(residual-np.median(residual))))
         slope,intercept=np.polyfit(np.asarray(rows)[good],np.asarray(centers)[good],1)
         d=np.array([slope,1.]); d/=np.linalg.norm(d); origin=np.array([intercept+slope*np.mean(rows),np.mean(rows)])
-        # Components below the straight body: retain only connected tool pixels.
-        tipmask=comp.copy(); tipmask[:max(0,end-75)]=0
-        k,tl,ts,_=cv2.connectedComponentsWithStats(tipmask.astype(np.uint8),8)
+        # Sample axis-parallel profiles inside the body envelope. This is independent
+        # of whether thin prongs remain attached in the thresholded component.
+        normal=np.array([d[1],-d[0]])
+        sample_y=np.arange(max(0,end-90), min(h-2,end+6), dtype=np.float32)
+        mid_y=end-90
+        row_x=np.flatnonzero(comp[max(0,mid_y)])
+        half=max(8., min(35., (float(row_x[-1]-row_x[0])/2+8) if len(row_x) else 20.))
+        offsets=np.arange(-half,half+0.1,.5,dtype=np.float32)
+        t=(sample_y-origin[1])/d[1]
+        xmap=(origin[0]+d[0]*t[:,None]+normal[0]*offsets[None,:]-lo).astype(np.float32)
+        ymap=np.broadcast_to((origin[1]+d[1]*t[:,None]+normal[1]*offsets[None,:]),xmap.shape).astype(np.float32)
+        values=cv2.remap(crop,xmap,ymap,cv2.INTER_LINEAR,borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        backgrounds=cv2.remap(bg,xmap,ymap,cv2.INTER_LINEAR,borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        # Local dark platform per profile; require measurable darkness over several
+        # adjacent samples so isolated dust or LED texture is not a valid endpoint.
+        body=np.percentile(values[:min(45,len(values))],10,axis=0)
+        contrast=backgrounds-body[None,:]
+        darkness=(backgrounds-values)/np.maximum(contrast,1)
+        dark=darkness>=.5
+        supported=dark.copy()
+        supported[:4] = False
+        for k in range(1,5): supported[4:] &= dark[4-k:len(dark)-k]
+        supported &= contrast>=30
         tips=[]
-        for i in range(1,k):
-            if ts[i,4]<3: continue
-            ys,xs=np.nonzero(tl==i); proj=(xs+lo-origin[0])*d[0]+(ys-origin[1])*d[1]; j=np.argmax(proj)
-            u=int(xs[j]); v=int(ys[j]);
-            # interpolate the end profile to local half contrast
-            bgval=float(bg[v,u]); body=float(np.percentile(crop[max(0,v-8):v+1,max(0,u-1):u+2],10)); level=(bgval+body)/2
-            sub=float(v)
-            if v+1<h and crop[v+1,u]>crop[v,u] and crop[v,u]<=level<=crop[v+1,u]: sub=v+(level-float(crop[v,u]))/(float(crop[v+1,u])-float(crop[v,u]))
-            tips.append((float(u+lo),sub))
-        if not tips: return done(diagnostic='未找到连接针身的齿尖')
+        for col in range(len(offsets)):
+            ys=np.flatnonzero(supported[:,col])
+            if not len(ys): continue
+            j=int(ys[-1])
+            if j+1>=len(sample_y) or darkness[j+1,col]>=.5: continue
+            den=darkness[j,col]-darkness[j+1,col]
+            frac=float(np.clip((darkness[j,col]-.5)/den,0,1)) if den>0 else 0.
+            yy=float(sample_y[j]+frac)
+            tt=(yy-origin[1])/d[1]
+            pt=origin+d*tt+normal*float(offsets[col])
+            tips.append(tuple(pt))
+        if not tips: return done(diagnostic='针尖区域缺少可靠的轴向灰度穿越')
         far=max(tips,key=lambda p: np.dot(np.asarray(p)-origin,d)); point=origin+np.dot(np.asarray(far)-origin,d)*d
         mask=np.zeros_like(gray); mask[:,lo:hi]=comp.astype(np.uint8)
-        return done(point_uv=tuple(point),axis={'point':tuple(origin),'direction':tuple(d)},farthest_prong_uv=far,prong_tips=tuple(tips),status='精定位' if len(tips)>=2 else '粗定位',diagnostic='针身边缘拟合与连接齿尖' if len(tips)>=2 else '未能区分多个齿尖，末端位置可能有歧义',tool_mask=mask,sharpness={'edge_width_px':float(np.median(widths)) if widths else None,'normalized_gradient':float(np.median(gradients))},sampling_rows=tuple(rows))
+        return done(point_uv=tuple(point),axis={'point':tuple(origin),'direction':tuple(d)},farthest_prong_uv=far,prong_tips=tuple(tips),status='粗定位',diagnostic='轴向剖面估计末端；质量判定待验证',tool_mask=mask,sharpness={'edge_width_px':float(np.median(widths)) if widths else None,'normalized_gradient':float(np.median(gradients))},sampling_rows=tuple(rows))
