@@ -84,13 +84,15 @@ def evaluate():
             if f is None or s is None: return None
             result=session.add_press([f],[s],np.eye(2)*.0135,np.eye(2)*.0135)
         return result['max_deviation_um']
-    scan=[]; repeats=[]; frame_rows=[]; rotation_frames={}
+    scan=[]; scan_frames=[]; repeats=[]; frame_rows=[]; rotation_frames={}; side_x={}
     groups=[('device',i,float('nan')) for i in range(1,13)]+[('device',i,-.503+(i-13)*.04) for i in range(13,29)]+[('device2',i, .062 if i==1 else .060+(i-2)*(.479/12)) for i in range(1,15)]
     root=Path('/home/shuow/nest-clear-field/20261124_tipsweep')
     for device,i,y in groups:
         for camera in ('front','side'):
             results=detector.detect_sequence([cv2.imread(str(root/device/f'set_{i:03d}'/f'{camera}_{j}.png'),0) for j in range(1,6)])
             valid=[r for r in results if r.point_uv is not None]
+            if camera=='side' and valid:
+                side_x[(device,i)]=float(np.mean([r.axis['point'][0]+(400-r.axis['point'][1])*r.axis['direction'][0]/r.axis['direction'][1] for r in valid]))
             for j,r in enumerate(results,1):
                 frame_rows.append([device,i,camera,j,r.status,r.diagnostic,r.axis_rms_px,r.tip_contrast,*(r.point_uv or (None,None)),*(r.farthest_prong_uv or (None,None))])
                 if device=='device' and i in (3,10) and camera=='side' and r.point_uv is not None:
@@ -102,12 +104,24 @@ def evaluate():
             if device=='device' and i<=12: rotation_frames[(i,camera)]=[r.point_uv for r in results]
             if valid:
                 pts=np.array([r.point_uv for r in valid]); std=np.std(pts,axis=0); repeats.append((device,i,camera,len(valid),*std))
-                for metric in ('normalized_gradient','edge_width_px'):
+                for metric in ('normalized_gradient','edge_width_px','esf_width_px','band_gradient_p995'):
                     if np.isnan(y): continue
                     vals=[r.sharpness[metric] for r in valid if r.sharpness[metric] is not None]
                     scan.append({'device':device,'set':i,'y_mm':y,'camera':camera,'metric':metric,'mean':np.mean(vals) if vals else np.nan,'std':np.std(vals) if vals else np.nan,'n':len(vals)})
+                    for j,r in enumerate(results,1):
+                        scan_frames.append({'device':device,'set':i,'y_mm':y,'camera':camera,'metric':metric,'frame':j,'value':r.sharpness[metric] if r.sharpness else None})
+    # Known measured anchors from the task. For intervening groups, estimate
+    # position from side-camera body axis at v=400, 13.5 micrometres per px.
+    anchors={('device',13):-.503,('device',28):.060,('device2',1):.062,('device2',2):.060,('device2',3):.100,('device2',14):.539}
+    zero=side_x[('device',12)]
+    for record in scan+scan_frames:
+        key=(record['device'],record['set'])
+        record['y_nominal_mm']=record['y_mm']
+        record['y_mm']=anchors.get(key,(zero-side_x[key])*.0135)
+    with (OUT/'scan_frames.csv').open('w',newline='') as f:
+        wr=csv.DictWriter(f,['device','set','y_mm','y_nominal_mm','camera','metric','frame','value']); wr.writeheader(); wr.writerows(scan_frames)
     with (OUT/'scan.csv').open('w',newline='') as f:
-        wr=csv.DictWriter(f,['device','set','y_mm','camera','metric','mean','std','n']); wr.writeheader(); wr.writerows(scan)
+        wr=csv.DictWriter(f,['device','set','y_mm','y_nominal_mm','camera','metric','mean','std','n']); wr.writeheader(); wr.writerows(scan)
     with (OUT/'frames.csv').open('w',newline='') as f:
         wr=csv.writer(f); wr.writerow(['device','set','camera','frame','status','diagnostic','axis_rms_px','tip_contrast','u','v','far_u','far_v']); wr.writerows(frame_rows)
     with (OUT/'repeatability.csv').open('w',newline='') as f:
@@ -118,13 +132,20 @@ def evaluate():
             ss=[x for x in scan if x['camera']==camera and x['metric']==metric]; ax.errorbar([x['y_mm'] for x in ss],[x['mean'] for x in ss],yerr=[x['std'] for x in ss],label=camera,marker='.',capsize=2)
         ax.set(xlabel='Y (mm; approximate)',ylabel=metric); ax.grid(); ax.legend()
     fig.tight_layout(); fig.savefig(OUT/'sharpness.png',dpi=150); plt.close(fig)
+    fig,axs=plt.subplots(2,2,figsize=(12,8))
+    for col,camera in enumerate(('front','side')):
+        for row,(metric,label) in enumerate((('esf_width_px','ESF width (px; smaller is sharper)'),('band_gradient_p995','band |gradient| p99.5'))):
+            data=sorted((x for x in scan if x['camera']==camera and x['metric']==metric),key=lambda x:x['y_mm'])
+            axs[row,col].errorbar([x['y_mm'] for x in data],[x['mean'] for x in data],yerr=[x['std'] for x in data],marker='.',capsize=2)
+            axs[row,col].set(title=camera,xlabel='Y (mm)',ylabel=label);axs[row,col].grid()
+    fig.tight_layout(); fig.savefig(OUT/'sharpness_esf_comparison.png',dpi=150);plt.close(fig)
     session=RunoutSession(); raw_result=None
     for i in range(1,13):
         raw_result=session.add_press(rotation_frames[(i,'front')], rotation_frames[(i,'side')], np.eye(2)*.0135,np.eye(2)*.0135)
         if raw_result.get('rejected'): break
     raw_runout=raw_result.get('max_deviation_um'); raw_summary=(f'{raw_runout:.1f} µm，差 {abs(runout(True)-raw_runout):.1f} µm' if raw_runout is not None and not raw_result.get('rejected') else f'不可计算（{raw_result.get("reason", "输入不足")}）')
     errs=[r['error'] for r in rows if 'error' in r]; times=[r['ms'] for r in rows]; rr=runout(True); pr=runout(False)
-    lines=['# 三棱针评测','', '基线 SilhouetteTipDetector 在 38 张标注图均未返回坐标，详见 baseline.csv。检测方法和参数见工作区 docs/trident_detector.md；结果仅为实验性评估。', '',f'标注图 {len(rows)} 张，精定位 {sum(r["status"]=="精定位" for r in rows)} 张。',f'工具尖误差中位 {np.median(errs):.3f} px，最大 {max(errs):.3f} px；耗时中位 {np.median(times):.1f} ms，最大 {max(times):.1f} ms。',f'所有原始组坐标标准差最大 {max(max(x[4:]) for x in repeats):.3f} px（分别按 u/v，样本总体标准差）。',f'转角组 RunoutSession 最大偏差：参考 {rr:.1f} µm，标注帧检测 {pr:.1f} µm，差 {abs(rr-pr):.1f} µm；原始五帧检测 {raw_summary}；使用 RunoutSession 默认稳定性门限。','', '![清晰度曲线](sharpness.png)','', '扫描 Y 坐标按题给步距近似，非逐帧实测；误差棒为五帧总体标准差。清晰度指标取针身边缘归一化最大梯度和 10–90% 宽度中位数。', '', '| 图像 | 状态 | 误差 px | 沿轴 px | 横轴 px | 齿尖误差 px | 轴角差 ° | 针身 IoU | 针尖 IoU | ms |','|---|---|---:|---:|---:|---:|---:|---:|---:|---:|']
+    lines=['# 三棱针评测','', '基线 SilhouetteTipDetector 在 38 张标注图均未返回坐标，详见 baseline.csv。检测方法和参数见工作区 docs/trident_detector.md；结果仅为实验性评估。', '',f'标注图 {len(rows)} 张，精定位 {sum(r["status"]=="精定位" for r in rows)} 张。',f'工具尖误差中位 {np.median(errs):.3f} px，最大 {max(errs):.3f} px；耗时中位 {np.median(times):.1f} ms，最大 {max(times):.1f} ms。',f'所有原始组坐标标准差最大 {max(max(x[4:]) for x in repeats):.3f} px（分别按 u/v，样本总体标准差）。',f'转角组 RunoutSession 最大偏差：参考 {rr:.1f} µm，标注帧检测 {pr:.1f} µm，差 {abs(rr-pr):.1f} µm；原始五帧检测 {raw_summary}；使用 RunoutSession 默认稳定性门限。','', '![清晰度曲线](sharpness.png)','', 'Y 使用题给已知实测锚点；其他组由侧面针身轴在 v=400 的五帧均值相对 set_012 的位移乘 0.0135 mm/px 估计，并非外部独立测量；CSV 同时保留上一轮步距近似的 y_nominal_mm。误差棒为五帧总体标准差。' , '', '| 图像 | 状态 | 误差 px | 沿轴 px | 横轴 px | 齿尖误差 px | 轴角差 ° | 针身 IoU | 针尖 IoU | ms |','|---|---|---:|---:|---:|---:|---:|---:|---:|---:|']
     for r in rows:
         def fmt(k): return f'{r[k]:.3f}' if k in r else '—'
         lines.append('| '+' | '.join([r['image'],r['status']]+[fmt(k) for k in ('error','along','cross','far_error','angle_deg','body_iou','tip_iou','ms')])+' |')
@@ -137,7 +158,29 @@ def evaluate():
     ordered=sorted(front,key=lambda x:x['y_mm']); k=ordered.index(peak)
     violations=sum(ordered[i+1]['mean']<ordered[i]['mean'] for i in range(k))+sum(ordered[i+1]['mean']>ordered[i]['mean'] for i in range(k,len(ordered)-1))
     lines += [f'正面梯度曲线相对峰值两侧共有 {violations} 处违反单调趋势；侧面波动亦较大，因此两个指标均未证明满足清晰度验收要求，暂不推荐用于对刀。', '', '失败样例：' + '、'.join(f'[{r["image"]}](overlays/{r["image"]}.png)' for r in sorted(rows,key=lambda x:x.get('error',-1),reverse=True)[:5]), '', '验收：精定位数量、误差、五帧重复性未达标；耗时为单线程 OpenCV 下的标注帧测量；离心量差见上。当前粗定位结果不可当作精定位使用。', '', '针身和针尖 IoU 使用检测末端前 75 px 的固定分界，仅用于暴露分割不足；算法没有独立的语义分割。人工参考是像素掩膜 PCA 和最远整数像素，存在标注边界与亚像素定义差异。叠加图蓝十字为参考，红十字为检测，绿线为轴，黄圈为连通末端，紫线为清晰度采样位置。', '', '局限：局部阈值、断齿和背景暗物可能造成漏检或误检；指标未经过独立数据验证，不宜作为实际对刀判据。']
-    lines += ['', '## 第三项：质量状态', '', f'标注图中单帧精定位 {sum(r["status"]=="精定位" for r in rows)}/{len(rows)}；单帧精定位不代表五帧一致性已验证。原始组经五帧一致性检查后，精定位帧 {sum(r[4]=="精定位" for r in frame_rows)}/{len(frame_rows)}。', '单帧门限：全部有效针身中点对拟合轴的 RMS ≤0.7 px，最远穿越对比度 ≥40 灰度、有效扫描线 ≥3，且端点不处于搜索窗口末 2 px。五帧检验分别要求 u/v 总体标准差 ≤0.1 px；不合格组降级而不丢弃坐标，具体原因见 frames.csv。门限为实验性质量筛查，尚未证明定位误差满足验收。', '', '## 第一项：五帧异常', '', '旧版最大波动为 device/set_010/side，u 标准差 7.628 px；次大为 set_003/side，7.279 px。前十组各帧轴线、末端与工具尖坐标见 round1_worst_frames.csv；本版逐帧坐标见 frames.csv。原始版本和本版的异常组叠加图分别以 old_ 和 round2_ 为前缀。', 'set_010/side 第 1 帧针身较直，第 2–5 帧呈周期性锯齿（见 [五帧针身拼图](round1_set010_side_montage.png)）；旧版轴线外推位置约 775 至 796 px，变化并非仅仅选中了不同齿。不能仅凭图像确定是逐行成像、振动还是其他原因，也不能通过强行跨帧对齐声称原始坐标重复性达标。', '本版沿轴平行扫描局部中间灰度穿越，要求五个连续采样点，并限制在原连通域末端之后 5 px 内以减少背景暗物误报；该限制也可能漏掉完全断开的更长灰齿。', '', '## 第二项：参考轴和补充亚像素参考', '']
+    lines += ['', '## 第四项：清晰度 ESF 与梯度代理', '', '![ESF 和针身带梯度对比](sharpness_esf_comparison.png)', '', '每条外边缘局部归一化，以半高位置对齐，汇总针身直线段两侧及多行剖面，测平均 ESF 的 10–90% 宽度；宽度越小越清晰。针身带水平绝对差分 99.5 分位为粗代理，越大越清晰；针身带由本检测器逐行动态裁剪，可能与原始粗代理的带宽和差分算子不同。各点是五帧指标均值，误差棒为五帧总体标准差，逐帧值见 scan_frames.csv。背景用于估计各边的平台，不将背景区域作为指标样本；饱和平台会限制可靠性。']
+    for camera in ('front','side'):
+        for metric,high in (('esf_width_px',False),('band_gradient_p995',True)):
+            data=sorted((x for x in scan if x['camera']==camera and x['metric']==metric and np.isfinite(x['mean'])),key=lambda x:x['y_mm'])
+            peak=(max if high else min)(data,key=lambda x:x['mean']); k=data.index(peak)
+            bad=sum((data[i+1]['mean']<data[i]['mean']) if high else (data[i+1]['mean']>data[i]['mean']) for i in range(k)) + sum((data[i+1]['mean']>data[i]['mean']) if high else (data[i+1]['mean']<data[i]['mean']) for i in range(k,len(data)-1))
+            variation=(max(x['mean'] for x in data)-min(x['mean'] for x in data))/np.mean([x['mean'] for x in data])*100
+            above_noise=sum(abs(b['mean']-a['mean']) > np.hypot(a['std'],b['std']) for a,b in zip(data,data[1:]))
+            noise=np.median([x['std'] for x in data]); lines.append(f'{camera} {metric}：最清晰采样点 Y={peak["y_mm"]:.3f} mm，峰值两侧单调趋势违例 {bad} 处，全程极差/均值 {variation:.1f}%，五帧标准差中位 {noise:.4f}；{len(data)}/30 组有效、{sum(x['n']==5 for x in data)}/30 组五帧完整，相邻组变化超过两组标准差合成值 {above_noise} 处（描述性比较，非显著性检验）。')
+            if camera=='front':
+                for pct in (1,5,10):
+                    subset=[x['y_mm'] for x in data if (x['mean']>=peak['mean']*(1-pct/100) if high else x['mean']<=peak['mean']*(1+pct/100))]
+                    lines.append(f'{metric} 最优值变化 {pct}% 内采样范围 {min(subset):.3f} 至 {max(subset):.3f} mm（可能不连续，无插值）。')
+    lines += ['', '正面 ESF 的最优采样点不在零附近且有多处单调违例，侧面 ESF 的变化远超应有的平坦水平；粗梯度代理亦有多处违例。因此本轮没有可推荐的合格清晰度指标。', '', '| 组 | Y mm | 正面 ESF 均值 ± 标准差 (n) | 侧面 ESF 均值 ± 标准差 (n) | 正面梯度均值 ± 标准差 (n) | 侧面梯度均值 ± 标准差 (n) |', '|---|---:|---:|---:|---:|---:|']
+    for device,i,y in groups:
+        if np.isnan(y): continue
+        subset=[x for x in scan if x['device']==device and x['set']==i]
+        def cell(camera,metric):
+            x=next(x for x in subset if x['camera']==camera and x['metric']==metric)
+            return f'{x["mean"]:.3f} ± {x["std"]:.3f} ({x["n"]})'
+        yy=subset[0]['y_mm']
+        lines.append('| '+' | '.join([f'{device}/{i:03d}',f'{yy:.3f}',cell('front','esf_width_px'),cell('side','esf_width_px'),cell('front','band_gradient_p995'),cell('side','band_gradient_p995')])+' |')
+    lines += ['', '各组散布和相邻组变化应结合 scan_frames.csv 判断；侧面若变化显著大于五帧噪声，说明指标或位置相关成像误差仍在，不应仅归因于随机噪声。', '', '## 第三项：质量状态', '', f'标注图中单帧精定位 {sum(r["status"]=="精定位" for r in rows)}/{len(rows)}；单帧精定位不代表五帧一致性已验证。原始组经五帧一致性检查后，精定位帧 {sum(r[4]=="精定位" for r in frame_rows)}/{len(frame_rows)}。', '单帧门限：全部有效针身中点对拟合轴的 RMS ≤0.7 px，最远穿越对比度 ≥40 灰度、有效扫描线 ≥3，且端点不处于搜索窗口末 2 px。五帧检验分别要求 u/v 总体标准差 ≤0.1 px；不合格组降级而不丢弃坐标，具体原因见 frames.csv。门限为实验性质量筛查，尚未证明定位误差满足验收。', '', '## 第一项：五帧异常', '', '旧版最大波动为 device/set_010/side，u 标准差 7.628 px；次大为 set_003/side，7.279 px。前十组各帧轴线、末端与工具尖坐标见 round1_worst_frames.csv；本版逐帧坐标见 frames.csv。原始版本和本版的异常组叠加图分别以 old_ 和 round2_ 为前缀。', 'set_010/side 第 1 帧针身较直，第 2–5 帧呈周期性锯齿（见 [五帧针身拼图](round1_set010_side_montage.png)）；旧版轴线外推位置约 775 至 796 px，变化并非仅仅选中了不同齿。不能仅凭图像确定是逐行成像、振动还是其他原因，也不能通过强行跨帧对齐声称原始坐标重复性达标。', '本版沿轴平行扫描局部中间灰度穿越，要求五个连续采样点，并限制在原连通域末端之后 5 px 内以减少背景暗物误报；该限制也可能漏掉完全断开的更长灰齿。', '', '## 第二项：参考轴和补充亚像素参考', '']
     subrows=[r for r in rows if 'subref_shift' in r]
     lines.append(f'成功构造 {len(subrows)}/{len(rows)} 张补充参考。先使用检测轴的同一批轴向剖面候选，再保留位于人工针尖掩膜膨胀 2 px 内的候选，将最远者投影到人工笔直段 PCA 轴。它受检测器采样范围与人工掩膜约束，不是独立真值。原始参考及误差保持不变。')
     lines.append(f'补充参考相对整数像素参考位移中位 {np.median([r["subref_shift"] for r in subrows]):.3f} px，最大 {max(r["subref_shift"] for r in subrows):.3f} px；差值包含轴与边缘定义差异，不能作为统计置信区间。')

@@ -30,13 +30,15 @@ def test_geometry_and_definition():
 
 
 def test_gradient_falls_with_blur():
-    image = scene(); detector = TridentTipDetector(); scores = []
+    image = scene(); detector = TridentTipDetector(); scores = []; esf_widths = []
     for sigma in (0, 1, 2, 3):
         blurred = cv2.GaussianBlur(image, (0, 0), sigma) if sigma else image
         r = detector.detect(blurred)
         assert r.point_uv is not None
         scores.append(r.sharpness['normalized_gradient'])
+        esf_widths.append(r.sharpness['esf_width_px'])
     assert all(a > b for a, b in zip(scores, scores[1:]))
+    assert all(a < b for a, b in zip(esf_widths, esf_widths[1:]))
 
 
 def test_missing_and_invalid():

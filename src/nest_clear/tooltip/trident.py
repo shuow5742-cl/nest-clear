@@ -62,7 +62,7 @@ class TridentTipDetector:
         # Robust straight section: exclude glue above and the final 80 pixels of prongs.
         start_y=max(int(end*.40),end-300); stop_y=end-80
         if stop_y-start_y<30: return done(diagnostic='针身直线段不足')
-        centers=[]; rows=[]; gradients=[]; widths=[]
+        centers=[]; rows=[]; gradients=[]; widths=[]; esf_profiles=[]; band_gradients=[]
         for y in range(start_y,stop_y,3):
             xs=np.flatnonzero(comp[y]);
             if len(xs)<5: continue
@@ -78,17 +78,39 @@ class TridentTipDetector:
                     j=ix[np.argmin(abs(inds[ix]-k))]; return float(inds[j]+(level-vals[j])/(vals[j+1]-vals[j]))
                 c=cross(body+.5*contrast); c1=cross(body+.1*contrast); c9=cross(body+.9*contrast)
                 grad=np.max(np.abs(np.diff(vals)))/contrast
-                return c, abs(c9-c1) if c1 is not None and c9 is not None else None,grad
+                return c, abs(c9-c1) if c1 is not None and c9 is not None else None,grad,body,contrast
             left=edge(l,False); right=edge(r,True)
             if left is None or right is None or left[0] is None or right[0] is None: continue
             centers.append((left[0]+right[0])/2+lo); rows.append(y)
             gradients.extend([left[2],right[2]])
+            band_gradients.extend(np.abs(np.diff(row[max(0,l-5):min(width,r+6)])))
+            # Align each outer edge at its interpolated half-height. Positive
+            # distances point outwards; each row has its own body/background.
+            offsets_esf=np.arange(-6,6.01,.25)
+            for edge_info,sign in ((left,-1),(right,1)):
+                coordinates=edge_info[0]+sign*offsets_esf
+                if coordinates.min()>=0 and coordinates.max()<width-1:
+                    background=edge_info[3]+edge_info[4]
+                    inner=edge_info[0]-sign*np.arange(3.,7.,.5)
+                    local_body=float(np.median(np.interp(inner,np.arange(width),row)))
+                    if background-local_body>=20:
+                        esf_profiles.append((np.interp(coordinates,np.arange(width),row)-local_body)/(background-local_body))
             widths.extend(z[1] for z in (left,right) if z[1] is not None)
         if len(rows)<10: return done(diagnostic='有效针身边缘不足')
         slope, intercept=np.polyfit(rows,centers,1); residual=np.asarray(centers)-(slope*np.asarray(rows)+intercept)
         good=np.abs(residual-np.median(residual))<max(1.,3*np.median(np.abs(residual-np.median(residual))))
         slope,intercept=np.polyfit(np.asarray(rows)[good],np.asarray(centers)[good],1)
         d=np.array([slope,1.]); d/=np.linalg.norm(d); origin=np.array([intercept+slope*np.mean(rows),np.mean(rows)])
+        esf_width=None
+        if len(esf_profiles)>=20:
+            esf=np.mean(esf_profiles,axis=0)
+            def esf_cross(level):
+                indices=np.flatnonzero((esf[:-1]<=level)&(esf[1:]>level))
+                if not len(indices): return None
+                i=indices[np.argmin(np.abs(offsets_esf[indices]))]
+                return float(offsets_esf[i]+(level-esf[i])*(offsets_esf[i+1]-offsets_esf[i])/(esf[i+1]-esf[i]))
+            x10,x90=esf_cross(.1),esf_cross(.9)
+            if x10 is not None and x90 is not None and x90>x10: esf_width=x90-x10
         axis_rms=float(np.sqrt(np.mean((np.asarray(centers)-(slope*np.asarray(rows)+intercept))**2)))
         # Sample axis-parallel profiles inside the body envelope. This is independent
         # of whether thin prongs remain attached in the thresholded component.
@@ -135,7 +157,7 @@ class TridentTipDetector:
         status='粗定位' if reasons else '精定位'
         diagnostic='；'.join(reasons) if reasons else '单帧质量检查通过；尚未验证五帧一致性'
         mask=np.zeros_like(gray); mask[:,lo:hi]=comp.astype(np.uint8)
-        return done(point_uv=tuple(point),axis={'point':tuple(origin),'direction':tuple(d)},farthest_prong_uv=far,prong_tips=tuple(tips),status=status,diagnostic=diagnostic,tool_mask=mask,sharpness={'edge_width_px':float(np.median(widths)) if widths else None,'normalized_gradient':float(np.median(gradients))},sampling_rows=tuple(rows),axis_rms_px=axis_rms,tip_contrast=tip_contrast)
+        return done(point_uv=tuple(point),axis={'point':tuple(origin),'direction':tuple(d)},farthest_prong_uv=far,prong_tips=tuple(tips),status=status,diagnostic=diagnostic,tool_mask=mask,sharpness={'edge_width_px':float(np.median(widths)) if widths else None,'normalized_gradient':float(np.median(gradients)), 'esf_width_px':esf_width, 'band_gradient_p995':float(np.percentile(band_gradients,99.5)) if band_gradients else None},sampling_rows=tuple(rows),axis_rms_px=axis_rms,tip_contrast=tip_contrast)
 
     def detect_sequence(self, images):
         """Evaluate five independent frames, retaining positions even on rejection."""
