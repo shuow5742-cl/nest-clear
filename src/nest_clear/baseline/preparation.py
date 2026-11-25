@@ -17,7 +17,9 @@ from nest_clear.devices.tooltip_exposure import auto_exposure, measure
 from nest_clear.devices.v4l2_controls import DEFAULTS as CAMERA_DEFAULTS
 from nest_clear.paths import tooltip_preview_file
 from nest_clear.tooltip.detector import SilhouetteTipDetector
-from nest_clear.tooltip.focus_metrics import focus_metrics, EdgeWidthTracker
+from nest_clear.tooltip.factory import make_tip_detector
+from nest_clear.tooltip.focus_metrics import focus_metrics, EdgeWidthTracker, BandGradientTracker
+from nest_clear.tooltip.trident import TridentResult
 from nest_clear.baseline.latest_capture import FrameBroker
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,15 @@ def exposure_source(measured):
 
 def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127):
     tip = detection.point_uv
+    if isinstance(detection, TridentResult):
+        status = detection.status
+        reason = detection.diagnostic if status != '精定位' else ''
+        value = (detection.sharpness or {}).get('band_gradient_p995') if status == '精定位' else None
+        tracked = tracker.update(value, tip if value is not None else None)
+        metrics = {'tenengrad': None, 'edge_width_px': None, 'edge_width_um': None,
+                   'contrast': detection.tip_contrast, 'source': 'band_gradient_p995',
+                   'band_gradient': tracked['current'], 'axis_rms_px': detection.axis_rms_px}
+        return status, reason, metrics, tracked
     status = '未识别' if tip is None else '粗定位' if detection.coarse else '精定位'
     reason = detection.diagnostic or ('未识别到针尖' if tip is None else '针尖为粗定位' if detection.coarse else '')
     metrics = {'tenengrad': None, 'edge_width_px': None, 'edge_width_um': None, 'contrast': None,
@@ -63,13 +74,29 @@ def draw_tip_preview(frame, name, detection, ui_config, scale):
         radius = round(ui_config.get('main_tol_mm', .1) * 1000 / scale)
         cv2.circle(image, (x, y), max(1, radius), (255, 0, 255), 2)
     labels = []
+    if isinstance(detection, TridentResult):
+        if detection.axis and detection.sampling_rows:
+            p, d = detection.axis['point'], detection.axis['direction']
+            a, b = min(detection.sampling_rows), max(detection.sampling_rows)
+            if abs(d[1]) > 1e-9:
+                cv2.line(image, (round(p[0]+(a-p[1])*d[0]/d[1]), a),
+                         (round(p[0]+(b-p[1])*d[0]/d[1]), b), (255, 180, 0), 1)
+            mask = detection.tool_mask
+            if mask is not None:
+                yy, xx = np.nonzero(mask[a:b+1])
+                if len(xx): cv2.rectangle(image, (int(xx.min()), a), (int(xx.max()), b), (255, 180, 0), 1)
+        if detection.farthest_prong_uv:
+            cv2.circle(image, tuple(map(round, detection.farthest_prong_uv)), 5, (255, 180, 0), 2)
+        if detection.axis_rms_px is not None and '工具在动或画面畸变' in detection.diagnostic:
+            labels.append(((20, 65), detection.diagnostic, 'Motion or distortion', (0, 0, 255), 30))
     if tip is None:
         labels.append(((20, 20), '未识别到针尖：' + (detection.diagnostic or '无结果'), 'Tip not detected: ' + detection.diagnostic, (0, 0, 255), 36))
     else:
         x, y = map(round, tip)
         color = (0, 220, 255) if detection.coarse else (0, 220, 0)
         cv2.drawMarker(image, (x, y), color, cv2.MARKER_CROSS, 48, 4)
-        cv2.rectangle(image, (max(0, x-80), max(0, y-80)), (min(width-1, x+80), min(height-1, y+80)), color, 3)
+        if not isinstance(detection, TridentResult):
+            cv2.rectangle(image, (max(0, x-80), max(0, y-80)), (min(width-1, x+80), min(height-1, y+80)), color, 3)
         status = '粗定位' if detection.coarse else '精定位'
         position = f'{status} ({tip[0]:.1f}, {tip[1]:.1f})'
         if name == 'front':
@@ -94,7 +121,8 @@ class Preparation:
         self.busy = False
         self.assignment_thread = None
         self.devices = []
-        self.trackers = {n: EdgeWidthTracker(reset_distance=50) for n in self.enabled}
+        detector_settings = getattr(getattr(config, 'tool_calibration', None), 'detection', {})
+        self.trackers = {n: (BandGradientTracker() if detector_settings.get(n, {}).get('method', 'trident') == 'trident' else EdgeWidthTracker(reset_distance=50)) for n in self.enabled}
         self.reset_peak = {n: threading.Event() for n in self.enabled}
         self.history = {n: [] for n in self.enabled}
         self._preview_cameras = {}
@@ -494,11 +522,11 @@ class Preparation:
                 fps = round(1 / (now - last), 1) if last is not None and now > last else None
                 last = now
                 detector_cfg = self.config.tool_calibration.detection[name] if self.config else {}
-                detection = SilhouetteTipDetector(**detector_cfg).detect(frame)
+                detection = make_tip_detector(detector_cfg, SilhouetteTipDetector).detect(frame)
                 tip = detection.point_uv
                 target_uv = self.ui_config.get('main_target_uv') or ((frame.shape[1]-1)/2, (frame.shape[0]-1)/2)
                 delta_uv = [tip[0] - target_uv[0], tip[1] - target_uv[1]] if name == 'front' and tip is not None else None
-                scale = self.ui_config.get('main_um_per_px' if name == 'front' else 'aux_um_per_px', 15.2)
+                scale = self.ui_config.get('main_um_per_px' if name == 'front' else 'aux_um_per_px', 13.5)
                 if self.reset_peak[name].is_set():
                     self.trackers[name].reset(); self.reset_peak[name].clear()
                     self.history[name] = []
@@ -509,6 +537,7 @@ class Preparation:
                 with self.lock:
                     self.state[name]['peak_edge_width_um'] = tracked['best'] * scale if tracked['best'] is not None else None
                     self.state[name].update(tenengrad=metrics['tenengrad'], peak=tracked['best'], percent=tracked['percent'],
+                        band_gradient=metrics.get('band_gradient'), axis_rms_px=metrics.get('axis_rms_px'),
                         edge_width_um=metrics['edge_width_um'], edge_width_px=metrics['edge_width_px'], contrast=metrics['contrast'],
                         source=metrics['source'], tip_uv=list(tip) if tip is not None else None,
                         detection_status=status, detection_reason=detection.diagnostic, focus_reason=reason,
@@ -528,6 +557,8 @@ class Preparation:
                     published = time.monotonic()
                     self._preview_cameras[name] = {
                         'tenengrad': metrics['tenengrad'],
+                        'band_gradient': metrics.get('band_gradient'),
+                        'axis_rms_px': metrics.get('axis_rms_px'),
                         'peak': tracked['best'],
                         'percent': tracked['percent'],
                         'edge_width_um': metrics['edge_width_um'],

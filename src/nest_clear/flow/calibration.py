@@ -18,6 +18,7 @@ from nest_clear.guard import GuardError, diagnostic, format_pose
 from nest_clear.plan.scan_path import guard_position
 from nest_clear.record.summary import write_tooltip_summary
 from nest_clear.tooltip import SilhouetteTipDetector, check_quality, compute_compensation, is_aligned, solve_correction, fit_view_jacobian
+from nest_clear.tooltip.factory import make_tip_detector
 from nest_clear.tooltip.store import load_baseline, save_tools
 from nest_clear.tooltip.click import confirm_tip, _DISPLAY_ERROR
 from .context import FlowContext
@@ -255,10 +256,10 @@ class DetectTips(Instant):
         points = {}
         focus = {}
         for view in ("front", "side"):
-            detector = SilhouetteTipDetector(**self.ctx.config.tool_calibration.detection[view])
+            detector = make_tip_detector(self.ctx.config.tool_calibration.detection[view], SilhouetteTipDetector)
             detection = detector.detect(images[view])
             points[view] = tuple(float(x) for x in detection.point_uv) if detection.point_uv is not None else None
-            focus[view] = {"focused": detection.focused, "edge_width_px": detection.edge_width_px, "width_px": detection.width_px, "coarse": detection.coarse, "max_edge_width_px": detector.max_edge_width_px, "diagnostic": detection.diagnostic}
+            focus[view] = {"focused": detection.focused, "edge_width_px": detection.edge_width_px, "width_px": detection.width_px, "coarse": detection.coarse, "max_edge_width_px": detector.max_edge_width_px, "diagnostic": detection.diagnostic, 'method': self.ctx.config.tool_calibration.detection[view].get('method', 'trident')}
         bb.write("tooltip_focus", focus, self.name)
         session = bb.read("tooltip_session")
         paths = session["images"][-1]
@@ -295,7 +296,7 @@ class SolveTips(Instant):
                 diagnostic = {"no dark component": "图像中未找到暗色针尖区域",
                               "largest component is too small": "图像中的暗色针尖区域过小"}.get(f.get("diagnostic"), f.get("diagnostic") or "检测失败")
                 reasons.append(f"{camera}相机无法识别针尖：{diagnostic}")
-            if f["coarse"]: reasons.append(f"{camera}相机 coarse 粗定位")
+            if f["coarse"]: reasons.append(f"{camera}相机 coarse 粗定位：{f.get('diagnostic') or '识别不准'}")
             if view.width_px is not None and f["width_px"] is not None and abs(f["width_px"] / view.width_px - 1) > .3:
                 reasons.append(f"{camera}相机针尖宽度超差")
         if any(points[v] is None for v in points):
@@ -376,6 +377,9 @@ class ReliableTips(TreeNode):
         except Exception as exc:
             bb.write("error", str(exc), self.name)
             self.reason = str(exc)
+            focus = bb.read('tooltip_focus', {})
+            if any(item.get('method') == 'trident' and (item.get('coarse') or not item.get('focused')) for item in focus.values()):
+                return Status.FAILURE
             if not isinstance(exc, GuardError) or self.ctx.config.tool_calibration.unreliable_action != "click":
                 return Status.FAILURE
             parent, child = mp.get_context("spawn").Pipe(False)
@@ -404,7 +408,7 @@ class ReliableTips(TreeNode):
                     auto = bb.read("tooltip_points")[view]
                     correction = float(np.linalg.norm(np.asarray(r.point_uv) - auto)) if r.point_uv is not None and auto is not None else None
                     info = dict(camera=view, tool=bb.read("tooltip_session")["tool"], auto_point=auto, manual_point=r.point_uv,
-                                correction_px=correction, correction_mm=correction * .0152 if correction is not None else None,
+                                correction_px=correction, correction_mm=correction * view_settings()['main_um_per_px' if view == 'front' else 'aux_um_per_px'] / 1000 if correction is not None else None,
                                 elapsed_s=r.elapsed_s, source=r.source)
                     self.ctx.events.emit("tip_click", task_id=bb.read("task_id"), **info)
                     bb.read("tooltip_session").setdefault("tip_clicks", []).append(info)
@@ -418,7 +422,7 @@ class ReliableTips(TreeNode):
                 auto = points[view]
                 correction = float(np.linalg.norm(np.asarray(r.point_uv) - auto)) if auto is not None else None
                 info = dict(camera=view, tool=session["tool"], auto_point=auto, manual_point=r.point_uv,
-                            correction_px=correction, correction_mm=correction * .0152 if correction is not None else None,
+                            correction_px=correction, correction_mm=correction * view_settings()['main_um_per_px' if view == 'front' else 'aux_um_per_px'] / 1000 if correction is not None else None,
                             elapsed_s=r.elapsed_s, source=r.source)
                 self.ctx.events.emit("tip_click", task_id=bb.read("task_id"), **info)
                 session.setdefault("tip_clicks", []).append(info)

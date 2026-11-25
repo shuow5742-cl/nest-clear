@@ -58,7 +58,7 @@ def rig(tmp_path):
     cal = tmp_path / 'cal'; cal.mkdir(); initialize_tools(cal/'tools.yaml'); save_tools(cal/'tools.yaml',1,[1,2,3],source='test')
     calibration = cal/'camera.yaml'; calibration.write_text('camera: test\n')
     (cal/'tool_offset.yaml').write_text(yaml.safe_dump({'tool1':{'offset_xy_mm':[1,2], 'baseline_stale':True},'tool2':{'offset_xy_mm':[4,5], 'baseline_stale':True}}))
-    detection = {v: {'direction':[0,1], 'threshold':127, 'min_area':5} for v in ('front','side')}
+    detection = {v: {'method':'silhouette', 'direction':[0,1], 'threshold':127, 'min_area':5} for v in ('front','side')}
     cfg = SimpleNamespace(tool_calibration=SimpleNamespace(directory=str(cal), detection=detection, click_timeout_s=2),
                           tool_offset={'settle_samples':3,'settle_window_s':.03,'jitter_tol_mm':.02}, tools=((1,2,3),(0,0,0)))
     cameras, plc, events = Cameras(), Plc(), Events(tmp_path)

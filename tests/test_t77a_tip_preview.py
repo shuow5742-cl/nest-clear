@@ -109,7 +109,8 @@ def test_exposure_change_and_retest_reset_best(tmp_path, monkeypatch):
     events = SimpleNamespace(directory=tmp_path, emit=lambda *args, **kwargs: None)
     monkeypatch.setattr('nest_clear.baseline.preparation.enumerate_capture_devices', lambda: [])
     monkeypatch.setattr('nest_clear.baseline.preparation.auto_exposure', lambda *args, **kwargs: {'exposure': camera.exposure, 'p99': 210, 'saturated_fraction': 0, 'contrast': 100})
-    prep = Preparation(events, SimpleNamespace(cameras={'front': camera, 'side': camera}))
+    config = SimpleNamespace(tool_calibration=SimpleNamespace(detection={n: {'method': 'silhouette'} for n in ('front', 'side')}))
+    prep = Preparation(events, SimpleNamespace(cameras={'front': camera, 'side': camera}), config)
     def wait_for(predicate):
         end = time.monotonic() + 5
         while time.monotonic() < end:

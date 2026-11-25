@@ -82,6 +82,7 @@ def test_delayed_click_does_not_block_ticks_or_heartbeat(tmp_path, monkeypatch, 
              ViewCalib('side', (0, 0), ((0, 10, 0), (0, 0, 10)))]
     save_baseline(ToolTipBaseline('tool1', (0, 0, 0), views), tmp_path / 'tool1_baseline.yaml', tool=1, source='test')
     cfg = load_config('config/nest_clear.yaml')
+    for settings in cfg.tool_calibration.detection.values(): settings['method'] = 'silhouette'
     cfg = replace(cfg, record_directory=str(tmp_path / 'runs'),
                   tool_calibration=replace(cfg.tool_calibration, enabled=True, directory=str(tmp_path), unreliable_action='click', click_timeout_s=10))
     events = EventRecorder(tmp_path / 'runs', 'main')

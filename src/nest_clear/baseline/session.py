@@ -21,6 +21,8 @@ from nest_clear.guard import GuardError
 from nest_clear.paths import live_image_file
 from nest_clear.tooloffset.store import _read, save_mapping
 from nest_clear.tooltip import SilhouetteTipDetector, ToolTipBaseline, ViewCalib
+from nest_clear.tooltip.factory import make_tip_detector
+from nest_clear.tooltip.trident import TridentResult
 from nest_clear.tooltip.click import ClickResult, confirm_tip
 from nest_clear.tooltip.schema import load_baseline
 from nest_clear.tooltip.store import load_tools
@@ -28,8 +30,9 @@ from nest_clear.tooltip.store import load_tools
 DEFAULTS: dict[str, Any] = {
     "main_target_uv": None,
     "main_tol_mm": 0.05,
-    "main_um_per_px": 15.2,
-    "aux_um_per_px": 15.2,
+    # 11-25 实测：Y 每 0.04mm 侧面平移 2.95px；原估算 15.2。
+    "main_um_per_px": 13.5,
+    "aux_um_per_px": 13.5,
     "min_focus_contrast": 40,
 }
 
@@ -333,7 +336,7 @@ class BaselineSession:
     def _detect(self, images: dict[str, np.ndarray]) -> dict[str, Any]:
         """对两路图像运行现有先粗后细剪影针尖检测。"""
         return {
-            name: SilhouetteTipDetector(**self.config.tool_calibration.detection[name]).detect(images[name])
+            name: make_tip_detector(self.config.tool_calibration.detection[name], SilhouetteTipDetector).detect(images[name])
             for name in ("front", "side")
         }
 
@@ -602,6 +605,8 @@ class BaselineSession:
         }
         clicked: dict[str, dict[str, Any]] = {}
         for name, result in (manual or {}).items():
+            if isinstance(ds[name], TridentResult) and ds[name].status != '精定位':
+                raise ValueError(f"{'主对刀' if name == 'front' else '辅助'}相机识别不可靠：{ds[name].diagnostic}")
             if result.point_uv is None:
                 raise ValueError("已取消手动点选")
             points[name] = [float(result.point_uv[0]), float(result.point_uv[1])]
@@ -655,9 +660,9 @@ class BaselineSession:
         for name in ("front", "side"):
             label = "主对刀相机" if name == "front" else "辅助相机"
             if points[name] is None:
-                raise ValueError(f"{label}无法识别针尖，检查背光和遮挡")
+                raise ValueError(f"{label}无法识别针尖，检查背光和遮挡：{ds[name].diagnostic}")
             if ds[name].coarse and name not in clicked:
-                raise ValueError(f"{label}识别不可靠，请手动确认")
+                raise ValueError(f"{label}识别不可靠，请手动确认：{ds[name].diagnostic}")
             if not ds[name].focused and name not in clicked:
                 raise ValueError(f"{label}针尖模糊，检查对焦/背光：{ds[name].diagnostic}")
         if not inside:

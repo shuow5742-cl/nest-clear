@@ -638,7 +638,16 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             _mapping(camera_config, f"tool_calibration.cameras.{name}", ["backend"])
         else:
             _fail(f"tool_calibration.cameras.{name}.backend", "应为 mock、uvc 或 daheng")
-        det = _mapping(detection[name], f"tool_calibration.detection.{name}", ["direction", "threshold", "min_area"] + [key for key in ("probe_offset_px", "max_edge_width_px") if key in detection[name]])
+        det = _mapping(detection[name], f"tool_calibration.detection.{name}", ["direction", "threshold", "min_area"] + [key for key in ("probe_offset_px", "max_edge_width_px", "method", "x_range", "min_height", "max_axis_rms_px", "max_distortion_axis_rms_px", "min_tip_contrast", "max_sequence_std_px") if key in detection[name]])
+        if det.get('method', 'trident') not in ('trident', 'silhouette'):
+            _fail(f'tool_calibration.detection.{name}.method', '应为 trident 或 silhouette')
+        for key in ('max_axis_rms_px', 'max_distortion_axis_rms_px', 'min_tip_contrast', 'max_sequence_std_px'):
+            if key in det: _number(det[key], f'tool_calibration.detection.{name}.{key}', True)
+        if 'min_height' in det and (type(det['min_height']) is not int or det['min_height'] <= 0):
+            _fail(f'tool_calibration.detection.{name}.min_height', '应为正整数')
+        if 'x_range' in det and det['x_range'] is not None:
+            x_range = _vector(det['x_range'], f'tool_calibration.detection.{name}.x_range', 2)
+            if x_range[0] >= x_range[1]: _fail(f'tool_calibration.detection.{name}.x_range', '范围起点必须小于终点')
         if "probe_offset_px" in det and (type(det["probe_offset_px"]) is not int or det["probe_offset_px"] <= 0):
             _fail(f"tool_calibration.detection.{name}.probe_offset_px", f"应为正整数，实际为 {det['probe_offset_px']!r}；请检查配置")
         if "max_edge_width_px" in det:

@@ -130,14 +130,20 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
   camera_controls: {}  # 默认 YUYV 1920x1080、手动曝光及固定图像控制
   auto_exposure:  # P99 200–235，饱和率 < 0.1%
     max_exposure: 1600  # 160ms，约 6fps 的帧周期；再长会降帧，背光足够时不应需要（设备上限 5000）
-  detection:  # 剪影极值方向、灰度阈值与最小面积
+  detection:  # method 可选 trident（默认）或 silhouette（旧剪影法）
     front:
+      method: trident
+      max_axis_rms_px: 0.7  # 精定位门限
+      max_distortion_axis_rms_px: 2.0  # 超过则认为工具在动或画面畸变
       direction: [0, 1]
       threshold: 127
       min_area: 5
       probe_offset_px: 7  # 像素，距针尖回退测量宽度的位置
       max_edge_width_px: 10.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 6.0
     side:
+      method: trident
+      max_axis_rms_px: 0.7  # 精定位门限
+      max_distortion_axis_rms_px: 2.0  # 超过则认为工具在动或画面畸变
       direction: [0, 1]
       threshold: 127
       min_area: 5

@@ -9,6 +9,8 @@ class TridentConfig:
     x_range: tuple[int, int] | None = None
     min_height: int = 100
     max_axis_rms_px: float = 0.7
+    # 逐行曝光时运动会造成明显畸变；与精定位门限分别配置。
+    max_distortion_axis_rms_px: float = 2.0
     min_tip_contrast: float = 40.0
     max_sequence_std_px: float = 0.1
 
@@ -27,10 +29,26 @@ class TridentResult:
     axis_rms_px: float | None = None
     tip_contrast: float | None = None
 
+    @property
+    def coarse(self): return self.status != '精定位'
+
+    @property
+    def focused(self): return self.status == '精定位'
+
+    @property
+    def edge_width_px(self): return (self.sharpness or {}).get('edge_width_px')
+
+    @property
+    def width_px(self): return None
+
+    @property
+    def confidence(self): return 1.0 if self.status == '精定位' else 0.0
+
 class TridentTipDetector:
     def __init__(self, config=None):
         self.config = config or TridentConfig()
         if isinstance(self.config, dict): self.config = TridentConfig(**self.config)
+        self.max_edge_width_px = None
 
     def detect(self, gray):
         start = perf_counter()
@@ -150,7 +168,8 @@ class TridentTipDetector:
         if not tips: return done(diagnostic='针尖区域缺少可靠的轴向灰度穿越')
         far_index=max(range(len(tips)),key=lambda i:np.dot(np.asarray(tips[i])-origin,d)); far=tips[far_index]; tip_contrast=tip_contrasts[far_index]; point=origin+np.dot(np.asarray(far)-origin,d)*d
         reasons=[]
-        if axis_rms>self.config.max_axis_rms_px: reasons.append('针身轴拟合残差过大')
+        if axis_rms>self.config.max_distortion_axis_rms_px: reasons.append('工具在动或画面畸变')
+        elif axis_rms>self.config.max_axis_rms_px: reasons.append('针身轴拟合残差过大')
         if tip_contrast<self.config.min_tip_contrast: reasons.append('末端对比度不足')
         if len(tips)<3: reasons.append('末端有效剖面不足')
         if far[1]>=end+4: reasons.append('末端靠近搜索边界，可能存在断齿或背景干扰')

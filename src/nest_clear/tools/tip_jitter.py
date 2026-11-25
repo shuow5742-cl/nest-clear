@@ -18,7 +18,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not np.isfinite(args.um_per_px) or args.um_per_px <= 0:
         parser.error("--um-per-px 必须为有限正数")
-    detector = SilhouetteTipDetector(**load_config(args.config, require_tools=False).tool_calibration.detection[args.view])
+    cfg = load_config(args.config, require_tools=False).tool_calibration.detection[args.view]
+    detector = SilhouetteTipDetector(**{k: v for k, v in cfg.items() if k in ('direction', 'threshold', 'min_area', 'probe_offset_px', 'max_edge_width_px')})
     points, failed = [], []
     for path in sorted(Path(args.directory).iterdir()):
         if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):

@@ -936,12 +936,17 @@ class App:
                 pct = src.get('percent')
                 color = COLORS['green'] if isinstance(pct, (int,float)) and pct >= 95 else COLORS['yellow'] if isinstance(pct, (int,float)) and pct >= 80 else COLORS['red']
                 percent_text = f'{pct:.0f}' if isinstance(pct, (int, float)) else '—'
-                text = f'相对清晰度 {percent_text}%　当前 {number(src.get("edge_width_px"))} px / 本次最佳 {number(src.get("peak"))} px'
+                if src.get('source') == 'band_gradient_p995':
+                    text = f'清晰度参考值 {percent_text}%　当前 {number(src.get("band_gradient"))} / 本次最佳 {number(src.get("peak"))}'
+                else:
+                    text = f'相对清晰度 {percent_text}%　当前 {number(src.get("edge_width_px"))} px / 本次最佳 {number(src.get("peak"))} px'
                 tip = src.get('tip_uv')
                 delta = src.get('delta_uv')
                 source = f'{src.get("detection_status", "—")} {str(src.get("detection_reason") or "")}　针尖 ' + (f'({number(tip[0])}, {number(tip[1])})' if tip else '—')
                 if name == 'front' and delta:
                     source += f'　Δu {number(delta[0])}（右+） Δv {number(delta[1])}（下+）px'
+                if src.get('axis_rms_px') is not None:
+                    source += f'　axis_rms {number(src.get("axis_rms_px"))} px'
                 if src.get('focus_reason'):
                     source += '　清晰度无效：' + src['focus_reason']
                 exposure_source = item.get('exposure_source') or src.get('exposure_source') or '未测'
@@ -997,7 +1002,7 @@ class App:
             lines.append(f"工具{i}：{display_time(old.get('time'))}　P0 {vector(old.get('p0'), 3)}　补偿 {comp}　{flags}".rstrip())
             lines.append(f"　主/辅 {vector(old.get('pixels',{}).get('front'))} / {vector(old.get('pixels',{}).get('side'))}　{offset_note}".rstrip())
         cfg = data.get('config') or {}; selected_comp = data.get('offset_xyz')
-        lines.append(f"当前所选补偿：{vector(selected_comp, 3)}　主/辅比例：{cfg.get('main_um_per_px',15.2)} / {cfg.get('aux_um_per_px',15.2)} μm/px（8mm 估算待实测）")
+        lines.append(f"当前所选补偿：{vector(selected_comp, 3)}　主/辅比例：{cfg.get('main_um_per_px',13.5)} / {cfg.get('aux_um_per_px',13.5)} μm/px（11-25 实测）")
         self.baseline_existing.config(text='\n'.join(lines))
         if phase == 'confirm' and self.baseline_dialog is None: self.baseline_confirm(data)
         elif phase != 'confirm' and self.baseline_dialog is not None: self.baseline_dialog.destroy(); self.baseline_dialog = None

@@ -133,6 +133,7 @@ def test_detect_records_actual_focus_threshold(configured):
     config = load_config('config/nest_clear.yaml', require_tools=False)
     for view in ('front', 'side'):
         settings = config.tool_calibration.detection[view]
+        settings['method'] = 'silhouette'
         if configured is None:
             settings.pop('max_edge_width_px')
         else:
@@ -145,5 +146,5 @@ def test_detect_records_actual_focus_threshold(configured):
     node._blackboard = board
     node.perform()
     for view in ('front', 'side'):
-        actual = SilhouetteTipDetector(**config.tool_calibration.detection[view]).max_edge_width_px
+        actual = SilhouetteTipDetector(**{k: v for k, v in config.tool_calibration.detection[view].items() if k in ('direction', 'threshold', 'min_area', 'probe_offset_px', 'max_edge_width_px')}).max_edge_width_px
         assert board.read('tooltip_focus')[view]['max_edge_width_px'] == actual

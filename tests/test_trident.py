@@ -48,6 +48,16 @@ def test_missing_and_invalid():
         TridentTipDetector().detect(np.zeros((20, 20, 3), np.uint8))
 
 
+def test_rolling_shutter_distortion_is_reported():
+    image = scene()
+    distorted = np.stack([np.roll(row, 8 if (y // 9) % 2 else -8)
+                          for y, row in enumerate(image)])
+    result = TridentTipDetector().detect(distorted)
+    assert result.axis_rms_px > 2.0
+    assert result.status != '精定位'
+    assert '工具在动或画面畸变' in result.diagnostic
+
+
 def test_sequence_quality_gates_motion_without_hiding_positions():
     detector = TridentTipDetector()
     image = scene()

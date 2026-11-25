@@ -10,8 +10,8 @@ center_warning_px: 100 # 正面针尖偏离图像中心的警告阈值
 baseline_ui:
   main_target_uv: null # null 使用图像中心，亦可设置 [u, v]
   main_tol_mm: 0.15  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
-  main_um_per_px: 15.2 # 8 mm 镜头估算值，待实测
-  aux_um_per_px: 15.2 # 8 mm 镜头估算值，待实测
+  main_um_per_px: 13.5 # 11-25 实测：Y 每 0.04mm 侧面平移 2.95px；原估算 15.2
+  aux_um_per_px: 13.5 # 11-25 实测：Y 每 0.04mm 侧面平移 2.95px；原估算 15.2
   min_focus_contrast: 40 # 针尖 ROI 暗亮中位数差最低灰度级，低于此值不计清晰度
 quality:
   max_fit_rms_px: 5.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 2.0
