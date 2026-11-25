@@ -1,0 +1,46 @@
+import cv2
+import numpy as np
+import pytest
+from nest_clear.tooltip.trident import TridentTipDetector
+
+
+def scene():
+    y, x = np.indices((600, 600))
+    image = np.clip(225 + 30*np.sin(x/18)*np.sin(y/17), 0, 255).astype(np.uint8)
+    image[:, :70] = 0
+    image[:, 530:] = 0
+    cv2.rectangle(image, (250, 0), (350, 100), 20, -1)
+    cv2.rectangle(image, (285, 100), (315, 400), 20, -1)
+    for u, end in ((290, 440), (300, 450), (310, 445)):
+        cv2.line(image, (u, 400), (u, end), 30, 3)
+    return image
+
+
+def test_geometry_and_definition():
+    result = TridentTipDetector().detect(scene())
+    assert result.point_uv is not None
+    assert result.status in ('精定位', '粗定位')
+    assert abs(result.point_uv[0] - 300) < 1
+    assert abs(result.point_uv[1] - 452) < 2
+    axis = result.axis
+    d = np.array(axis['direction']); p = np.array(result.point_uv); o = np.array(axis['point'])
+    far = np.array(result.farthest_prong_uv)
+    assert abs(d[0]*(p-o)[1] - d[1]*(p-o)[0]) < 1e-8
+    assert abs(np.dot(d, p-far)) < 1e-8
+
+
+def test_gradient_falls_with_blur():
+    image = scene(); detector = TridentTipDetector(); scores = []
+    for sigma in (0, 1, 2, 3):
+        blurred = cv2.GaussianBlur(image, (0, 0), sigma) if sigma else image
+        r = detector.detect(blurred)
+        assert r.point_uv is not None
+        scores.append(r.sharpness['normalized_gradient'])
+    assert all(a > b for a, b in zip(scores, scores[1:]))
+
+
+def test_missing_and_invalid():
+    result = TridentTipDetector().detect(np.full((600, 600), 255, np.uint8))
+    assert result.status == '未识别' and result.point_uv is None
+    with pytest.raises(ValueError):
+        TridentTipDetector().detect(np.zeros((20, 20, 3), np.uint8))
