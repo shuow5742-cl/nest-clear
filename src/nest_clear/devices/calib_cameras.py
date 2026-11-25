@@ -170,6 +170,11 @@ class CalibCamera:
         if self.controls is None: raise RuntimeError("相机控制未打开")
         return self.controls.get('exposure')
 
+    def exposure_limits(self):
+        if self.controls is None: raise RuntimeError('相机控制未打开')
+        control = self.controls.query('exposure')
+        return {'min': int(control.minimum), 'max': int(control.maximum), 'step': max(1, int(control.step))}
+
     def settings_snapshot(self) -> dict:
         from copy import deepcopy
         return deepcopy(self.actual_settings)

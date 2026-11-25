@@ -40,7 +40,8 @@ def save_measurement(path, name, snapshot, result):
                 measurements.setdefault(old['device'], old)
         data['cameras'][name] = {**snapshot, 'measured': True, 'time': datetime.now(timezone.utc).isoformat(),
                                  'exposure': result['exposure'], 'p99': result['p99'],
-                                 'saturated_fraction': result['saturated_fraction'], 'contrast': result['contrast']}
+                                 'saturated_fraction': result['saturated_fraction'], 'contrast': result['contrast'],
+                                 'approximate': result.get('approximate', False)}
         if snapshot.get('device'): measurements[snapshot['device']] = data['cameras'][name]
         _write(path, data)
 

@@ -114,7 +114,7 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         monkeypatch.setitem(sys.modules, module, None)
     for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
         monkeypatch.setattr(app.tk, name, Widget)
-    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox'):
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox', 'Spinbox'):
         monkeypatch.setattr(app.ttk, name, Widget)
     monkeypatch.setattr(app.ttk, 'Style', Style)
     monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
@@ -311,6 +311,18 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
                                             'side': {'on': True, 'device': 'usb-0:8', 'exposure_source': '已测 2026-11-23'}}}}
         ui.update_baseline(low_main)
         assert '98%' in ui.baseline_views['front']['info'].options['text']
+        low_main['baseline']['preview']['front']['exposure_limits'] = {'min': 1, 'max': 50, 'step': 1}
+        ui.baseline_exposure_pending['front'] = (123, time.monotonic())
+        low_main['command_seq'] = 123
+        ui.update_baseline(low_main)
+        assert 'front' in ui.baseline_exposure_pending
+        low_main['baseline']['preview']['front']['exposure_result'] = {'seq': 123, 'state': 'done', 'message': '曝光回读 0.3 ms'}
+        ui.update_baseline(low_main)
+        assert 'front' not in ui.baseline_exposure_pending
+        assert '0.3 ms' in ui.baseline_views['front']['exposure_result'].options['text']
+        ui.baseline_exposure_pending['front'] = (124, time.monotonic() - 6)
+        ui.update_baseline(low_main)
+        assert '未完成' in ui.baseline_views['front']['exposure_result'].options['text']
         assert ui.baseline_views['side']['info'].options['text'] == '无实时数据'
         assert '对比度 —' in ui.baseline_views['side']['detail'].options['text']
         preview_file.write_text(json.dumps({'updated_at': now_iso, 'cameras': {'front': {
@@ -590,7 +602,7 @@ def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
 
     for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
         monkeypatch.setattr(app.tk, name, Widget)
-    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox'):
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox', 'Spinbox'):
         monkeypatch.setattr(app.ttk, name, Widget)
     monkeypatch.setattr(app.ttk, 'Style', Style)
     monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])

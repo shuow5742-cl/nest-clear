@@ -311,9 +311,16 @@ def test_dual_preview_10s_throttles_events_and_updates_state_file(tmp_path, monk
     prep.command('tooltip_preview', {'camera': 'front', 'on': True})
     prep.command('tooltip_preview', {'camera': 'side', 'on': True})
     assert done.wait(10), counts
-    # Give threads a moment to finish writing frame 51 before closing.
-    time.sleep(0.05)
-    live_doc = json.loads(preview_path.read_text(encoding='utf-8'))
+    deadline = time.monotonic() + 5
+    live_doc = {}
+    while time.monotonic() < deadline:
+        try:
+            live_doc = json.loads(preview_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            pass
+        if {'front', 'side'} <= set(live_doc.get('cameras', {})):
+            break
+        time.sleep(.02)
     for cam in ('front', 'side'):
         cam_live = live_doc['cameras'][cam]
         assert {'tenengrad', 'peak', 'percent', 'edge_width_um', 'edge_width_px', 'contrast', 'source', 'history', 'fps', 'exposure_ms', 'updated_at'} <= set(cam_live)
