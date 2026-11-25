@@ -716,9 +716,9 @@ class App:
             pic = self.picture(body, 'baseline_'+name); pic.grid_configure(row=2)
             info = tk.Label(body, text='预览关闭', bg=WHITE, fg=MUTED, font=self.theme.large, anchor='w', justify='left'); info.grid(row=3, column=0, sticky='ew')
             hint = self.label(body, '', fg=COLORS['red']); hint.grid(row=4, column=0, sticky='ew')
-            detail = self.label(body, ''); detail.grid(row=5, column=0, sticky='ew')
+            detail = self.label(body, '', justify='left'); detail.grid(row=5, column=0, sticky='ew')
             graph = tk.Canvas(body, height=24, bg=WHITE, highlightthickness=0); graph.grid(row=6, column=0, sticky='ew')
-            body.bind('<Configure>', lambda event, info=info, hint=hint: (info.config(wraplength=max(100, event.width-12)), hint.config(wraplength=max(100, event.width-12))))
+            body.bind('<Configure>', lambda event, info=info, hint=hint, detail=detail: (info.config(wraplength=max(100, event.width-12)), hint.config(wraplength=max(100, event.width-12)), detail.config(wraplength=max(100, event.width-12))))
             self.baseline_views[name] = dict(path=path, toggle=toggle, exposure=exposure, reset=reset, reason=reason, info=info, hint=hint, detail=detail, graph=graph, picture=pic)
         results = self.card(self.baseline, '本次结果', 2, 0)
         self.baseline_results_card = results.master
@@ -856,10 +856,17 @@ class App:
                 src = display['live']
                 pct = src.get('percent')
                 color = COLORS['green'] if isinstance(pct, (int,float)) and pct >= 95 else COLORS['yellow'] if isinstance(pct, (int,float)) and pct >= 80 else COLORS['red']
-                text = f'清晰度 {pct:.0f}%　当前 {src.get("tenengrad",0):.2f} / 峰值 {src.get("peak",0):.2f}'
-                source = '识别针尖' if src.get('source') == 'tip' else '未识别到针尖，按画面中央计算'
+                percent_text = f'{pct:.0f}' if isinstance(pct, (int, float)) else '—'
+                text = f'相对清晰度 {percent_text}%　当前 {number(src.get("edge_width_px"))} px / 本次最佳 {number(src.get("peak"))} px'
+                tip = src.get('tip_uv')
+                delta = src.get('delta_uv')
+                source = f'{src.get("detection_status", "—")} {str(src.get("detection_reason") or "")}　针尖 ' + (f'({number(tip[0])}, {number(tip[1])})' if tip else '—')
+                if name == 'front' and delta:
+                    source += f'　Δu {number(delta[0])}（右+） Δv {number(delta[1])}（下+）px'
+                if src.get('focus_reason'):
+                    source += '　清晰度无效：' + src['focus_reason']
                 exposure_source = item.get('exposure_source') or src.get('exposure_source') or '未测'
-                detail = (str(item.get('exposure_error')) + '　' if item.get('exposure_error') else '') + f'边缘 {number(src.get("edge_width_um"))} µm / {number(src.get("edge_width_px"))} px　对比度 {number(src.get("contrast"))}　{source}　曝光 {number(src.get("exposure_ms"))} ms {exposure_source}'
+                detail = (str(item.get('exposure_error')) + '\n' if item.get('exposure_error') else '') + f'{source}\n边缘 {number(src.get("edge_width_um"))} µm / {number(src.get("edge_width_px"))} px　最佳 {number(src.get("peak_edge_width_um"))} µm　对比度 {number(src.get("contrast"))}　曝光 {number(src.get("exposure_ms"))} ms {exposure_source}'
             widgets['info'].config(text=text, fg=color)
             hint_text = display.get('hint', '')
             widgets['hint'].config(text=hint_text)

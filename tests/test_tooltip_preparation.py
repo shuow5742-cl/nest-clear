@@ -118,14 +118,14 @@ def test_focus_improves_and_tip_motion_resets_peak(tmp_path, monkeypatch):
             if predicate(): return
             time.sleep(.02)
         assert False, prep.state['front']
-    wait(lambda: prep.state['front'].get('tenengrad') is not None)
-    blurry=prep.state['front']['tenengrad']; camera.sigma=.5
-    wait(lambda: prep.state['front'].get('tenengrad',0)>blurry*1.1)
+    wait(lambda: prep.state['front'].get('edge_width_px') is not None)
+    blurry=prep.state['front']['edge_width_px']; camera.sigma=.5
+    wait(lambda: prep.state['front'].get('edge_width_px') is not None and prep.state['front']['edge_width_px'] < blurry*.9)
     sharp_peak=prep.state['front']['peak']; camera.sigma=3.; camera.x=190
     wait(lambda: (prep.state['front'].get('tip_uv') or [0])[0]>150)
-    assert prep.state['front']['peak'] < sharp_peak
+    assert prep.state['front']['peak'] > sharp_peak
     camera.sigma=.5
-    wait(lambda: prep.state['front'].get('peak',0) > blurry*1.1)
+    wait(lambda: prep.state['front'].get('peak') is not None and prep.state['front']['peak'] < blurry*.9)
     camera.sigma=3.
     wait(lambda: prep.state['front'].get('percent',100) < 95)
     prep.command('tooltip_peak_reset', {'camera':'front'})
@@ -317,7 +317,7 @@ def test_dual_preview_10s_throttles_events_and_updates_state_file(tmp_path, monk
     for cam in ('front', 'side'):
         cam_live = live_doc['cameras'][cam]
         assert {'tenengrad', 'peak', 'percent', 'edge_width_um', 'edge_width_px', 'contrast', 'source', 'history', 'fps', 'exposure_ms', 'updated_at'} <= set(cam_live)
-        assert len(cam_live['history']) >= 10
+        assert cam_live['percent'] is None and cam_live['history'] == []
     prep.command('tooltip_preview', {'camera': 'front', 'on': False})
     prep.command('tooltip_preview', {'camera': 'side', 'on': False})
     prep.close()

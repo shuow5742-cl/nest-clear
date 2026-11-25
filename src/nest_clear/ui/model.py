@@ -81,7 +81,7 @@ def baseline_preview_display(item, live=None, *, allow_inline=False):
         return {'failed': False, 'on': False, 'no_live_data': False, 'message': '预览关闭',
                 'metrics': None, 'history': []}
     src = live if isinstance(live, dict) and live else (item if allow_inline and 'percent' in item else None)
-    if not src or src.get('percent') is None:
+    if not src:
         exposure_error = item.get('exposure_error')
         message = str(exposure_error) if exposure_error else '无实时数据'
         return {'failed': False, 'on': True, 'no_live_data': True, 'message': message,

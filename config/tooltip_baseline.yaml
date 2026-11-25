@@ -12,6 +12,7 @@ baseline_ui:
   main_tol_mm: 0.15  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
   main_um_per_px: 15.2 # 8 mm 镜头估算值，待实测
   aux_um_per_px: 15.2 # 8 mm 镜头估算值，待实测
+  min_focus_contrast: 40 # 针尖 ROI 暗亮中位数差最低灰度级，低于此值不计清晰度
 quality:
   max_fit_rms_px: 5.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 2.0
   max_condition: 300.0  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 100.0

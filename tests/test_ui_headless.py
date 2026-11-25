@@ -109,6 +109,9 @@ def test_demo_images_use_camera_aspect_ratio(tmp_path):
 def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
     from nest_clear.ui import app
     write_demo(tmp_path, initial=True)
+    import sys
+    for module in ('cv2', 'numpy', 'yaml'):
+        monkeypatch.setitem(sys.modules, module, None)
     for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
         monkeypatch.setattr(app.tk, name, Widget)
     for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox'):
@@ -310,6 +313,12 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert '98%' in ui.baseline_views['front']['info'].options['text']
         assert ui.baseline_views['side']['info'].options['text'] == '无实时数据'
         assert '对比度 —' in ui.baseline_views['side']['detail'].options['text']
+        preview_file.write_text(json.dumps({'updated_at': now_iso, 'cameras': {'front': {
+            'percent': None, 'detection_status': '未识别', 'detection_reason': 'no dark component',
+            'focus_reason': '未识别到针尖', 'updated_at': now_iso}}}), encoding='utf-8')
+        ui.update_baseline(low_main)
+        assert '—%' in ui.baseline_views['front']['info'].options['text']
+        assert '未识别到针尖' in ui.baseline_views['front']['detail'].options['text']
         old_t = time.time() - 5.0
         os.utime(preview_file, (old_t, old_t))
         ui.update_baseline(low_main)
