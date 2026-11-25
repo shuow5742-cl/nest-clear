@@ -31,7 +31,7 @@ def _write(path, data):
     finally:
         if os.path.exists(temp): os.unlink(temp)
 
-def save_measurement(path, name, snapshot, result):
+def save_measurement(path, name, snapshot, result, source='auto'):
     with _lock:
         data = load_settings(path)
         measurements = data.setdefault('measurements', {})
@@ -41,9 +41,10 @@ def save_measurement(path, name, snapshot, result):
         data['cameras'][name] = {**snapshot, 'measured': True, 'time': datetime.now(timezone.utc).isoformat(),
                                  'exposure': result['exposure'], 'p99': result['p99'],
                                  'saturated_fraction': result['saturated_fraction'], 'contrast': result['contrast'],
-                                 'approximate': result.get('approximate', False)}
+                                 'approximate': result.get('approximate', False), 'source': source}
         if snapshot.get('device'): measurements[snapshot['device']] = data['cameras'][name]
         _write(path, data)
+        return data['cameras'][name]
 
 def save_assignments(path, devices):
     """Atomically persist the complete front/side assignment with a backup."""

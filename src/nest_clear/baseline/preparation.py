@@ -13,7 +13,7 @@ import numpy as np
 
 from nest_clear.devices.calib_cameras import enumerate_capture_devices
 from nest_clear.devices.tooltip_camera_store import load_settings, save_measurement, measurement_for_device
-from nest_clear.devices.tooltip_exposure import auto_exposure
+from nest_clear.devices.tooltip_exposure import auto_exposure, measure
 from nest_clear.devices.v4l2_controls import DEFAULTS as CAMERA_DEFAULTS
 from nest_clear.paths import tooltip_preview_file
 from nest_clear.tooltip.detector import SilhouetteTipDetector
@@ -21,7 +21,11 @@ from nest_clear.tooltip.focus_metrics import focus_metrics, EdgeWidthTracker
 from nest_clear.baseline.latest_capture import FrameBroker
 
 logger = logging.getLogger(__name__)
-LOW_FREQUENCY_PREVIEW_KEYS = ('on', 'device', 'error', 'exposure_source', 'exposure_error', 'exposure_limits', 'exposure_result', 'exposure_busy')
+LOW_FREQUENCY_PREVIEW_KEYS = ('on', 'device', 'error', 'exposure_source', 'exposure_error', 'exposure_limits', 'exposure_result', 'exposure_busy', 'exposure_saved')
+
+
+def exposure_source(measured):
+    return ('已存（手动）' if measured.get('source') == 'manual' else '已存（自动测）') if measured else '默认'
 
 
 def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127):
@@ -220,11 +224,40 @@ class Preparation:
     def _change_exposure(self, name, camera, stream, request, path, device, stop):
         seq = request.get('_seq')
         try:
+            if request['action'] == 'tooltip_exposure_save':
+                if not device:
+                    raise ValueError('无法确定相机设备路径')
+                actual = camera.get_exposure()
+                if type(actual) is not int or actual <= 0:
+                    raise ValueError('无法读取有效硬件曝光')
+                if request.get('expected_exposure') is not None and request['expected_exposure'] != actual:
+                    raise ValueError('曝光已变化，请重新确认')
+                old = measurement_for_device(load_settings(path), device)
+                metrics = {'p99': None, 'saturated_fraction': None, 'contrast': None}
+                try:
+                    metrics.update(measure(camera.capture()))
+                except Exception:
+                    pass
+                if stop.is_set():
+                    raise RuntimeError('预览已关闭，曝光未保存')
+                if camera.get_exposure() != actual:
+                    raise ValueError('曝光已变化，请重新确认')
+                snapshot = camera.settings_snapshot()
+                if snapshot.get('device') != device:
+                    raise ValueError('相机设备路径已变化，请重新打开预览')
+                saved = save_measurement(path, name, snapshot, {'exposure': actual, **metrics}, source='manual')
+                with self.lock:
+                    self.state[name].update(exposure_source=exposure_source(saved), exposure_saved=saved)
+                    self.state[name].pop('exposure_error', None)
+                self.events.emit('tooltip_exposure_saved', camera=name, device=device, exposure=actual, source='manual', old_value=old.get('exposure'))
+                self.exposure_reply(name, seq, 'done', f'已存曝光 {actual/10:.1f} ms（手动）')
+                self.refresh_existing()
+                return
             limits = camera.exposure_limits()
             if request['action'] == 'tooltip_exposure_restore':
                 measured = measurement_for_device(load_settings(path), device)
                 value = measured.get('exposure') if measured else camera.config.get('camera_controls', {}).get('exposure', CAMERA_DEFAULTS['exposure'])
-                source = ('已测（取最接近值）' if measured.get('approximate') else '已测') if measured else '默认'
+                source = exposure_source(measured)
             else:
                 from decimal import Decimal, InvalidOperation
                 try:
@@ -285,8 +318,8 @@ class Preparation:
             except (AttributeError, RuntimeError, OSError, ValueError):
                 limits = None
             with self.lock:
-                source = ('已测（取最接近值）' if measured.get('approximate') else '已测') if measured else '默认'
-                self.state[name].update(device=device, exposure_limits=limits, exposure_source=source, exposure_busy=not bool(measured))
+                source = exposure_source(measured)
+                self.state[name].update(device=device, exposure_limits=limits, exposure_source=source, exposure_saved=measured, exposure_busy=not bool(measured))
             self.publish()
             if not measured:
                 self.retest[name].set()
@@ -314,8 +347,8 @@ class Preparation:
                         if hasattr(camera, 'actual_settings'): camera.actual_settings['exposure_status'] = '已测曝光'
                         save_measurement(path, name, camera.settings_snapshot(), result)
                         with self.lock:
-                            self.state[name]['exposure_source'] = '已测（取最接近值）' if result.get('approximate') else '已测'
                             measured = measurement_for_device(load_settings(path), device)
+                            self.state[name].update(exposure_source=exposure_source(measured), exposure_saved=measured)
                         self.events.emit('tooltip_exposure_measured', camera=name, device=device, exposure=result['exposure'])
                         self.publish()
                         self.refresh_existing()
@@ -407,7 +440,7 @@ class Preparation:
             if not on: self.events.emit('tooltip_preview_close', camera=camera)
         elif name == 'tooltip_exposure_retest':
             self.retest[camera].set()
-        elif name in ('tooltip_exposure_set', 'tooltip_exposure_restore'):
+        elif name in ('tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save'):
             with self.lock:
                 if not self.enabled[camera] or camera not in self.streams:
                     error = '预览未打开'

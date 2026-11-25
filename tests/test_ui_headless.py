@@ -318,6 +318,23 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         ui.update_baseline(low_main)
         assert '98%' in ui.baseline_views['front']['info'].options['text']
         low_main['baseline']['preview']['front']['exposure_limits'] = {'min': 1, 'max': 50, 'step': 1}
+        low_main['baseline']['preview']['front']['exposure_saved'] = {'exposure': 30, 'source': 'manual', 'time': '2026-11-25'}
+        ui.update_baseline(low_main)
+        view = ui.baseline_views['front']
+        assert '3.0 ms' in view['exposure_saved'].options['text']
+        assert view['exposure_save'].options['state'] == 'normal'
+        with monkeypatch.context() as scoped:
+            prompts, commands = [], []
+            scoped.setattr(app.messagebox, 'askyesno', lambda title, text, **kwargs: prompts.append(text) or True)
+            scoped.setattr(ui, 'baseline_command', lambda name, params: commands.append((name, params)) or 111)
+            ui.baseline_save_exposure('front')
+            assert '正面相机曝光 10.0 ms' in prompts[0] and '3.0 ms' in prompts[0]
+            assert commands == [('tooltip_exposure_save', {'camera': 'front', 'expected_exposure': 100})]
+            ui.baseline_exposure_pending.pop('front')
+        low_main['baseline']['preview']['front']['exposure_busy'] = True
+        ui.update_baseline(low_main)
+        assert view['exposure_save'].options['state'] == 'disabled' and '进行中' in view['exposure_save_reason'].options['text']
+        low_main['baseline']['preview']['front']['exposure_busy'] = False
         ui.baseline_exposure_pending['front'] = (123, time.monotonic())
         low_main['command_seq'] = 123
         ui.update_baseline(low_main)

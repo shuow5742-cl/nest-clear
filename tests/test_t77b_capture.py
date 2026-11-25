@@ -132,7 +132,7 @@ def test_retest_is_serial_and_reads_after_set(tmp_path, monkeypatch):
         wait_for(lambda: camera.count > 0)
         prep.command('tooltip_exposure_retest', {'camera': 'front'})
         wait_for(lambda: camera.exposure == 30 and len([op for op in camera.operations if op[0] == 'read']) >= 5)
-        wait_for(lambda: prep.state['front'].get('exposure_source', '').startswith('已测'))
+        wait_for(lambda: prep.state['front'].get('exposure_source', '').startswith('已存'))
     finally:
         prep.stop_previews(('front',))
         prep.close()

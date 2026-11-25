@@ -719,15 +719,18 @@ class App:
             entry = ttk.Spinbox(manual, from_=0.1, to=500, increment=0.1, width=7); entry.grid(row=0, column=1)
             set_exposure = ttk.Button(manual, text='设置曝光', command=lambda n=name: self.baseline_exposure(n, False)); set_exposure.grid(row=0, column=2)
             restore = ttk.Button(manual, text='恢复曝光', command=lambda n=name: self.baseline_exposure(n, True)); restore.grid(row=0, column=3)
-            limits = self.label(manual, '范围 —'); limits.grid(row=0, column=4)
-            result = self.label(manual, ''); result.grid(row=1, column=0, columnspan=5, sticky='w')
+            save = ttk.Button(manual, text='设为实际曝光', command=lambda n=name: self.baseline_save_exposure(n)); save.grid(row=0, column=4)
+            limits = self.label(manual, '范围 —'); limits.grid(row=0, column=5)
+            result = self.label(manual, ''); result.grid(row=1, column=0, columnspan=6, sticky='w')
+            saved = self.label(manual, '已存曝光：无'); saved.grid(row=2, column=0, columnspan=6, sticky='w')
+            save_reason = self.label(manual, ''); save_reason.grid(row=3, column=0, columnspan=6, sticky='w')
             pic = self.picture(body, 'baseline_'+name); pic.grid_configure(row=2)
             info = tk.Label(body, text='预览关闭', bg=WHITE, fg=MUTED, font=self.theme.large, anchor='w', justify='left'); info.grid(row=3, column=0, sticky='ew')
             hint = self.label(body, '', fg=COLORS['red']); hint.grid(row=4, column=0, sticky='ew')
             detail = self.label(body, '', justify='left'); detail.grid(row=5, column=0, sticky='ew')
             graph = tk.Canvas(body, height=24, bg=WHITE, highlightthickness=0); graph.grid(row=6, column=0, sticky='ew')
             body.bind('<Configure>', lambda event, info=info, hint=hint, detail=detail: (info.config(wraplength=max(100, event.width-12)), hint.config(wraplength=max(100, event.width-12)), detail.config(wraplength=max(100, event.width-12))))
-            self.baseline_views[name] = dict(path=path, toggle=toggle, exposure=exposure, reset=reset, reason=reason, info=info, hint=hint, detail=detail, graph=graph, picture=pic, exposure_entry=entry, exposure_set=set_exposure, exposure_restore=restore, exposure_limits=limits, exposure_result=result)
+            self.baseline_views[name] = dict(path=path, toggle=toggle, exposure=exposure, reset=reset, reason=reason, info=info, hint=hint, detail=detail, graph=graph, picture=pic, exposure_entry=entry, exposure_set=set_exposure, exposure_restore=restore, exposure_save=save, exposure_saved=saved, exposure_save_reason=save_reason, exposure_limits=limits, exposure_result=result)
         results = self.card(self.baseline, '本次结果', 2, 0)
         self.baseline_results_card = results.master
         self.baseline_result = tk.Label(results, text='等待测量', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.table, width=1, wraplength=600)
@@ -787,6 +790,22 @@ class App:
         if seq:
             self.baseline_exposure_pending[name] = (seq, time.monotonic())
             self.baseline_views[name]['exposure_result'].config(text='设置中…', fg=INK)
+
+    def baseline_save_exposure(self, name):
+        view = self.baseline_views[name]
+        current = view.get('current_exposure')
+        if not isinstance(current, (int, float)):
+            return
+        saved = view.get('saved_exposure') or {}
+        old = saved.get('exposure')
+        old_text = f'{old/10:.1f} ms' if type(old) is int else '无'
+        side = '正面' if name == 'front' else '侧面'
+        if not messagebox.askyesno('设为实际曝光', f'将{side}相机曝光 {current:.1f} ms 设为实际参数（覆盖已存的 {old_text}）？', parent=self.root):
+            return
+        seq = self.baseline_command('tooltip_exposure_save', {'camera': name, 'expected_exposure': round(current * 10)})
+        if seq:
+            self.baseline_exposure_pending[name] = (seq, time.monotonic())
+            view['exposure_result'].config(text='保存中…', fg=INK)
 
     def update_baseline(self, main, supervisor=None):
         data = main.get('baseline') or {}; phase = data.get('phase') or 'idle'
@@ -879,6 +898,18 @@ class App:
             pending = name in self.baseline_exposure_pending
             for key in ('exposure_entry', 'exposure_set', 'exposure_restore'):
                 enable(widgets[key], on and may_prepare and valid_limits and not pending and not item.get('exposure_busy'))
+            saved = item.get('exposure_saved') or {}
+            widgets['saved_exposure'] = saved
+            saved_value = saved.get('exposure')
+            saved_text = f'{saved_value/10:.1f} ms　{saved.get("time") or "时间未知"}' if type(saved_value) is int else '无'
+            widgets['exposure_saved'].config(text='已存曝光：' + saved_text)
+            current = (live or {}).get('exposure_ms') if isinstance(live, dict) else None
+            if current is None:
+                current = item.get('exposure_ms')
+            widgets['current_exposure'] = current
+            save_reason = ('预览未打开' if not on else '曝光操作进行中' if item.get('exposure_busy') or pending else '当前曝光未读回' if not isinstance(current, (int, float)) else '当前不可操作' if not may_prepare else '')
+            enable(widgets['exposure_save'], not save_reason)
+            widgets['exposure_save_reason'].config(text='不可保存：' + save_reason if save_reason else '')
             def number(value): return f'{value:.2f}' if isinstance(value, (float,int)) else '—'
             delay_warning = False
             if display['failed']:

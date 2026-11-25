@@ -61,7 +61,7 @@ class CommandReader:
         self.events.emit('tooloffset_command', seq=seq, command=name, params=params, accepted=accepted)
         if name == 'baseline_start' and not accepted:
             self.events.emit('baseline_state', message=rejection_message or '当前正在挑毛或标定，忽略开始请求')
-        if accepted and name in ('tooltip_exposure_set', 'tooltip_exposure_restore'):
+        if accepted and name in ('tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save'):
             params = {**params, '_seq': seq}
         return (name, params) if accepted else None
 
@@ -76,7 +76,7 @@ def startup_reader(root, events):
         pass
     try:
         prior = json.loads(command_path(root).read_text(encoding='utf-8'))
-        if prior.get('command') in {'baseline_start', 'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap'} and type(prior.get('seq')) is int:
+        if prior.get('command') in {'baseline_start', 'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap'} and type(prior.get('seq')) is int:
             return CommandReader(root, events, last_seq=prior['seq']), False
     except (OSError, ValueError, TypeError, AttributeError):
         pass
