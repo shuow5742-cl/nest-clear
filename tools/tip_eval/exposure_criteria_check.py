@@ -6,6 +6,7 @@ Inputs are read-only; the CSV, failure overlays, and report go under --out.
 """
 import argparse
 import csv
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import cv2
@@ -15,10 +16,10 @@ from nest_clear.tooltip.exposure_scan import _frame_metrics, absolute_criteria
 from nest_clear.tooltip.factory import make_tip_detector
 
 DATA = Path('/home/shuow/nest-clear-field/20261124_tipsweep')
-OUT = Path('/home/shuow/nest-clear-field/20261125_t79eval/exposure_check')
+OUT = Path('/home/shuow/nest-clear-field/20261125_t79eval/exposure_check_t81_2')
 REPORT = OUT.parent / 'exposure_replay.md'
 NAMES = ('recognized', 'prongs', 'contrast', 'whiteness')
-LABELS = {'recognized': '精定位且非畸变', 'prongs': '齿数完整', 'contrast': '对比度', 'whiteness': '工具不发白'}
+LABELS = {'recognized': '精定位且非畸变', 'prongs': '可见齿数 ≥2', 'contrast': '对比度', 'whiteness': '工具不发白'}
 
 
 def evaluate(job):
@@ -38,11 +39,10 @@ def evaluate(job):
     metrics = _frame_metrics(image, recording)
     result = recording.result
     rms = getattr(result, 'axis_rms_px', None)
-    expected = 3 if camera == 'front' else 2
-    gates = absolute_criteria(metrics, expected, config['contrast_min'], config['saturation_max'])
+    gates = absolute_criteria(metrics, 2, config['contrast_min'], config['saturation_max'])
     row = {'frame': str(path.relative_to(root)), 'camera': camera,
            'axis_rms_px': rms, 'excluded': rms is not None and rms > 2,
-           'diagnostic': metrics['diagnostic'], 'expected_prongs': expected,
+           'diagnostic': metrics['diagnostic'], 'expected_prongs': 2,
            'prongs_value': metrics['prongs'], 'contrast_value': metrics['contrast'],
            'whiteness_value': metrics['tool_whiteness'], **gates}
     return row
@@ -74,19 +74,47 @@ def write_overlay(path, row, config, destination):
     cv2.imwrite(str(destination), canvas)
 
 
+def group_consistency(rows):
+    """Use only complete five-frame groups; retain incomplete groups separately."""
+    grouped = defaultdict(list)
+    for row in rows:
+        key = (str(Path(row['frame']).parent), row['camera'])
+        if not row['excluded']:
+            grouped[key].append(row)
+        else:
+            grouped[key]  # Show groups with no eligible frames too.
+    result = []
+    for (group, camera), frames in sorted(grouped.items()):
+        counts = [r['prongs_value'] for r in frames]
+        complete = len(counts) == 5
+        result.append({'group': group, 'camera': camera, 'eligible_frames': len(counts),
+                       'counts': counts, 'complete': complete,
+                       'consistent': len(set(counts)) == 1 if complete else None})
+    return result
+
+
 def summarize(rows, out, report, config):
     eligible = [r for r in rows if not r['excluded']]
-    lines = ['## T81 绝对判定实拍校核', '',
+    groups = group_consistency(rows)
+    complete = [g for g in groups if g['complete']]
+    consistent = [g for g in complete if g['consistent']]
+    lines = ['## T81 相对齿数实拍校核', '',
              f"范围：device 和 device2 全部 {len(rows)} 帧；按 axis_rms > 2 px 排除 {len(rows)-len(eligible)} 帧，剩余 {len(eligible)} 帧。axis_rms 缺失帧保留并按实际检测结果计入。", '',
              f"对比度门限 {config['contrast_min']:g}；工具灰度 ≥230 的比例上限 {config['saturation_max']:.1%}。各项单独计数，同一帧可出现在多项失败清单。", '',
-             '修正后同时检查末端 35 像素内的灰度暗谷：局部突显度至少 15 灰度、暗于背景至少 40 灰度，连续 5 行的暗谷数均达到该数；算法不追踪跨行的单个暗谷。取灰度剖面与二值连通段两者较大值。该补充针对实拍中三齿被二值阈值粘连的情况，仍要求正面 3、侧面 2 齿；合成缺一齿和加噪回归测试用于验证不会只因一条轮廓就通过。', '',
+             '逐帧检查可见齿数至少为 2；扫描时每档取三帧齿数中位数，并与已识别档的最大齿数比较。正面两齿投影可由转角遮挡造成，不能按固定三齿拒绝。为降低实拍侧面轮廓偶发分裂造成的计数跳变，轮廓段及灰度暗谷均要求连续 10 行达到相同最低计数；灰度暗谷计数不追踪跨行的单个暗谷。', '',
              '| 判定 | 通过/总数 | 通过率 |', '|---|---:|---:|']
     for name in NAMES:
         passed = sum(bool(r[name]) for r in eligible)
         pct = 100 * passed / len(eligible) if eligible else 0
         lines.append(f'| {LABELS[name]} | {passed}/{len(eligible)} | {pct:.2f}% |')
-    if len(rows) == 420 and any(r['frame'] == 'device/set_005/front_1.png' for r in rows):
-        lines += ['', '本批修正前二值连通段齿数通过 315/412（76.46%）。正面 device/set_005 至 set_008 共 20 帧只有两个可分离的齿投影，可能存在遮挡，也不能排除缺齿；正面单独的齿数通过率低于 95%。不能仅凭该图像把两个投影判为三个，现场仍可能出现没有合格曝光档，需重新摆放或增加独立视角确认。']
+    pct = 100 * len(consistent) / len(complete) if complete else 0
+    lines += ['', '### 同组五帧齿数一致性', '',
+              f'完整五帧组：{len(consistent)}/{len(complete)} 一致（{pct:.2f}%）；{len(groups)-len(complete)} 组因排除畸变帧或帧数不足未计入一致率。', '',
+              '| 组 | 相机 | 纳入帧数 | 齿数 | 结果 |', '|---|---|---:|---|---|']
+    for group in groups:
+        if not group['complete'] or not group['consistent']:
+            label = '不完整' if not group['complete'] else '不一致'
+            lines.append(f"| {group['group']} | {group['camera']} | {group['eligible_frames']} | {group['counts']} | {label} |")
     lines += ['', '### 按相机分开统计', '', '| 相机 | 判定 | 通过/总数 | 通过率 |', '|---|---|---:|---:|']
     for camera in ('front', 'side'):
         subset = [r for r in eligible if r['camera'] == camera]
@@ -109,11 +137,11 @@ def summarize(rows, out, report, config):
     low = [r for r in eligible if '末端对比度不足' in r['diagnostic']]
     lines += ['### 检测器报告末端对比度不足', '',
               ('、'.join(f"{r['frame']}（{r['contrast_value']:.1f}）" for r in low) if low else '无。'), '',
-              f'逐帧全部指标和排除标记见 [{out.name}/frames.csv]({out.name}/frames.csv)；失败样例叠加图见 `{out.name}/overlays/`。',
-              '齿数来自末端轮廓近似，不能替代显微镜或逐齿标注；以上为固定合适曝光下的绝对门限校核，不是分档选档验证。', '']
+              f'逐帧指标及排除标记见 [{out.name}/frames.csv]({out.name}/frames.csv)，各组齿数见 [{out.name}/groups.csv]({out.name}/groups.csv)；失败样例叠加图见 `{out.name}/overlays/`。',
+              '齿数来自末端轮廓近似，不能替代显微镜或逐齿标注；以上是固定合适曝光下的逐帧及组内一致性校核，不是跨曝光选档验证。', '']
     previous = report.read_text(encoding='utf-8') if report.exists() else '# 曝光回放\n'
-    marker = '## T81 绝对判定实拍校核'
-    previous = previous.split(marker)[0].rstrip()
+    for marker in ('## T81 绝对判定实拍校核', '## T81 相对齿数实拍校核'):
+        previous = previous.split(marker)[0].rstrip()
     report.write_text(previous + '\n\n' + '\n'.join(lines), encoding='utf-8')
     return eligible
 
@@ -137,6 +165,9 @@ def main():
         rows = list(pool.map(evaluate, jobs, chunksize=2))
     with (args.out / 'frames.csv').open('w', encoding='utf-8', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=rows[0].keys()); writer.writeheader(); writer.writerows(rows)
+    groups = group_consistency(rows)
+    with (args.out / 'groups.csv').open('w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=groups[0].keys()); writer.writeheader(); writer.writerows(groups)
     eligible = summarize(rows, args.out, args.report, config)
     overlay_dir = args.out / 'overlays'; overlay_dir.mkdir(exist_ok=True)
     failures = [r for r in eligible if not all(r[name] for name in NAMES)]
@@ -158,6 +189,9 @@ def main():
     for camera in ('front', 'side'):
         subset = [r for r in eligible if r['camera'] == camera]
         print(camera, ', '.join(f'{name}={sum(bool(r[name]) for r in subset)}/{len(subset)}' for name in NAMES))
+    complete = [g for g in groups if g['complete']]
+    passed = sum(g['consistent'] for g in complete)
+    print(f'five-frame consistency: {passed}/{len(complete)} = {100*passed/len(complete) if complete else 0:.2f}%; incomplete={len(groups)-len(complete)}')
     print('report:', args.report)
 
 

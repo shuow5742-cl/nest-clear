@@ -941,7 +941,8 @@ class App:
             widgets['scan_status'].config(text=item.get('exposure_progress') or scan_reason)
             scan_rows = item.get('exposure_scan_rows') or []
             if scan_rows:
-                lines = ['曝光 ms　识别　齿数　对比度　清晰度%　背景　背景饱和/工具发白　合格']
+                ref = scan_rows[0].get('prong_ref', '—')
+                lines = [f'曝光 ms　识别　齿数（参考 {ref}）　对比度　清晰度%　背景　背景饱和/工具发白　合格']
                 for row in scan_rows:
                     lines.append(f"{row.get('exposure', 0)/10:g}　{'是' if row.get('recognized') else '否'}　{row.get('prongs', 0)}　{row.get('contrast', 0):.1f}　{row.get('sharpness_percent', 0):.0f}%　{row.get('background', 0):.0f}　{row.get('saturated_fraction', 0):.1%}/{row.get('tool_whiteness', 0):.1%}　{'是' if row.get('qualified') else '否'}{' ★' if row.get('selected') else ''}　{'、'.join(row.get('reasons') or [])}")
                 widgets['scan_table'].config(text='\n'.join(lines))

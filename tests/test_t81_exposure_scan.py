@@ -113,7 +113,8 @@ def test_owner_hosts_execute_scan_and_reply(tmp_path, monkeypatch, host_type, ha
         # Reply is sent at completion; wait for record publication too.
         if not paths:
             paths = wait_for(lambda: list(tmp_path.glob('*/tooltip_exposure/*_front.json')))
-        assert json.loads(paths[0].read_text())['success']
+        record = json.loads(paths[0].read_text())
+        assert record['success'] and record['prong_ref'] == 3
         assert any(event == 'tooltip_exposure_scan' and data['success'] for event, data in events_seen)
         assert any('exposure_progress' in data.get('preview', {}).get('front', {}) for event, data in events_seen if event == 'baseline_state')
         wait_for(lambda: prep.state['front'].get('detection_status') == '精定位')
@@ -178,3 +179,73 @@ def test_real_detector_rejects_single_missing_tooth_even_with_small_noise():
     image = np.clip(image.astype(np.int16) + noise, 0, 255).astype(np.uint8)
     metrics = _frame_metrics(image, TridentTipDetector())
     assert metrics['prongs'] == 2
+
+
+def test_occluded_front_with_two_visible_teeth_can_select():
+    class OccludedCamera(Camera):
+        def capture(self):
+            image = scene()
+            # A third tooth is obscured in this view at every exposure.
+            image[390:460, 282:296] = 255
+            return np.clip(image.astype(float) * (.8 if self.exposure == 1 else 1.), 0, 255).astype(np.uint8)
+    camera = OccludedCamera()
+    result = scan_exposure(camera, TridentTipDetector(), 3, levels=3, contrast_min=40, saturation_max=.05)
+    assert result['prong_ref'] == 2
+    assert all(row['prongs'] == 2 for row in result['rows'] if row['recognized'])
+    assert result['rows'][1]['qualified'] and result['exposure'] == 2
+
+
+def test_long_exposure_loses_a_tooth_relative_to_reference():
+    class LostToothCamera(Camera):
+        def capture(self):
+            image = scene()
+            if self.exposure == 3:
+                image[390:460, 282:296] = 255
+            return image
+    camera = LostToothCamera()
+    result = scan_exposure(camera, TridentTipDetector(), levels=3, contrast_min=40, saturation_max=.05)
+    row = result['rows'][2]
+    assert result['prong_ref'] == 3 and row['prongs'] == 2
+    assert not row['qualified'] and any('细齿被吃掉/未分辨' in reason for reason in row['reasons'])
+
+
+def test_fewer_than_two_visible_teeth_fails_and_restores_exposure():
+    class OneToothCamera(Camera):
+        def capture(self):
+            image = scene()
+            image[390:460, 282:296] = 255
+            image[390:460, 304:318] = 255
+            return image
+    camera = OneToothCamera()
+    with pytest.raises(ValueError, match='未识别到足够的齿，检查工具或视角') as exc:
+        scan_exposure(camera, TridentTipDetector(), levels=3, contrast_min=40, saturation_max=.05)
+    assert camera.exposure == 8
+    assert all(row['prong_ref'] == 1 and not row['qualified'] for row in exc.value.rows)
+
+
+def test_count_is_median_and_reference_uses_only_recognized_levels(monkeypatch):
+    from nest_clear.tooltip import exposure_scan
+    class Frames(Camera):
+        def __init__(self): super().__init__(); self.index = 0
+        def set_exposure(self, value): self.exposure = value; self.index = 0
+        def capture(self):
+            self.index += 1
+            return self.exposure, self.index
+    def metrics(frame, detector):
+        level, index = frame
+        counts = {1: [2, 3, 2], 2: [2, 2, 2], 3: [5, 5, 5]}[level]
+        return {'recognized': level != 3, 'prongs': counts[index-1], 'contrast':100., 'sharpness':100.,
+                'background':float(level*50), 'p99':200., 'background_saturation':0., 'tool_whiteness':0.}
+    monkeypatch.setattr(exposure_scan, '_frame_metrics', metrics)
+    result = scan_exposure(Frames(), None, levels=3, discard_per_level=0, contrast_min=40, saturation_max=.05)
+    assert result['prong_ref'] == 2 and result['rows'][0]['prongs'] == 2
+    assert result['exposure'] == 2
+
+
+def test_short_contour_split_does_not_add_a_tooth():
+    from nest_clear.tooltip.exposure_scan import _prongs
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[0:85, 20:25] = 1
+    mask[0:85, 40:45] = 1
+    mask[60:68, 60:65] = 1  # An eight-row spurious third segment.
+    assert _prongs(mask) == 2

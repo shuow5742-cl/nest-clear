@@ -393,7 +393,7 @@ class Preparation:
                                     with self.lock:
                                         self.state[name]['exposure_progress'] = f'正在测曝光 第{k}/{total}档'
                                     self.publish()
-                                result = scan_exposure(ExposureCamera(self), detector, 3 if name == 'front' else 2,
+                                result = scan_exposure(ExposureCamera(self), detector,
                                     levels=scan_options.get('max_exposure', 10), contrast_min=scan_options.get('contrast_min', 40.),
                                     sharpness_ratio=scan_options.get('sharpness_ratio', .9), saturation_max=scan_options.get('saturation_max', .05), progress=progress)
                                 rows = result['rows']
@@ -427,6 +427,7 @@ class Preparation:
                         if method == 'quality_scan':
                             record = {'camera': name, 'device': device, 'time': self._clock().isoformat(), 'rows': rows,
                                       'exposure': result.get('exposure') if result else None,
+                                      'prong_ref': rows[0].get('prong_ref') if rows else None,
                                       'reason': scan_error or (result.get('reason') if result else None), 'success': result is not None and scan_error is None}
                             try:
                                 now = self._clock()

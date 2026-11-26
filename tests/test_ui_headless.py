@@ -324,10 +324,11 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         ui.update_baseline(low_main)
         view = ui.baseline_views['front']
         low_main['baseline']['preview']['front']['exposure_progress'] = '正在测曝光 第2/4档'
-        low_main['baseline']['preview']['front']['exposure_scan_rows'] = [dict(exposure=3, recognized=True, prongs=3, contrast=70., sharpness_percent=100., background=230., saturated_fraction=.1, tool_whiteness=.01, qualified=True, selected=True, reasons=[])]
+        low_main['baseline']['preview']['front']['exposure_scan_rows'] = [dict(exposure=3, recognized=True, prongs=2, prong_ref=2, contrast=70., sharpness_percent=100., background=230., saturated_fraction=.1, tool_whiteness=.01, qualified=True, selected=True, reasons=[])]
         ui.update_baseline(low_main)
         assert '第2/4档' in view['scan_status'].options['text']
         assert '0.3' in view['scan_table'].options['text'] and '★' in view['scan_table'].options['text']
+        assert '齿数（参考 2）' in view['scan_table'].options['text']
         assert '3.0 ms' in view['exposure_saved'].options['text']
         assert view['exposure_save'].options['state'] == 'normal'
         with monkeypatch.context() as scoped:
