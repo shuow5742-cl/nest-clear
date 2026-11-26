@@ -72,9 +72,12 @@ def baseline_window(width, height):
             raise
         root = app.root
         try:
-            root.state('normal')
+            # The test sizes refer to the client area, independent of desktop work-area limits.
+            root.withdraw()
+            root.overrideredirect(True)
             root.attributes('-zoomed', False)
             root.geometry(f'{width}x{height}+0+0')
+            root.deiconify()
             app.update_baseline(data)
             root.update_idletasks()
             pictures = [view['picture'] for view in app.baseline_views.values()]
