@@ -2,6 +2,7 @@
 import math
 import cv2
 import numpy as np
+from scipy.signal import find_peaks
 
 
 class ExposureScanError(ValueError):
@@ -29,6 +30,34 @@ def _prongs(mask):
         groups = np.split(indices, np.flatnonzero(np.diff(indices) > 1) + 1)
         counts.append(sum(len(group) >= 2 for group in groups))
     # Ignore single-row fragments at a cut or a threshold transition.
+    return max((min(counts[i:i + 5]) for i in range(len(counts) - 4)), default=0)
+
+
+def _profile_prongs(gray, mask):
+    """Count persistent dark prong profiles near the distal silhouette end.
+
+    At the accepted 0.2/0.3 ms, partial-volume pixels can merge the three
+    prongs into two binary components even while their grey-level valleys are
+    distinct. Count the dark valleys with 15-grey-level local prominence on
+    each of five consecutive rows in the last 35 pixels and take the minimum.
+    This rejects isolated texture; it does not track individual valleys across rows.
+    """
+    if mask is None or not np.any(mask):
+        return 0
+    ys, xs = np.nonzero(mask)
+    end = int(ys.max())
+    # Only the terminal cross-section, with background on both sides.
+    xlo = max(0, int(xs[ys >= end - 35].min()) - 12)
+    xhi = min(gray.shape[1], int(xs[ys >= end - 35].max()) + 13)
+    counts = []
+    for y in range(max(0, end - 35), end + 1):
+        row = gray[y, xlo:xhi].astype(np.float32)
+        if len(row) < 5:
+            counts.append(0); continue
+        row = cv2.GaussianBlur(row.reshape(1, -1), (3, 1), 0).ravel()
+        background = float(np.percentile(row, 90))
+        peaks, _ = find_peaks(-row, prominence=15, distance=3)
+        counts.append(int(np.count_nonzero(row[peaks] <= background - 40)))
     return max((min(counts[i:i + 5]) for i in range(len(counts) - 4)), default=0)
 
 
@@ -60,13 +89,21 @@ def _frame_metrics(frame, detector):
     sharp = (getattr(det, 'sharpness', None) or {}).get('band_gradient_p995')
     contrast = getattr(det, 'tip_contrast', None)
     return {'recognized': getattr(det, 'status', '') == '精定位' and '畸变' not in (getattr(det, 'diagnostic', '') or ''),
-            'diagnostic': getattr(det, 'diagnostic', '') or '', 'prongs': _prongs(mask),
+            'diagnostic': getattr(det, 'diagnostic', '') or '', 'prongs': max(_prongs(mask), _profile_prongs(gray, mask)),
             'contrast': float(contrast) if contrast is not None and math.isfinite(float(contrast)) else 0.,
             'sharpness': float(sharp) if sharp is not None and math.isfinite(float(sharp)) else 0.,
             'background': float(np.median(background)) if background.size else 0.,
             'p99': float(np.percentile(background, 99)) if background.size else 0.,
             'background_saturation': float(np.mean(background >= 250)) if background.size else 0.,
             'tool_whiteness': float(np.mean(tool >= 230)) if tool.size else 1.}
+
+
+def absolute_criteria(metrics, expected_prongs, contrast_min, saturation_max):
+    """The absolute gates shared by scanning and offline evaluation."""
+    return {'recognized': metrics['recognized'],
+            'prongs': metrics['prongs'] >= expected_prongs,
+            'contrast': metrics['contrast'] >= contrast_min,
+            'whiteness': metrics['tool_whiteness'] <= saturation_max}
 
 
 def scan_exposure(camera, detector, expected_prongs, *, levels, frames_per_level=3,
@@ -101,12 +138,13 @@ def scan_exposure(camera, detector, expected_prongs, *, levels, frames_per_level
             if progress: progress(k, len(values), row)
         peak = max((r['sharpness'] for r in rows if r['recognized']), default=0.)
         for row in rows:
+            gates = absolute_criteria(row, expected_prongs, contrast_min, saturation_max)
             reasons = []
-            if not row['recognized']: reasons.append('未全部精定位或畸变')
-            if row['prongs'] < expected_prongs: reasons.append(f'齿数不足（{row["prongs"]}/{expected_prongs}）')
-            if row['contrast'] < contrast_min: reasons.append('对比度不足')
+            if not gates['recognized']: reasons.append('未全部精定位或畸变')
+            if not gates['prongs']: reasons.append(f'齿数不足（{row["prongs"]}/{expected_prongs}）')
+            if not gates['contrast']: reasons.append('对比度不足')
             if not peak or row['sharpness'] < peak * sharpness_ratio: reasons.append('清晰度不足')
-            if row['tool_whiteness'] > saturation_max: reasons.append('工具发白')
+            if not gates['whiteness']: reasons.append('工具发白')
             row.update(sharpness_percent=100 * row['sharpness'] / peak if peak else 0., reasons=reasons, qualified=not reasons, selected=False)
         eligible = [r for r in rows if r['qualified']]
         if not eligible:

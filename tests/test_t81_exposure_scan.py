@@ -102,7 +102,7 @@ def test_owner_hosts_execute_scan_and_reply(tmp_path, monkeypatch, host_type, ha
         prep.command('tooltip_preview', {'camera': 'front', 'on': True})
         if not has_saved:
             wait_for(lambda: prep.state['front'].get('exposure_saved'), timeout=15)
-            assert any(event == 'tooltip_exposure_scan' and data['success'] for event, data in events_seen)
+            wait_for(lambda: any(event == 'tooltip_exposure_scan' and data['success'] for event, data in events_seen), timeout=15)
         wait_for(lambda: prep.state['front'].get('detection_status') == '精定位')
         prep.command('tooltip_exposure_retest', {'camera': 'front', '_seq': 51})
         reply = wait_for(lambda: (x if (x := prep.state['front'].get('exposure_result', {})).get('seq') == 51 else None), timeout=15)
@@ -117,8 +117,9 @@ def test_owner_hosts_execute_scan_and_reply(tmp_path, monkeypatch, host_type, ha
         assert any(event == 'tooltip_exposure_scan' and data['success'] for event, data in events_seen)
         assert any('exposure_progress' in data.get('preview', {}).get('front', {}) for event, data in events_seen if event == 'baseline_state')
         wait_for(lambda: prep.state['front'].get('detection_status') == '精定位')
-        camera.fail = True
-        prep.command('tooltip_exposure_retest', {'camera': 'front', '_seq': 52})
+        with prep.lock:
+            camera.fail = True
+            prep.command('tooltip_exposure_retest', {'camera': 'front', '_seq': 52})
         failed = wait_for(lambda: (x if (x := prep.state['front'].get('exposure_result', {})).get('seq') == 52 else None), timeout=15)
         assert failed['state'] == 'error' and '没有合格曝光档' in failed['message']
         assert camera.exposure == 3
@@ -150,3 +151,30 @@ def test_whiteness_in_segmentation_hole_is_measured():
             return SimpleNamespace(tool_mask=mask, status='精定位', diagnostic='', tip_contrast=100,
                                    sharpness={'band_gradient_p995': 100})
     assert _frame_metrics(image, Detector())['tool_whiteness'] > .05
+
+
+def test_profile_counts_merged_gray_teeth_but_rejects_missing_tooth():
+    from nest_clear.tooltip.exposure_scan import _profile_prongs, _prongs
+    # A partially illuminated gap is included in the binary tool mask, but
+    # still separates adjacent dark teeth in the grayscale image.
+    gray = np.full((100, 100), 230, dtype=np.uint8)
+    mask = np.zeros_like(gray)
+    mask[10:81, 35:66] = 1
+    gray[10:81, 35:66] = 100
+    for x in (39, 50, 61):
+        gray[50:81, x-2:x+3] = 25
+    assert _prongs(mask) == 1
+    assert type(_profile_prongs(gray, mask)) is int and _profile_prongs(gray, mask) == 3
+    gray[50:81, 48:53] = 100
+    assert _profile_prongs(gray, mask) == 2
+
+
+def test_real_detector_rejects_single_missing_tooth_even_with_small_noise():
+    from nest_clear.tooltip.exposure_scan import _frame_metrics
+    image = scene()
+    image[402:460, 285:295] = 255
+    rng = np.random.default_rng(81)
+    noise = rng.integers(-3, 4, image.shape)
+    image = np.clip(image.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+    metrics = _frame_metrics(image, TridentTipDetector())
+    assert metrics['prongs'] == 2
