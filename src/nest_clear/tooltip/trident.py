@@ -4,6 +4,9 @@ from time import perf_counter
 import cv2
 import numpy as np
 
+DETECTOR_VERSION = "trident-2"
+
+
 @dataclass(frozen=True)
 class TridentConfig:
     x_range: tuple[int, int] | None = None
@@ -28,6 +31,7 @@ class TridentResult:
     sampling_rows: tuple = ()
     axis_rms_px: float | None = None
     tip_contrast: float | None = None
+    edge_fit: dict | None = None
 
     @property
     def coarse(self): return self.status != '精定位'
@@ -43,6 +47,51 @@ class TridentResult:
 
     @property
     def confidence(self): return 1.0 if self.status == '精定位' else 0.0
+
+def _outer_edge(profile):
+    """Find the white-to-tool transition in a profile ordered outside-in."""
+    # Samples 13–20 px outside the connected-component edge clear both the
+    # blurred transition and a reflective facet omitted by the component.
+    back = float(np.median(profile[:8]))
+    # Require a sustained departure from the local white level. Three-pixel
+    # support suppresses single-pixel noise while retaining a bright facet.
+    deficit = back - profile
+    support = (deficit[:-2] + deficit[1:-1] + deficit[2:]) / 3
+    candidates = np.flatnonzero(support[8:] >= max(10, .05 * back))
+    if not len(candidates):
+        return None
+    seed = int(candidates[0]) + 8
+    # Estimate the tool platform close to the transition so brightness on the
+    # opposite facet cannot pull the half-height crossing into the shaft.
+    inner = profile[seed+3:seed+6]
+    if len(inner) < 3:
+        return None
+    body = float(np.median(inner))
+    contrast = back - body
+    if contrast < 20:
+        return None
+    start, stop = max(0, seed-5), min(len(profile)-1, seed+5)
+    vals = profile[start:stop+1]
+
+    def cross(fraction):
+        level = body + fraction * contrast
+        indices = np.flatnonzero((vals[:-1] > level) & (vals[1:] <= level))
+        if not len(indices):
+            return None
+        j = indices[np.argmin(abs(indices+start-seed))]
+        return float(start+j+(level-vals[j])/(vals[j+1]-vals[j]))
+
+    # A fractional drop from local white is less sensitive to the changing
+    # intensity of a reflective facet. Keep the 10–90% width measured against
+    # the local tool and background levels for the sharpness diagnostic.
+    center = cross(1 - .06*back/contrast)
+    dark, bright = cross(.1), cross(.9)
+    if center is None:
+        return None
+    width = abs(dark-bright) if dark is not None and bright is not None else None
+    gradient = float(np.max(-np.diff(vals))/contrast)
+    return center, width, gradient, body, back
+
 
 class TridentTipDetector:
     def __init__(self, config=None):
@@ -77,47 +126,67 @@ class TridentTipDetector:
         if len(choices)!=1: return done(diagnostic='局部阈值下工具连通域缺失或歧义')
         idx=choices[0]; comp=(labels==idx); yy,xx=np.nonzero(comp)
         end=int(yy.max()); width=hi-lo
-        # Robust straight section: exclude glue above and the final 80 pixels of prongs.
-        start_y=max(int(end*.40),end-300); stop_y=end-80
+        # Robust straight section: exclude glue above and the final 45 pixels near the prongs. The
+        # lower shaft increases leverage when extrapolating the axis to the tip.
+        start_y=max(int(end*.40),end-300); stop_y=end-45
         if stop_y-start_y<30: return done(diagnostic='针身直线段不足')
-        centers=[]; rows=[]; gradients=[]; widths=[]; esf_profiles=[]; band_gradients=[]
+        rows, edges, platforms, gradients, widths, esf_profiles, band_gradients = [], [], [], [], [], [], []
+        offsets_esf = np.arange(-6, 6.01, .25)
+        pixel_columns = np.arange(width)
+        previous_span = None
         for y in range(start_y, stop_y, 3):
-            xs=np.flatnonzero(comp[y]);
-            if len(xs)<5: continue
-            l,r=int(xs[0]),int(xs[-1]); row=crop[y].astype(float)
-            if l<8 or r+8>=width or r-l<8: continue
-            def edge(k, rising):
-                body=np.median(row[l+4:r-3]); back=np.median(row[k+3:k+9] if rising else row[k-8:k-2]); contrast=back-body
-                if contrast<20: return None
-                a=max(0,k-5); b=min(width,k+6); vals=row[a:b]; inds=np.arange(a,b)
-                def cross(level):
-                    v=vals-level; ix=np.flatnonzero((v[:-1]<=0)&(v[1:]>0) if rising else (v[:-1]>0)&(v[1:]<=0))
-                    if not len(ix): return None
-                    j=ix[np.argmin(abs(inds[ix]-k))]; return float(inds[j]+(level-vals[j])/(vals[j+1]-vals[j]))
-                c=cross(body+.5*contrast); c1=cross(body+.1*contrast); c9=cross(body+.9*contrast)
-                grad=np.max(np.abs(np.diff(vals)))/contrast
-                return c, abs(c9-c1) if c1 is not None and c9 is not None else None,grad,body,contrast
-            left=edge(l,False); right=edge(r,True)
-            if left is None or right is None or left[0] is None or right[0] is None: continue
-            centers.append((left[0]+right[0])/2+lo); rows.append(y)
-            gradients.extend([left[2],right[2]])
-            band_gradients.extend(np.abs(np.diff(row[max(0,l-5):min(width,r+6)])))
-            # Align each outer edge at its interpolated half-height. Positive
-            # distances point outwards; each row has its own body/background.
-            offsets_esf=np.arange(-6,6.01,.25)
-            for edge_info,sign in ((left,-1),(right,1)):
-                coordinates=edge_info[0]+sign*offsets_esf
-                if coordinates.min()>=0 and coordinates.max()<width-1:
-                    background=edge_info[3]+edge_info[4]
-                    inner=edge_info[0]-sign*np.arange(3.,7.,.5)
-                    local_body=float(np.median(np.interp(inner,np.arange(width),row)))
-                    if background-local_body>=20:
-                        esf_profiles.append((np.interp(coordinates,np.arange(width),row)-local_body)/(background-local_body))
-            widths.extend(z[1] for z in (left,right) if z[1] is not None)
-        if len(rows)<10: return done(diagnostic='有效针身边缘不足')
-        slope, intercept=np.polyfit(rows,centers,1); residual=np.asarray(centers)-(slope*np.asarray(rows)+intercept)
-        good=np.abs(residual-np.median(residual))<max(1.,3*np.median(np.abs(residual-np.median(residual))))
-        slope,intercept=np.polyfit(np.asarray(rows)[good],np.asarray(centers)[good],1)
+            xs = np.flatnonzero(comp[y])
+            if len(xs) < 9:
+                continue
+            l, r = int(xs[0]), int(xs[-1])
+            if y >= end-80 and previous_span is not None:
+                old_l, old_r = previous_span
+                # An abrupt loss of one side near the fork marks the end of
+                # the straight shaft. Translation moves both sides together.
+                cut = max(6, .2*(old_r-old_l))
+                if ((l-old_l >= cut and abs(r-old_r) <= 1)
+                        or (old_r-r >= cut and abs(l-old_l) <= 1)):
+                    break
+            previous_span = l, r
+            if l < 20 or r+20 >= width or r-l < 8:
+                continue
+            row = crop[y].astype(float)
+            left = _outer_edge(row[l-20:l+9])
+            right = _outer_edge(row[r-8:r+21][::-1])
+            if left is None or right is None:
+                continue
+            left_u, right_u = l-20+left[0], r+20-right[0]
+            rows.append(y)
+            edges.append((left_u + lo, right_u + lo))
+            platforms.append((left[3:], right[3:]))
+            for u, sign, info in ((left_u, -1, left), (right_u, 1, right)):
+                _, edge_width, gradient, body, background = info
+                gradients.append(gradient)
+                if edge_width is not None:
+                    widths.append(edge_width)
+                coordinates = u+sign*offsets_esf
+                if coordinates.min() >= 0 and coordinates.max() < width:
+                    esf_profiles.append((np.interp(coordinates, pixel_columns, row)-body)/(background-body))
+            band_gradients.extend(np.abs(np.diff(row[int(left_u)-5:int(right_u)+7])))
+        if len(rows) < 10:
+            return done(diagnostic='有效针身边缘不足')
+        edges = np.asarray(edges)
+        centers = edges.mean(axis=1)
+        # Keep only continuous pairs of edges within the straight shaft band.
+        # If many rows disagree, include them in RMS below to expose motion.
+        slope, intercept = np.polyfit(rows, edges, 1)
+        residual = edges - (np.asarray(rows)[:, None]*slope + intercept)
+        deviation = np.abs(residual - np.median(residual, axis=0))
+        good = np.all(deviation < np.maximum(1., 3*np.median(deviation, axis=0)), axis=1)
+        if np.count_nonzero(good) < 10:
+            return done(diagnostic='连续针身边缘不足')
+        edge_slopes, edge_intercepts = np.polyfit(np.asarray(rows)[good], edges[good], 1)
+        slope, intercept = float(edge_slopes.mean()), float(edge_intercepts.mean())
+        levels = np.median(np.asarray(platforms)[good], axis=0)
+        edge_fit = {side: {'tool_gray': float(body), 'background_gray': float(background),
+                           'slope_du_dv': float(edge_slope)}
+                    for side, (body, background), edge_slope
+                    in zip(('left', 'right'), levels, edge_slopes)}
         d=np.array([slope,1.]); d/=np.linalg.norm(d); origin=np.array([intercept+slope*np.mean(rows),np.mean(rows)])
         esf_width=None
         if len(esf_profiles)>=20:
@@ -169,7 +238,7 @@ class TridentTipDetector:
             tt=(yy-origin[1])/d[1]
             pt=origin+d*tt+normal*float(offsets[col])
             tips.append(tuple(pt)); tip_contrasts.append(float(contrast[j,col]))
-        if not tips: return done(diagnostic='针尖区域缺少可靠的轴向灰度穿越')
+        if not tips: return done(diagnostic='针尖区域缺少可靠的轴向灰度穿越', edge_fit=edge_fit)
         far_index=max(range(len(tips)),key=lambda i:np.dot(np.asarray(tips[i])-origin,d)); far=tips[far_index]; tip_contrast=tip_contrasts[far_index]; point=origin+np.dot(np.asarray(far)-origin,d)*d
         reasons=[]
         if axis_rms>self.config.max_distortion_axis_rms_px: reasons.append('工具在动或画面畸变')
@@ -180,7 +249,7 @@ class TridentTipDetector:
         status='粗定位' if reasons else '精定位'
         diagnostic='；'.join(reasons) if reasons else '单帧质量检查通过；尚未验证五帧一致性'
         mask=np.zeros_like(gray); mask[:,lo:hi]=comp.astype(np.uint8)
-        return done(point_uv=tuple(point),axis={'point':tuple(origin),'direction':tuple(d)},farthest_prong_uv=far,prong_tips=tuple(tips),status=status,diagnostic=diagnostic,tool_mask=mask,sharpness={'edge_width_px':float(np.median(widths)) if widths else None,'normalized_gradient':float(np.median(gradients)), 'esf_width_px':esf_width, 'band_gradient_p995':float(np.percentile(band_gradients,99.5)) if band_gradients else None},sampling_rows=tuple(rows),axis_rms_px=axis_rms,tip_contrast=tip_contrast)
+        return done(point_uv=tuple(point),axis={'point':tuple(origin),'direction':tuple(d)},farthest_prong_uv=far,prong_tips=tuple(tips),status=status,diagnostic=diagnostic,tool_mask=mask,sharpness={'edge_width_px':float(np.median(widths)) if widths else None,'normalized_gradient':float(np.median(gradients)), 'esf_width_px':esf_width, 'band_gradient_p995':float(np.percentile(band_gradients,99.5)) if band_gradients else None},sampling_rows=tuple(rows),axis_rms_px=axis_rms,tip_contrast=tip_contrast,edge_fit=edge_fit)
 
     def detect_sequence(self, images):
         """Evaluate five independent frames, retaining positions even on rejection."""

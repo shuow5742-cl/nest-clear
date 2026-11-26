@@ -80,3 +80,15 @@ def test_axis_rms_ignores_isolated_edge_artifacts():
         result = detector.detect(noisy)
         assert abs(result.axis_rms_px - reference.axis_rms_px) < .02
         assert np.linalg.norm(np.asarray(result.point_uv) - reference.point_uv) < .1
+
+
+def test_axis_uses_outer_edge_of_reflective_facet():
+    frame = scene()
+    frame[100:400, :][frame[100:400, :] > 100] = 250
+    frame[100:400, 301:316] = 195
+    result = TridentTipDetector().detect(frame)
+    assert result.focused
+    assert abs(result.point_uv[0] - 300) < .3
+    assert result.edge_fit['right']['background_gray'] == 250
+    assert result.edge_fit['right']['tool_gray'] == 195
+    assert abs(result.edge_fit['right']['slope_du_dv']) < .001
