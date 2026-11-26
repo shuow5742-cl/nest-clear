@@ -293,6 +293,31 @@ class CaptureTipFrames(CallWorker):
         return status
 
 
+def _check_tooltip_collision(ctx, bb, points, move_xyz=(0.0, 0.0, 0.0)):
+    """换针对刀前复核底部的标定尖并预测移动后竖直间隙（<1mm 回 999）。"""
+    ref_error = bb.read("tooltip_ref_error", None)
+    if ref_error:
+        fail(f"对刀标定尖不可识别：{ref_error}", "检查标定尖是否进入对刀相机视野及背光均匀性。")
+    ref_points = bb.read("tooltip_ref_points", None)
+    if not ref_points:
+        return
+    baseline = bb.read("tooltip_baseline", None)
+    jacobians = {view.name: view.jacobian for view in baseline.views} if baseline is not None else {}
+    align_cfg = ctx.config.tool_offset.get("align", {})
+    min_gap = float(align_cfg.get("min_gap_mm", 1.0))
+    fallback_um = float(align_cfg.get("fallback_um_per_px", 15.2))
+    from nest_clear.tooloffset.alignment import predict_collision_gap_mm
+
+    cur_gap, _ = predict_collision_gap_mm(points, ref_points, jacobians, (0.0, 0.0, 0.0), fallback_um_per_px=fallback_um)
+    pred_gap, _ = predict_collision_gap_mm(points, ref_points, jacobians, move_xyz, fallback_um_per_px=fallback_um)
+    gap = min(cur_gap, pred_gap)
+    if gap < min_gap:
+        live_session = bb.read("tooltip_session", None)
+        if isinstance(live_session, dict):
+            live_session["measurement_exception"] = True
+        fail(f"会碰到标定尖（预测竖直间隙 {gap:.3f} mm < {min_gap:g} mm）", "请抬高工具 Z 坐标或调整工具高度后重试。")
+
+
 class DetectTips(Instant):
     """Check all ten frames and pass camera medians to the solver."""
     def __init__(self, ctx: FlowContext) -> None:
@@ -306,6 +331,12 @@ class DetectTips(Instant):
         try:
             ds, measurement = measure_frames(images.frames, cfg.detection, cfg.frame_std_max_px,
                                              rms_max=2.0, capture_times=images.capture_times)
+            from nest_clear.tooloffset.ref_tip_side import measure_ref_tip_frames
+            _, ref_measurement = measure_ref_tip_frames(
+                images.frames,
+                self.ctx.config.tool_offset.get("ref_tip_side"),
+                std_max=cfg.frame_std_max_px,
+            )
         except Exception as exc:
             record_tip_attempt(self.ctx, bb, None, str(exc))
             bb.read('tooltip_session')['measurement_exception'] = True
@@ -314,6 +345,10 @@ class DetectTips(Instant):
             return  # Leave the capture retry and send the exception through the reply path.
         finally:
             images.frames.clear()  # The worker retains its response. Keep only the representative images.
+        ref_views = ref_measurement.get("views", {})
+        ref_points = {v: tuple(ref_views[v]["median_uv"]) for v in ("front", "side") if ref_views.get(v, {}).get("median_uv")} if not ref_measurement.get("rejected") else None
+        bb.write("tooltip_ref_points", ref_points, self.name)
+        bb.write("tooltip_ref_error", ref_measurement.get("reason") or None, self.name)
         reason = measurement['reason']
         record_tip_attempt(self.ctx, bb, measurement, reason or None)
         points, focus = {}, {}
@@ -541,6 +576,7 @@ class PrepareCalibrationReply(Instant):
             if session["defocus_hold_count"] >= 3:
                 fail("针尖在对准位置仍不清晰，镜头焦点与基准位置不一致", "检查对焦/针尖是否在景深内。")
         if aligned and focused:
+            _check_tooltip_collision(self.ctx, bb, bb.read("tooltip_points"), (0.0, 0.0, 0.0))
             session["ended"] = True
             func = 111 if tool == 1 else 121
             coordinates = {}
@@ -551,6 +587,7 @@ class PrepareCalibrationReply(Instant):
                 fail(f"对刀偏移超过最大次数 {session['iterations']}")
             xyz = tuple(float(a + d) for a, d in zip(bb.read("actual"), result.delta_xyz))
             guard_position(xyz, self.ctx.config.travel, f"对刀 Task_ID={bb.read('task_id')} 工具 {tool}")
+            _check_tooltip_collision(self.ctx, bb, bb.read("tooltip_points"), result.delta_xyz)
             func = 100 if tool == 1 else 110
             coordinates = {f"calibration{tool}_xyz": xyz}
             session.update(iterations=session["iterations"] + 1, offset=True, last_position=xyz)
@@ -715,6 +752,7 @@ class ConfirmCalibration(TreeNode):
         too_large = bool(np.any(np.abs(delta) > cfg.max_step_mm + 1e-9) or np.any(np.abs(target - baseline.p0) > cfg.max_total_mm + 1e-9))
         if not aligned and not too_large:
             guard_position(tuple(target), self.ctx.config.travel, f"对刀工具 {session['tool']}")
+        _check_tooltip_collision(self.ctx, bb, points, (0.0, 0.0, 0.0) if (aligned or too_large) else tuple(float(v) for v in delta))
         if too_large:
             message = '修正量过大，疑似识别错误，请手动点击或放弃'
         self.aligned, self.too_large, self.target, self.delta, self.stage = aligned, too_large, target, delta, stage

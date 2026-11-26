@@ -249,6 +249,7 @@ tool_offset:
     fallback_um_per_px: 15.2
     max_jacobian_rms_px: 2.0
     max_jacobian_condition: 300.0
+    frame_std_max_px: 0.3
 
 pick_accuracy:
   min_points_a: 5  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 9

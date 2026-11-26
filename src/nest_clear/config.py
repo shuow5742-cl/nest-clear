@@ -409,6 +409,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "fallback_um_per_px": 15.2,
             "max_jacobian_rms_px": 2.0,
             "max_jacobian_condition": 300.0,
+            "frame_std_max_px": 0.3,
         },
     }
     offset = _mapping({**offset_defaults, **new_offset_defaults, **root["tool_offset"]}, "tool_offset", list(offset_defaults) + list(new_offset_defaults))
@@ -477,7 +478,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     align_cfg = _mapping({**new_offset_defaults["align"], **(offset["align"] if isinstance(offset["align"], dict) else _fail("tool_offset.align", "应为映射"))}, "tool_offset.align", list(new_offset_defaults["align"]))
     if type(align_cfg["max_align_iterations"]) is not int or align_cfg["max_align_iterations"] < 1:
         _fail("tool_offset.align.max_align_iterations", "须为正整数")
-    for key in ("probe_step_xy_mm", "probe_step_z_mm", "align_tol_mm", "max_step_mm", "max_total_mm", "min_gap_mm", "consistency_tolerance_mm", "position_tolerance_mm", "fallback_um_per_px", "max_jacobian_rms_px", "max_jacobian_condition"):
+    for key in ("probe_step_xy_mm", "probe_step_z_mm", "align_tol_mm", "max_step_mm", "max_total_mm", "min_gap_mm", "consistency_tolerance_mm", "position_tolerance_mm", "fallback_um_per_px", "max_jacobian_rms_px", "max_jacobian_condition", "frame_std_max_px"):
         align_cfg[key] = _number(align_cfg[key], "tool_offset.align." + key, True)
     if align_cfg["probe_step_z_mm"] > 2.0:
         _fail("tool_offset.align.probe_step_z_mm", "Z 向探测步长不得超过 2.0 mm")

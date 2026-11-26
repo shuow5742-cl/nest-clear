@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 from autoweaver.motion_policy.world_board import WorldBoard
@@ -141,6 +142,7 @@ def test_five_frame_replies_keep_task_id(tmp_path, monkeypatch, reply, groups):
     plc = PlcWorker(Handshake(registers, contract, events=events))
     camera = CalibCameraWorker(config.tool_calibration.cameras)
     frame = scene()
+    cv2.fillPoly(frame, [np.array([[300, 540], [290, 599], [310, 599]], dtype=np.int32)], 25)
     blank = np.full_like(frame, 255)
     reads = {'front': [], 'side': []}
 

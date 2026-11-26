@@ -354,6 +354,9 @@ class Application:
         self.calibration = calibration
         self.camera.principal = (float(calibration.K[0][2]), float(calibration.K[1][2]))
 
+    def update_tools(self, tools):
+        self.config = replace(self.config, tools=tuple(tools))
+
     def mark(self, event: str, **fields: Any) -> None:
         """将父程序暂停变化接入事件与盘计时。"""
         self.events.emit(event, **fields)
@@ -391,7 +394,7 @@ class Application:
                         "BATCH-FAILED", f"一盘执行失败：{result}", "主程序", "查看前面的 PLC 或行为树错误。"
                     )
             self.handle = self.clock.submit(
-                build_batch(self.board, self.config, self.path, self.tracker, self.events, branches=self.branches, calibration=self.calibration, calibration_updated=self.update_calibration, calibration_path=self.calibration_path)
+                build_batch(self.board, self.config, self.path, self.tracker, self.events, branches=self.branches, calibration=self.calibration, calibration_updated=self.update_calibration, calibration_path=self.calibration_path, tools_updated=self.update_tools)
             )
         self.clock.tick_once()
 

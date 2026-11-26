@@ -78,6 +78,10 @@ def test_delayed_click_does_not_block_ticks_or_heartbeat(tmp_path, monkeypatch, 
     from nest_clear.tooloffset.commands import send
     monkeypatch.setattr(flow, '_click_process', partial(delayed_click, click_started=click_started, click_release=click_release))
     monkeypatch.setattr('nest_clear.baseline.runout.make_tip_detector', lambda cfg: PreciseDetector())
+    monkeypatch.setattr(
+        'nest_clear.tooloffset.ref_tip_side.measure_ref_tip_frames',
+        lambda frames, cfg, *, std_max=0.3: ({}, {'views': {'front': {'median_uv': [0., 500.]}, 'side': {'median_uv': [0., 500.]}}, 'rejected': False, 'reason': ''}),
+    )
     publish = flow.ConfirmCalibration.publish
     def auto_confirm(node, phase, message, **fields):
         publish(node, phase, message, **fields)

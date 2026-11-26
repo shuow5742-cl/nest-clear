@@ -108,7 +108,7 @@ class CheckToolID(Instant):
         else:
             session = bb.read("tooltip_session", None)
             expected = {Mode.TOOL_OFFSET: 1, Mode.CALIBRATING_1: 2, Mode.CALIBRATING_2: 2}.get(mode)
-            page = "tooloffset_state" if func == 90 or tool_id == 1 or mode == Mode.TOOL_OFFSET else "tooltip_state"
+            page = "tooltip_state" if mode in (Mode.CALIBRATING_1, Mode.CALIBRATING_2) else ("tooloffset_state" if func == 90 or tool_id == 1 or mode == Mode.TOOL_OFFSET else "tooltip_state")
             tool = session["tool"] if session else {100: 1, 110: 2}.get(func)
         if tool_id not in (1, 2):
             reason = f"40905={tool_id} 非法，必须为 1 或 2"

@@ -30,5 +30,6 @@ class FlowContext:
     camcal_save: Any = None
     calibration_updated: Any = None
     calibration_path: Any = None
+    tools_updated: Any = None
 
 

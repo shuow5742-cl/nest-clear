@@ -179,9 +179,140 @@ class ToolOffsetWorker(AsyncRequestWorker):
             'size': (w, h),
         }
 
+    def _execute_align_step(self, payload):
+        """在后台线程保存对刀原始图像、同时检测五帧工具尖与标定尖，并计算本轮对准/防撞结果。"""
+        from nest_clear.tooloffset.alignment import predict_collision_gap_mm, solve_view_delta
+        from nest_clear.tooloffset.ref_tip_side import measure_dual_tips, render_tooloffset_side_overlay
+
+        ctx, session = payload['context'], payload['session']
+        images = payload['images']
+        step_idx = int(payload['step_index'])
+        align_session = payload['align_session']
+        actual = tuple(float(v) for v in payload['actual'])
+        align_cfg = ctx.config.tool_offset['align']
+        ref_cfg = ctx.config.tool_offset['ref_tip_side']
+
+        raw_paths = {}
+        rep_images = {}
+        try:
+            for view in ('front', 'side'):
+                view_frames = list(images.frames.get(view, ()))
+                if not view_frames:
+                    view_frames = [images[view]]
+                rep_images[view] = view_frames[0]
+                raw_paths[view] = []
+                for f_idx, frame in enumerate(view_frames, 1):
+                    raw_rel = None
+                    if ctx.events.run_directory is not None:
+                        raw_file = (
+                            ctx.events.run_directory
+                            / 'tooloffset'
+                            / session['directory']
+                            / f'align_s{step_idx:02d}_{view}_f{f_idx}_raw.png'
+                        )
+                        raw_file.parent.mkdir(parents=True, exist_ok=True)
+                        if not cv2.imwrite(str(raw_file), frame):
+                            raise OSError(f'保存对刀原图失败：{raw_file}')
+                        raw_rel = str(raw_file.relative_to(ctx.events.directory))
+                    raw_paths[view].append(raw_rel)
+
+            dual = measure_dual_tips(
+                images.frames,
+                ctx.config.tool_calibration.detection,
+                ref_cfg,
+                std_max=float(align_cfg.get('frame_std_max_px', 0.3)),
+                capture_times=images.capture_times,
+            )
+        finally:
+            images.frames.clear()
+
+        decision = None
+        if dual['ok']:
+            decision = align_session.step(actual, dual['tool_points'], dual['ref_points'])
+
+        ovl_paths = {}
+        per_view_delta = {}
+        per_view_gap = {}
+        jacs = align_session.jacobians
+        for view in ('front', 'side'):
+            t_uv = dual['tool_points'].get(view)
+            r_uv = dual['ref_points'].get(view)
+            z_dir = None
+            delta_v = None
+            gap_v = None
+            if view in jacs and t_uv is not None and r_uv is not None:
+                J = jacs[view]
+                z_dir = (float(J[0, 2]), float(J[1, 2]))
+                xy_col = 0 if view == 'front' else 1
+                try:
+                    dv, _, gv = solve_view_delta(t_uv, r_uv, J[:, xy_col], J[:, 2])
+                    delta_v, gap_v = dv, gv
+                except ValueError:
+                    pass
+            elif t_uv is not None and r_uv is not None:
+                _, per_g = predict_collision_gap_mm(
+                    dual['tool_points'],
+                    dual['ref_points'],
+                    jacs,
+                    fallback_um_per_px=float(align_cfg['fallback_um_per_px']),
+                )
+                gap_v = per_g.get(view)
+            per_view_delta[view] = delta_v
+            per_view_gap[view] = gap_v
+            status_text = '对准'
+            if not dual['ok']:
+                status_text = '识别失败'
+            elif decision and decision['status'] == 'collision':
+                status_text = '会碰到标定尖'
+            elif decision and decision['status'] == 'converged':
+                status_text = '已对准'
+            elif not jacs:
+                status_text = f'测姿 {min(4, max(1, align_session.probe_index))}/4'
+            ovl = render_tooloffset_side_overlay(
+                rep_images[view],
+                view,
+                tool_uv=t_uv,
+                ref_uv=r_uv,
+                ref_result=dual['ref_reps'].get(view),
+                z_dir_uv=z_dir,
+                delta_mm=delta_v,
+                gap_mm=gap_v,
+                status_text=status_text,
+            )
+            ovl_rel = None
+            if ctx.events.run_directory is not None:
+                ovl_file = (
+                    ctx.events.run_directory
+                    / 'tooloffset'
+                    / session['directory']
+                    / f'align_s{step_idx:02d}_{view}_ovl.png'
+                )
+                ovl_file.parent.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(ovl_file), ovl):
+                    raise OSError(f'保存对刀叠加图失败：{ovl_file}')
+                ovl_rel = str(ovl_file.relative_to(ctx.events.directory))
+            ovl_paths[view] = ovl_rel
+            write_live(ctx.events.directory, f'tooloffset_{view}_latest', ovl)
+
+        return {
+            'ok': bool(dual['ok']),
+            'reason': dual['reason'],
+            'tool_points': {k: list(v) for k, v in dual['tool_points'].items()},
+            'ref_points': {k: list(v) for k, v in dual['ref_points'].items()},
+            'raw_paths': raw_paths,
+            'overlay_paths': ovl_paths,
+            'decision': decision,
+            'per_view_delta': per_view_delta,
+            'per_view_gap': per_view_gap,
+            'tool_measurement': dual['tool_measurement'],
+            'ref_measurement': dual['ref_measurement'],
+        }
+
     def execute(self, payload):
         if payload.get('operation') == 'triangulate_shot':
             return self._execute_triangulate_shot(payload)
+        if payload.get('operation') == 'align_step':
+            return self._execute_align_step(payload)
         captured, ctx, session = payload['captured'], payload['context'], payload['session']
         image, meta = captured if isinstance(captured, tuple) else (captured, {})
         session['shots'] += 1

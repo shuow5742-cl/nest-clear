@@ -72,9 +72,10 @@ def build_batch(
     camcal_save: Any = None,
     calibration_updated: Any = None,
     calibration_path: Any = None,
+    tools_updated: Any = None,
 ) -> Batch:
     """创建全新树及私有 Blackboard，初始模式为空闲。"""
-    ctx = FlowContext(board, config, path, tracker, events, calibration, camcal_factory, camcal_save, calibration_updated, calibration_path)
+    ctx = FlowContext(board, config, path, tracker, events, calibration, camcal_factory, camcal_save, calibration_updated, calibration_path, tools_updated)
     params = {
         "work_cycle": None,
         "tooloffset_session": None,

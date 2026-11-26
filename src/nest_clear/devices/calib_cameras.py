@@ -137,7 +137,12 @@ class CalibCamera:
                     )
                     point += self.rng.normal(0, self.config.get("noise_px", 0), 2)
                     x, y = np.rint(point).astype(int)
-                    cv2.line(image, (x, y - 35), (x, y), 0, 3)
+                    cv2.line(image, (x, y - 45), (x, y), 0, 4)
+                if not self.config.get("ref_tip_undetectable", False):
+                    h_img, w_img = image.shape
+                    rx, ry = np.rint(self.config.get("ref_tip_uv", [w_img * 0.5, h_img - 30])).astype(int)
+                    poly = np.array([[rx, ry], [rx - 4, h_img - 1], [rx + 4, h_img - 1]], dtype=np.int32)
+                    cv2.fillPoly(image, [poly], 0)
                 return image
             if self.backend == "uvc":
                 ok, image = self.device.read()

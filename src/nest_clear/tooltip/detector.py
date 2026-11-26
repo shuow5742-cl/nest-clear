@@ -77,7 +77,18 @@ class SilhouetteTipDetector:
         count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         if count <= 1:
             return TipDetection(None, 0.0, "no dark component", False)
-        index = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        h = image.shape[0]
+        candidates = [
+            i for i in range(1, count)
+            if not (
+                self.direction[1] > 0.5
+                and int(stats[i, cv2.CC_STAT_TOP]) > 2
+                and int(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]) >= h - 1
+            )
+        ]
+        if not candidates:
+            return TipDetection(None, 0.0, "no dark component", False)
+        index = max(candidates, key=lambda i: int(stats[i, cv2.CC_STAT_AREA]))
         area = int(stats[index, cv2.CC_STAT_AREA])
         if area < self.min_area:
             return TipDetection(None, 0.0, "largest component is too small", False)

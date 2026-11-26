@@ -1,6 +1,8 @@
 """新协议工具偏移标定：主相机三角定位标定尖（90→91）+ 对刀相机对准（100/110→111/121）+ 核对保存（130）。"""
+from dataclasses import replace
 import hashlib
 import json
+import logging
 import math
 from pathlib import Path
 import subprocess
@@ -383,6 +385,34 @@ class ToolOffset(TreeNode):
                     return Status.RUNNING
                 if status == Status.FAILURE:
                     return self.fail('对刀相机采图失败：' + str(bb.read('error')), code='CALIB-CAMERA-CAPTURE', where='100/110 对刀相机采图', hint='检查正面/侧面相机连接与触发。')
+                from nest_clear.tooloffset.alignment import ToolAlignmentSession
+
+                if s['align_session'] is None:
+                    s['align_session'] = ToolAlignmentSession(
+                        s['tool'],
+                        s['triangulation_state']['target_xy'],
+                        ctx.config.travel,
+                        ctx.config.tool_offset['align'],
+                    )
+                self.start_call('tooloffset', {
+                    'operation': 'align_step',
+                    'images': bb.read('tooloffset_calib_images'),
+                    'actual': self.actual,
+                    'step_index': s['shots'] + 1,
+                    'context': ctx,
+                    'session': s,
+                    'align_session': s['align_session'],
+                    'task_id': bb.read('task_id'),
+                }, 'tooloffset_align_step')
+                self.stage = 'detect_tool'
+                return Status.RUNNING
+
+            if self.stage == 'detect_tool':
+                status = self.tick_call()
+                if status == Status.RUNNING:
+                    return Status.RUNNING
+                if status == Status.FAILURE:
+                    return self.fail('对刀相机检测或计算失败：' + str(bb.read('error')), code='TOOLOFFSET-ALIGN-DETECT', where='100/110 图像检测', hint='检查对刀相机背光与工具位置。')
                 return self._handle_tool_align()
 
             if self.stage == 'verify_130':
@@ -397,6 +427,7 @@ class ToolOffset(TreeNode):
         except GuardError as exc:
             return self.fail(exc.what, code=exc.code, where=exc.where, hint=exc.hint)
         except Exception as exc:
+            logging.getLogger(__name__).exception('工具偏移标定异常')
             return self.fail(str(exc))
 
     def _handle_triangulate(self):
@@ -477,7 +508,138 @@ class ToolOffset(TreeNode):
         return self.set_reply(91)
 
     def _handle_tool_align(self):
-        raise NotImplementedError('对刀相机对准将在 T86-3 实现')
+        bb, ctx = self._blackboard, self.ctx
+        s = bb.read('tooloffset_session')
+        res = bb.read('tooloffset_align_step')
+        s['shots'] += 1
+        align = s['align_session']
+        if s['p0'] is None and align.p0 is not None:
+            s['p0'] = list(align.p0)
+
+        round_entry = {
+            'step': s['shots'],
+            'actual_xyz': list(self.actual),
+            'tool_points': res.get('tool_points', {}),
+            'ref_points': res.get('ref_points', {}),
+            'raw_paths': res.get('raw_paths', {}),
+            'overlay_paths': res.get('overlay_paths', {}),
+            'per_view_delta': res.get('per_view_delta', {}),
+            'per_view_gap': res.get('per_view_gap', {}),
+            'decision': res.get('decision'),
+        }
+        record = s.get('alignment_record') or {'rounds': []}
+        s['alignment_record'] = record
+        record['rounds'].append(round_entry)
+        if align.jacobian_fit_info:
+            record['jacobians'] = align.jacobian_fit_info
+        s['alignment_state'] = {
+            'step': s['shots'],
+            'probe_step': align.probe_index,
+            'align_iteration': align.align_iteration,
+            'delta_xy_mm': list(align.last_delta_xy) if align.last_delta_xy else None,
+            'gap_mm': align.last_gap_mm,
+            'predicted_gap_mm': align.last_predicted_gap_mm,
+            'jacobians': align.jacobian_fit_info or None,
+            'tool_points': res.get('tool_points', {}),
+            'ref_points': res.get('ref_points', {}),
+            'overlay_paths': res.get('overlay_paths', {}),
+        }
+
+        if not res.get('ok'):
+            return self.fail(
+                res.get('reason') or '对刀相机未能同时识别工具尖与标定尖',
+                code='TOOLOFFSET-SIDE-DETECT',
+                where=f"工具 {s['tool']} 对刀识别（第 {s['shots']} 步）",
+                hint='确认工具尖与标定尖均在对刀相机视野内且背光均匀。',
+            )
+
+        decision = res['decision']
+        if decision['status'] == 'collision':
+            return self.fail(
+                decision['reason'],
+                code='TOOLOFFSET-COLLISION',
+                where=f"工具 {s['tool']} 防撞检查（间隙 {decision.get('predicted_gap_mm', decision.get('current_gap_mm', 0.0)):.3f} mm）",
+                hint='抬高工具 Z 坐标或调整工具装夹高度后再重新标定。',
+            )
+        if decision['status'] == 'failed':
+            return self.fail(
+                decision['reason'],
+                code='TOOLOFFSET-ALIGN',
+                where=f"工具 {s['tool']} 对准解算",
+                hint='检查相机姿态雅可比质量、模组行程及累计偏移上限。',
+            )
+
+        tool = s['tool']
+        if decision['status'] == 'move':
+            target = tuple(float(v) for v in decision['target'])
+            if decision['phase'] == 'probing':
+                s['phase'] = 'probing'
+                msg = f"工具 {tool} 姿态测量 第 {decision['probe_step']}/4 步（间隙 {decision['predicted_gap_mm']:.2f} mm）"
+            else:
+                s['phase'] = 'aligning'
+                dx, dy = decision['delta_xy_mm']
+                msg = f"工具 {tool} 对准 第 {decision['align_iteration']} 轮（ΔX={dx:+.3f}, ΔY={dy:+.3f}, 间隙 {decision['predicted_gap_mm']:.2f} mm）"
+            self.publish(s['phase'], msg)
+            reply_func = 100 if tool == 1 else 110
+            return self.set_reply(reply_func, {f'calibration{tool}_xyz': target})
+
+        # converged -> 计算 offset 并回 111/121，等待 PLC 130
+        s['phase'] = 'wait_130'
+        s['p_final'] = list(decision['p_final'])
+        s['offset_xy'] = list(decision['offset_xy'])
+        dx, dy = decision['delta_xy_mm']
+        self.publish('wait_130', f"工具 {tool} 已对准（ΔX={dx:+.3f}, ΔY={dy:+.3f} mm），偏移 {s['offset_xy'][0]:+.3f}, {s['offset_xy'][1]:+.3f}，等待 130 核对")
+        return self.set_reply(111 if tool == 1 else 121)
 
     def _handle_verify_130(self):
-        raise NotImplementedError('130 核对保存将在 T86-3 实现')
+        from nest_clear.baseline.session import refresh_existing as refresh_baseline_existing
+        from nest_clear.flow.pick_accuracy import refresh_existing as refresh_pickacc_existing
+
+        bb, ctx = self._blackboard, self.ctx
+        s = bb.read('tooloffset_session')
+        plc_final = bb.read('tooloffset_plc_final')
+        if not isinstance(plc_final, (list, tuple)) or len(plc_final) != 3 or not all(math.isfinite(float(v)) for v in plc_final):
+            return self.fail('PLC 130 最终坐标无效', code='TOOLOFFSET-130-INVALID', where='130 坐标读取', hint='检查 PLC 寄存器 40917–40921 / 40923–40927。')
+        s['plc_final'] = [float(v) for v in plc_final]
+        tol = float(ctx.config.tool_offset['align']['consistency_tolerance_mm'])
+        p_final = s['p_final']
+        diffs = [abs(a - b) for a, b in zip(s['plc_final'], p_final)]
+        if any(d > tol + 1e-9 for d in diffs):
+            return self.fail(
+                f"130 最终坐标核对不一致：PLC {s['plc_final']} 与对准记录 {p_final} 偏差 {diffs} 超过公差 {tol:g} mm",
+                code='TOOLOFFSET-130-MISMATCH',
+                where='130 最终坐标核对',
+                hint='确认 PLC 在 111/121 后未再移动工具，且 40917–40927 写入了对应工具坐标。',
+            )
+
+        tool = s['tool']
+        offset_xy = s['offset_xy']
+        tools_path = Path(ctx.config.tool_calibration.directory) / 'tools.yaml'
+        saved_at = ctx.events.clock().isoformat()
+        result_doc = {
+            'tool': tool,
+            'offset_xy_mm': [float(offset_xy[0]), float(offset_xy[1])],
+            'target_xy_mm': list(s['triangulation_state']['target_xy']),
+            'tip_xyz_mm': list(s['triangulation_state']['xyz']),
+            'p0_xyz_mm': list(s['p0']),
+            'p_final_xyz_mm': list(p_final),
+            'plc_final_xyz_mm': list(s['plc_final']),
+            'camera_calibration_sha256': s['hash'],
+            'triangulation_max_residual_mm': s['triangulation_state']['max_residual_mm'],
+            'align_iterations': s['alignment_state']['align_iteration'] if s.get('alignment_state') else 0,
+            'jacobians': s['alignment_state']['jacobians'] if s.get('alignment_state') else None,
+            'saved_at': saved_at,
+            'task_id': bb.read('task_id'),
+        }
+        _, _, xyz = save_confirmed(s['path'], tools_path, tool, result_doc, task_id=bb.read('task_id'))
+        tools = list(ctx.config.tools)
+        tools[tool - 1] = xyz
+        ctx.config = replace(ctx.config, tools=tuple(tools))
+        if getattr(ctx, 'tools_updated', None):
+            ctx.tools_updated(ctx.config.tools)
+        refresh_pickacc_existing(ctx)
+        refresh_baseline_existing(ctx)
+        ctx.events.emit('tooloffset_saved', **result_doc)
+        self.publish('done', f"工具 {tool} 偏移标定完成并已保存：offset=({offset_xy[0]:+.4f}, {offset_xy[1]:+.4f}) mm")
+        finish(ctx, bb, 'done')
+        return self.set_reply(130)
