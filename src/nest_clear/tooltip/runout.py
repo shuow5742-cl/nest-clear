@@ -71,7 +71,7 @@ class RunoutSession:
             if spread > self.stable_px:
                 return {"rejected": True, "reason": f"工具未停稳（{name} 极差 {spread:.2f} px），请稍后再按"}
         metadata = _json_value(meta)
-        means = [a.mean(axis=0) for a in arrays]
+        means = [np.median(a, axis=0) for a in arrays]
         mapped = [m @ mean for m, mean in zip(maps, means)]
         position = np.array([mapped[0][0], mapped[1][0], (mapped[0][1] + mapped[1][1]) / 2]) * 1000
         origin = np.asarray(self._presses[0]["position_um"]) if self._presses else position
@@ -79,7 +79,7 @@ class RunoutSession:
         noise = [float(np.sqrt(np.mean(np.sum(((a - mean) @ m.T * 1000) ** 2, axis=1))))
                  for a, mean, m in zip(arrays, means, maps)]
         entry = {"front_uv": arrays[0].tolist(), "side_uv": arrays[1].tolist(),
-                 "front_mean_uv": means[0].tolist(), "side_mean_uv": means[1].tolist(),
+                 "front_median_uv": means[0].tolist(), "side_median_uv": means[1].tolist(),
                  "front_map": maps[0].tolist(), "side_map": maps[1].tolist(), "meta": metadata,
                  "position_um": position.tolist(), "relative_um": relative.tolist(),
                  "noise_um": {"front": noise[0], "side": noise[1]}}

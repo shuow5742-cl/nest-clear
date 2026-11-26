@@ -33,7 +33,7 @@ def preview_command_allowed(events, mode, name, params):
         if not isinstance(supervisor, dict): supervisor = {}
     except (OSError, ValueError, TypeError, AttributeError):
         supervisor, age = {}, None
-    cameras = ('front', 'side') if name == 'tooltip_swap' else (params.get('camera'),)
+    cameras = ('front', 'side') if name == 'tooltip_swap' or name.startswith('tooltip_runout_') else (params.get('camera'),)
     for camera in cameras:
         if camera not in ('front', 'side'):
             return False, '请选择主或辅助对刀相机'
@@ -43,7 +43,7 @@ def preview_command_allowed(events, mode, name, params):
 
 logger = logging.getLogger("nest_clear.flow")
 REQUEST_NAMES = {1: "请求扫描位或下一任务", 60: "挑取完成"}
-PREVIEW_COMMANDS = frozenset({'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap'})
+PREVIEW_COMMANDS = frozenset({'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap', 'tooltip_runout_start', 'tooltip_runout_press', 'tooltip_runout_end'})
 
 
 def handle_preview_command(events, mode, name, params):
@@ -58,6 +58,8 @@ def handle_preview_command(events, mode, name, params):
     if baseline and not baseline.closed:
         allowed, reason = False, '对刀基准建立中使用对刀相机，预览不可用'
     if not allowed:
+        if name.startswith('tooltip_runout_'):
+            preparation.runout.publish(reply_seq=params.get('_seq'), message=reason)
         if name in ('tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save'):
             preparation.exposure_reply(params.get('camera'), params.get('_seq'), 'error', reason)
         events.emit('baseline_state', message=reason)

@@ -695,6 +695,19 @@ class App:
         self.baseline_aux = ttk.Button(controls, text='辅助相机手动重设', command=lambda:self.baseline_command('baseline_aux')); self.baseline_aux.grid(row=0, column=6, padx=2)
         self.baseline_save = ttk.Button(controls, text='保存基准', command=lambda:self.baseline_command('baseline_save')); self.baseline_save.grid(row=0, column=7, padx=2)
         self.baseline_end = ttk.Button(controls, text='结束/放弃', command=lambda:self.baseline_command('baseline_end')); self.baseline_end.grid(row=0, column=8, padx=2)
+        runout = tk.Frame(head, bg=WHITE, padx=6, pady=3)
+        tk.Label(runout, text='离心测试', bg=WHITE, fg=INK).grid(row=0, column=4, padx=4)
+        runout.grid(row=4, column=0, sticky='ew')
+        self.runout_start = ttk.Button(runout, text='开始离心测试', command=lambda:self.baseline_command('tooltip_runout_start'))
+        self.runout_start.grid(row=0, column=0, padx=3)
+        self.runout_press = ttk.Button(runout, text='记录并计算', command=lambda:self.baseline_command('tooltip_runout_press'))
+        self.runout_press.grid(row=0, column=1, padx=3)
+        self.runout_end = ttk.Button(runout, text='结束', command=lambda:self.baseline_command('tooltip_runout_end'))
+        self.runout_end.grid(row=0, column=2, padx=3)
+        self.runout_max = tk.Label(runout, text='最大离心量 — µm', bg=WHITE, fg=INK, font=(self.theme.title[0], 20, 'bold'))
+        self.runout_max.grid(row=0, column=3, padx=12)
+        self.runout_detail = tk.Label(runout, text='请打开两路预览并精定位', bg=WHITE, fg=MUTED, anchor='w', justify='left')
+        self.runout_detail.grid(row=1, column=0, columnspan=4, sticky='ew')
         self.baseline_live = tk.Label(head, text='实时辅助：等待针尖', bg=WHITE, fg=MUTED, anchor='w', font=self.theme.body)
         self.baseline_live.grid(row=2, column=0, sticky='ew')
         self.baseline_notice = tk.Label(head, text='', bg=WHITE, fg=COLORS['yellow'], anchor='w', font=self.theme.body)
@@ -810,7 +823,10 @@ class App:
     def update_baseline(self, main, supervisor=None):
         data = main.get('baseline') or {}; phase = data.get('phase') or 'idle'
         self.baseline_ack = main.get('command_seq', 0)
-        self._check_page_command('baseline', self.baseline_ack)
+        runout = data.get('runout') or {}
+        pending_name = getattr(self, 'baseline_pending_name', '')
+        ack = (runout.get('reply_seq') or 0) if pending_name.startswith('tooltip_runout_') else self.baseline_ack
+        self._check_page_command('baseline', ack)
         tool = data.get('tool'); candidate = data.get('candidate') or {}; existing = data.get('existing') or {}
         self.baseline_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else '#667085')
         no_main = supervisor is not None and not supervisor.get('child_pid')
@@ -862,6 +878,35 @@ class App:
             preview_age = max(0.0, time.time() - preview_path.stat().st_mtime)
         except OSError:
             preview_age = None
+        ready_reason = ''
+        for name, label in (('front', '正面'), ('side', '侧面')):
+            camera = (data.get('preview') or {}).get(name) or {}
+            live_cam = extract_tooltip_preview(preview_doc, name, file_age=preview_age)
+            if not camera.get('on'):
+                ready_reason = f'请打开{label}相机预览'; break
+            if not live_cam or live_cam.get('detection_status') != '精定位':
+                ready_reason = f'{label}针尖未精定位'; break
+        active = bool(runout.get('active')); busy = bool(runout.get('busy'))
+        enable(self.runout_start, not active and not ready_reason)
+        enable(self.runout_press, active and not busy and not ready_reason)
+        enable(self.runout_end, active and not busy)
+        result = runout.get('result') or {}
+        maximum = result.get('max_deviation_um')
+        self.runout_max.config(text=f'最大离心量 {maximum:.1f} µm' if maximum is not None else '最大离心量 — µm',
+                               fg=(COLORS['green'] if result.get('pass') else COLORS['red']) if maximum is not None else INK)
+        if result:
+            diameter = result.get('circle_fit_diameter_um')
+            noise = result.get('noise_um') or {}
+            detail = (f"次数 {result['count']}　ΔX {result['delta_x_um']:+.1f} / ΔY {result['delta_y_um']:+.1f} µm　"
+                      f"{'合格' if result['pass'] else '不合格'}　{'已稳定' if result['stable'] else '未稳定'}　"
+                      f"拟合圆直径 {f'{diameter:.1f}' if diameter is not None else '—'} µm（参考）　"
+                      f"噪声 正面 {noise.get('front', 0):.1f} / 侧面 {noise.get('side', 0):.1f} µm")
+        else:
+            detail = '次数 0　等待记录'
+        detail += '　' + (runout.get('message') or '')
+        if ready_reason: detail += '　' + ready_reason
+        if runout.get('rejected_reason'): detail += '\n最近一次作废：' + runout['rejected_reason']
+        self.runout_detail.config(text=detail)
         for name, widgets in self.baseline_views.items():
             may_prepare, blocked_reason = permissions[name]
             item = self.baseline_preview.get(name) or {}; on = item.get('on', False)

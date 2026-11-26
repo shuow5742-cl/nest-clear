@@ -18,6 +18,8 @@ def close_previews_for(events, cameras, reason, task_id=None, func=None, *, mode
     stopped = []
     preparation = getattr(events, 'tooltip_preparation', None)
     if preparation and cameras.intersection(('front', 'side')):
+        if reason == 'plc_request' and hasattr(preparation, 'runout'):
+            preparation.runout.interrupt('被 PLC 请求中断')
         stopped.extend(preparation.stop_previews(cameras.intersection(('front', 'side'))))
     stop_main = getattr(events, 'stop_main_preview', None)
     if 'main' in cameras and stop_main and stop_main():

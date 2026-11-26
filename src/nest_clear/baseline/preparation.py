@@ -133,6 +133,8 @@ class Preparation:
         self._preview_timer = None
         self._last_summary = {n: None for n in self.enabled}
         self._closed = False
+        from nest_clear.baseline.runout import RunoutController
+        self.runout = RunoutController(self)
         if worker:
             threading.Thread(target=self._discover, daemon=True, name='tooltip-discovery').start()
 
@@ -431,6 +433,9 @@ class Preparation:
         return stream.publish(frame, captured_mono, captured_at, exposure, preview=preview)
 
     def command(self, name, params):
+        if name.startswith('tooltip_runout_'):
+            self.runout.command(name, params.get('_seq'))
+            return
         if name in ('tooltip_assign', 'tooltip_swap'):
             raise ValueError('对刀相机已按插口固定，不可在界面修改')
         camera = params.get('camera')
@@ -453,6 +458,7 @@ class Preparation:
                     self.state[camera].pop(key, None)
                 self._preview_cameras.pop(camera, None)
             if not on:
+                self.runout.interrupt('预览已关闭，离心测试结束')
                 self._write_preview_file(force=True)
             if on and self.worker:
                 threading.Thread(target=self._discover, daemon=True, name='tooltip-discovery').start()
@@ -635,6 +641,7 @@ class Preparation:
 
     def handoff(self):
         """Stop acquisition without closing devices; joining occurs on session thread."""
+        self.runout.interrupt('相机已交接，离心测试结束')
         if any(self.enabled.values()): self._record_finished()
         with self.lock:
             for name in self.enabled:
@@ -653,6 +660,7 @@ class Preparation:
         self.retained.clear()
 
     def close(self):
+        self.runout.interrupt('相机关闭，离心测试结束')
         with self.lock:
             if self._preview_timer is not None:
                 self._preview_timer.cancel()

@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+/.venv
 runs/
 .pytest_cache/
 reports/
