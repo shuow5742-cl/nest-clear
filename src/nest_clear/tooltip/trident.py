@@ -4,7 +4,7 @@ from time import perf_counter
 import cv2
 import numpy as np
 
-DETECTOR_VERSION = "trident-2"
+DETECTOR_VERSION = "trident-3"
 
 
 @dataclass(frozen=True)
@@ -88,6 +88,24 @@ def _outer_edge(profile):
     dark, bright = cross(.1), cross(.9)
     if center is None:
         return None
+    # A narrow halo beside a high-contrast silhouette can cross the white
+    # threshold before the optical edge. Use the deeper transition only if
+    # the core is close to opaque and the two crossings are within the
+    # same few-pixel transition. A resolved bright facet keeps its own edge.
+    # The component seed is at column 20 in this outside-in profile.
+    core = float(np.median(profile[23:28]))
+    core_fraction = core / back
+    opacity_weight = min(1., max(0., (.25 - core_fraction) / .05))
+    if opacity_weight > 0:
+        level = back + .4 * (core - back)
+        crossings = np.flatnonzero((profile[10:25] > level) & (profile[11:26] <= level))
+        if len(crossings):
+            j = int(crossings[0]) + 10
+            core_edge = j + (level-profile[j])/(profile[j+1]-profile[j])
+            gap = core_edge - center
+            if gap > 0:
+                center += opacity_weight * gap * np.exp(-(gap/4)**2)
+
     width = abs(dark-bright) if dark is not None and bright is not None else None
     gradient = float(np.max(-np.diff(vals))/contrast)
     return center, width, gradient, body, back
@@ -177,7 +195,9 @@ class TridentTipDetector:
         slope, intercept = np.polyfit(rows, edges, 1)
         residual = edges - (np.asarray(rows)[:, None]*slope + intercept)
         deviation = np.abs(residual - np.median(residual, axis=0))
-        good = np.all(deviation < np.maximum(1., 3*np.median(deviation, axis=0)), axis=1)
+        # Four MADs are about 2.7 standard deviations for Gaussian edge
+        # noise. Test both edges, since a reflection can move just one edge.
+        good = np.all(deviation < np.maximum(1., 4*np.median(deviation, axis=0)), axis=1)
         if np.count_nonzero(good) < 10:
             return done(diagnostic='连续针身边缘不足')
         edge_slopes, edge_intercepts = np.polyfit(np.asarray(rows)[good], edges[good], 1)

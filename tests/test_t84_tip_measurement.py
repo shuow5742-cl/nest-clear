@@ -50,7 +50,7 @@ def test_five_frame_quality_and_median(failure, monkeypatch):
     monkeypatch.setattr(runout, 'make_tip_detector', lambda cfg: Detector())
     _, measurement = runout.measure_frames({'front': front, 'side': side}, {}, .3, rms_max=2)
     report = measurement['views']['front']
-    assert report['detector'] == {'method': 'trident', 'version': 'trident-2'}
+    assert report['detector'] == {'method': 'trident', 'version': DETECTOR_VERSION}
     assert [row['index'] for row in report['frames']] == [1, 2, 3, 4, 5]
     assert report['std_uv'] == pytest.approx(np.std([r.point_uv for r in front], axis=0))
     assert measurement['rejected'] is (failure is not None)
@@ -84,7 +84,7 @@ def seed_baseline(config, detector=None):
     return path
 
 
-@pytest.mark.parametrize('version', [None, 'trident-1', DETECTOR_VERSION])
+@pytest.mark.parametrize('version', [None, 'trident-2', DETECTOR_VERSION])
 def test_baseline_version_warning_agrees_in_both_hosts(tmp_path, version):
     config = app_config(tmp_path)
     detector = {name: {'method': 'trident', 'version': version} for name in ('front', 'side')} if version else None

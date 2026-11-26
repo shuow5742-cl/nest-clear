@@ -89,6 +89,20 @@ def test_axis_uses_outer_edge_of_reflective_facet():
     result = TridentTipDetector().detect(frame)
     assert result.focused
     assert abs(result.point_uv[0] - 300) < .3
-    assert result.edge_fit['right']['background_gray'] == 250
-    assert result.edge_fit['right']['tool_gray'] == 195
+    assert result.edge_fit['right']['background_gray'] == pytest.approx(250)
+    assert result.edge_fit['right']['tool_gray'] == pytest.approx(195)
     assert abs(result.edge_fit['right']['slope_du_dv']) < .001
+
+
+@pytest.mark.parametrize('mirror', (False, True))
+def test_narrow_bright_halo_does_not_pull_the_axis(mirror):
+    frame = scene()
+    shaft = frame[100:400]
+    shaft[shaft > 100] = 250
+    frame[170:400, 283:285] = 225
+    if mirror:
+        frame = frame[:, ::-1].copy()
+    result = TridentTipDetector().detect(frame)
+    assert result.focused
+    expected = frame.shape[1] - 1 - 300 if mirror else 300
+    assert abs(result.point_uv[0] - expected) < .25
