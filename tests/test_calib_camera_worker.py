@@ -29,9 +29,16 @@ def test_capture_and_mock_offset() -> None:
         assert set(before) == {"front", "side"}
         for name, shift in (("front", 10), ("side", 20)):
             assert before[name].shape == (480, 640)
-            assert np.where(after[name] == 0)[1].mean() - np.where(before[name] == 0)[1].mean() == shift
+            # 默认 mock 标定尖从第 450 行起入镜，与上方的工具剪影分开。
+            tool_before, ref_before = np.split(before[name] == 0, [450])
+            tool_after, ref_after = np.split(after[name] == 0, [450])
+            assert np.where(tool_after)[1].mean() - np.where(tool_before)[1].mean() == shift
+            assert ref_before.any()
+            np.testing.assert_array_equal(ref_after, ref_before)
         position[2] = 1
-        assert np.where(original.execute({})["front"] == 0)[0].mean() > np.where(before["front"] == 0)[0].mean()
+        front_z = original.execute({})["front"]
+        assert np.where(front_z[:450] == 0)[0].mean() > np.where(before["front"][:450] == 0)[0].mean()
+        np.testing.assert_array_equal(front_z[450:], before["front"][450:])
     finally:
         original.on_stop()
         shifted.on_stop()

@@ -163,20 +163,28 @@ def test_ref_tip_side_detector_cone_pin_and_errors():
     assert "正面标定尖" in dual["reason"]
 
 
-def test_alignment_converges_under_3deg_camera_tilt_and_collision_guard():
-    j_f, j_s = _tilted_jacobians(tilt_deg=3.0, scale_px_per_mm=65.0)
+@pytest.mark.parametrize(("tilt_deg", "noise_px"), [(0.0, 0.0), (0.0, 0.1), (3.0, 0.0)])
+def test_alignment_converges_and_corrects_residual(tilt_deg, noise_px):
+    if tilt_deg:
+        j_f, j_s = _tilted_jacobians(tilt_deg=tilt_deg, scale_px_per_mm=65.0)
+    else:
+        j_f = np.array([[65.0, 0.0, 0.0], [0.0, 0.0, -65.0]])
+        j_s = np.array([[0.0, 65.0, 0.0], [0.0, 0.0, -65.0]])
     target_xy = (112.40, 58.60)
     true_offset_xy = (12.35, -8.42)
     # 标定尖三维虚拟位置：当工具走到 true_tool_at_tip 时，两视图中工具尖与标定尖重合
     true_aligned_xyz = (target_xy[0] + true_offset_xy[0], target_xy[1] + true_offset_xy[1], -6.5)
     r_f = np.array([320.0, 395.0])
     r_s = np.array([320.0, 395.0])
-    p0 = (true_aligned_xyz[0] - 0.85, true_aligned_xyz[1] + 0.72, -2.5)  # 竖直间隙 4.0mm（Z-2 时仍留 2.0mm > 1mm）
+    # 第一次限幅移动后特意留下大于 0.01 mm 的残差。
+    p0 = (true_aligned_xyz[0] - 0.535, true_aligned_xyz[1] + 0.532, -2.5)
+    rng = np.random.default_rng(8)
 
     def obs(pose):
         dxyz = np.asarray(pose, dtype=float) - np.asarray(true_aligned_xyz, dtype=float)
         return (
-            {"front": tuple((r_f + j_f @ dxyz).tolist()), "side": tuple((r_s + j_s @ dxyz).tolist())},
+            {"front": tuple(r_f + j_f @ dxyz + rng.normal(0, noise_px, 2)),
+             "side": tuple(r_s + j_s @ dxyz + rng.normal(0, noise_px, 2))},
             {"front": tuple(r_f.tolist()), "side": tuple(r_s.tolist())},
         )
 
@@ -206,13 +214,18 @@ def test_alignment_converges_under_3deg_camera_tilt_and_collision_guard():
 
     assert probes_seen == [(0.2, 0.0, 0.0), (0.0, 0.2, 0.0), (0.0, 0.0, 2.0), (0.0, 0.0, -2.0)]
     assert 1 <= align_iters <= 5
-    assert np.allclose(sess.jacobians["front"], j_f, atol=1e-6)
-    assert np.allclose(sess.jacobians["side"], j_s, atol=1e-6)
-    assert abs(dec["offset_xy"][0] - true_offset_xy[0]) <= 0.05
-    assert abs(dec["offset_xy"][1] - true_offset_xy[1]) <= 0.05
-    dx, _, _ = solve_view_delta(obs(pose)[0]["front"], r_f, j_f[:, 0], j_f[:, 2])
-    dy, _, _ = solve_view_delta(obs(pose)[0]["side"], r_s, j_s[:, 1], j_s[:, 2])
+    if not noise_px:
+        assert np.allclose(sess.jacobians["front"], j_f, atol=1e-6)
+        assert np.allclose(sess.jacobians["side"], j_s, atol=1e-6)
+        dx, _, _ = solve_view_delta(tp["front"], rp["front"], j_f[:, 0], j_f[:, 2])
+        dy, _, _ = solve_view_delta(tp["side"], rp["side"], j_s[:, 1], j_s[:, 2])
+        assert dec["delta_xy_mm"] == pytest.approx((dx, dy), abs=1e-9)
+    assert dec["p_final"] == pose
+    assert max(abs(a - b) for a, b in zip(dec["offset_xy_uncorrected"], true_offset_xy)) > 0.01
+    assert dec["offset_xy"] == pytest.approx(true_offset_xy, abs=0.01)
+    dx, dy = dec["delta_xy_mm"]
     assert abs(dx) <= 0.05 and abs(dy) <= 0.05
+    assert dec["offset_xy"] == pytest.approx(np.array(dec["offset_xy_uncorrected"]) + [dx, dy], abs=1e-12)
 
     # 验证防撞：P0 距离标定尖仅 2.2mm，做 Z+2 安全（4.2mm），但下一轮 Z-2（相对 P0 将变成 0.2mm < 1mm）必须被拦截！
     p0_close = (true_aligned_xyz[0] - 0.3, true_aligned_xyz[1] + 0.2, -4.3)
@@ -429,7 +442,8 @@ def test_fake_plc_full_register_sequence_tool1_tool2_and_guards(tmp_path, monkey
             p0_1 = (tip_true[0] + tool_offsets[1][0] - 0.65, tip_true[1] + tool_offsets[1][1] + 0.55)
             run_full_tool_offset(1, p0_1)
             off1 = load_offset(tmp_path / "tool_offset.yaml", 1)
-            assert off1 == pytest.approx(tool_offsets[1], abs=0.06)
+            # 合成主相机锥尖的三角定位 X 偏差约 0.0153 mm，计入最终寄存器级误差。
+            assert off1 == pytest.approx(tool_offsets[1], abs=0.02)
             t1_doc = yaml.safe_load((tmp_path / "tool_offset.yaml").read_text(encoding="utf-8"))["tool1"]
             assert t1_doc["baseline_stale"] is True
             tools_disk = load_tools(tmp_path / "tools.yaml")["tools"]
@@ -440,7 +454,7 @@ def test_fake_plc_full_register_sequence_tool1_tool2_and_guards(tmp_path, monkey
             p0_2 = (tip_true[0] + tool_offsets[2][0] + 0.52, tip_true[1] + tool_offsets[2][1] - 0.48)
             run_full_tool_offset(2, p0_2)
             off2 = load_offset(tmp_path / "tool_offset.yaml", 2)
-            assert off2 == pytest.approx(tool_offsets[2], abs=0.06)
+            assert off2 == pytest.approx(tool_offsets[2], abs=0.02)
             tools_disk2 = load_tools(tmp_path / "tools.yaml")["tools"]
             assert tools_disk2["tool2"]["offset_xyz"] == pytest.approx([off2[0], off2[1], -9.8], abs=1e-6)
             # 确认 tool1 未被破坏
@@ -453,6 +467,14 @@ def test_fake_plc_full_register_sequence_tool1_tool2_and_guards(tmp_path, monkey
                 assert (sd / "session_record.json").is_file()
                 rec = json.loads((sd / "session_record.json").read_text(encoding="utf-8"))
                 assert rec["outcome"] == "done"
+                assert rec["replies"][-1]["reply_func"] == 130
+                raw = np.array(rec["alignment"]["offset_xy_uncorrected_mm"])
+                delta = np.array(rec["alignment"]["residual_xy_mm"])
+                assert rec["offset_xy_mm"] == pytest.approx(raw + delta, abs=1e-12)
+                target_xy = np.array(rec["triangulation"]["result"]["target_xy"])
+                aligned_xy = np.array(rec["offset_xy_mm"]) + target_xy
+                expected_xy = np.array(tip_true[:2]) + tool_offsets[rec["tool"]]
+                assert aligned_xy == pytest.approx(expected_xy, abs=0.01)
                 assert any(sd.glob("tri_s01_ovl.png"))
                 assert any(sd.glob("align_s04_front_ovl.png"))
 

@@ -13,6 +13,7 @@ import yaml
 from autoweaver.motion_policy.nodes.node import Status, TreeNode
 
 from nest_clear.guard import GuardError, diagnostic
+from nest_clear.preview.control import REQUEST_CAMERAS, close_previews_for
 from nest_clear.tooloffset.commands import CommandReader
 from nest_clear.tooloffset.store import save_confirmed
 from .calibration import change_mode
@@ -72,14 +73,18 @@ def _existing(ctx, path, digest):
             data = {}
     except (OSError, ValueError, yaml.YAMLError):
         data = {}
-    return {
-        f'tool{i}': {
-            **(data.get(f'tool{i}') or {}),
-            'calibration_changed': bool(data.get(f'tool{i}') and data[f'tool{i}'].get('camera_calibration_sha256') != digest),
+    existing = {}
+    for i in (1, 2):
+        key = f'tool{i}'
+        result = data.get(key)
+        if not isinstance(result, dict):
+            result = {}
+        existing[key] = {
+            **result,
+            'calibration_changed': bool(result and result.get('camera_calibration_sha256') != digest),
             'current_tools_xy': list(ctx.config.tools[i - 1][:2]),
         }
-        for i in (1, 2)
-    }
+    return existing
 
 
 def _failure_fields(reason, code='TOOLOFFSET-FAILED', where='工具偏移标定', hint='检查标定尖、相机视野与 PLC 坐标。'):
@@ -148,9 +153,10 @@ class ToolOffset(TreeNode):
     def fail(self, reason, *, code='TOOLOFFSET-FAILED', where='工具偏移标定', hint='检查标定尖、相机视野与 PLC 坐标。'):
         """新协议业务失败统一结束会话、发布失败诊断并回 99。"""
         diag_fields = _failure_fields(reason, code=code, where=where, hint=hint)
+        status = self.set_reply(99, reason=reason, code_id=code, where=where, hint=hint)
         self.publish('failed', reason, **diag_fields)
         finish(self.ctx, self._blackboard, 'failed', reason)
-        return self.set_reply(99, reason=reason, code_id=code, where=where, hint=hint)
+        return status
 
     def start_call(self, target, payload, result):
         """发起非阻塞 Worker 调用。"""
@@ -198,27 +204,27 @@ class ToolOffset(TreeNode):
         s = bb.read('tooloffset_session', None)
         func = bb.read('request_func')
         task_id = bb.read('task_id')
+        mode = bb.read('mode')
+        starting = func == 90 and s is None
         try:
-            if func == 90 and s is None:
-                path = Path(ctx.calibration_path or ctx.config.vision.calibration)
-                if ctx.calibration is None or not path.is_file():
-                    raise GuardError('CALIBRATION-MISSING', '相机标定文件不存在', '工具偏移标定', '请先完成主相机标定。')
-                if getattr(ctx.calibration, 'placeholder', False) and not ctx.config.vision.allow_placeholder_calibration:
-                    raise GuardError('CALIBRATION-PLACEHOLDER', '相机标定为占位值，不能执行工具偏移标定', '工具偏移标定', '请先完成主相机标定。')
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if starting:
+                if mode != Mode.IDLE:
+                    return self.fail(f'当前模式 {mode.value} 无法开始工具偏移标定',
+                                     code='TOOLOFFSET-BUSY', where='90 会话启动',
+                                     hint='请先结束当前流程，再从 90 发起标定。')
                 now = ctx.events.clock()
                 s = {
                     'phase': 'triangulate',
                     'tool': None,
                     'plc_tool_id': bb.read('plc_tool_id'),
                     'path': Path(ctx.config.tool_calibration.directory) / 'tool_offset.yaml',
-                    'hash': digest,
+                    'hash': None,
                     'shots': 0,
                     'commands': [],
                     'abort_requested': False,
                     'start_time': now.isoformat(),
                     'directory': now.strftime('%Y%m%d_%H%M%S_%f'),
-                    'requests': [{'task_id': task_id, 'func': func, 'plc_tool_id': bb.read('plc_tool_id')}],
+                    'requests': [],
                     'replies': [],
                     'tri_session': None,
                     'triangulation_state': {'views': [], 'xyz': None, 'target_xy': None, 'max_residual_mm': None, 'max_baseline_ratio': None},
@@ -233,12 +239,6 @@ class ToolOffset(TreeNode):
                     'old_offset_xy': None,
                 }
                 bb.write('tooloffset_session', s, self.name)
-                change_mode(bb, ctx, Mode.TOOL_OFFSET, self.name)
-                ctx.events.abort_tooloffset = lambda reason: finish(ctx, bb, 'aborted', reason)
-                self.stage = 'settle_triangulate'
-                self.samples, self.round, self.next_read = [], 0, 0.0
-                self.publish('triangulate', '三角定位 第 1/≥3 张：读取实时坐标')
-                return Status.RUNNING
 
             if s is None:
                 raise GuardError('TOOLOFFSET-NO-SESSION', f'无工具偏移会话时收到 {func}', '工具偏移标定', '请先从功能码 90 发起工具偏移标定。')
@@ -247,13 +247,24 @@ class ToolOffset(TreeNode):
             if s.get('abort_requested'):
                 return self.fail('用户放弃标定', code='TOOLOFFSET-ABORTED', where='工具偏移标定', hint='重新从 90 发起标定。')
 
+            close_previews_for(ctx.events, REQUEST_CAMERAS.get(func, ()), 'plc_request', task_id, func, mode=mode.value)
             if func == 90:
                 if s['phase'] != 'triangulate':
                     return self.fail(f"当前处于 {s['phase']} 阶段，却收到功能码 90", code='TOOLOFFSET-ORDER', where='请求顺序检查')
+                if starting:
+                    path = Path(ctx.calibration_path or ctx.config.vision.calibration)
+                    if ctx.calibration is None or not path.is_file():
+                        raise GuardError('CALIBRATION-MISSING', '相机标定文件不存在', '工具偏移标定', '请先完成主相机标定。')
+                    if getattr(ctx.calibration, 'placeholder', False) and not ctx.config.vision.allow_placeholder_calibration:
+                        raise GuardError('CALIBRATION-PLACEHOLDER', '相机标定为占位值，不能执行工具偏移标定', '工具偏移标定', '请先完成主相机标定。')
+                    s['hash'] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    change_mode(bb, ctx, Mode.TOOL_OFFSET, self.name)
+                    ctx.events.abort_tooloffset = lambda reason: finish(ctx, bb, 'aborted', reason)
                 self.stage = 'settle_triangulate'
                 self.samples, self.round, self.next_read = [], 0, 0.0
                 shot_no = len(s['triangulation_state']['views']) + 1
-                self.publish('triangulate', f'三角定位 第 {shot_no}/≥3 张：检查相机到位')
+                action = '读取实时坐标' if starting else '检查相机到位'
+                self.publish('triangulate', f'三角定位 第 {shot_no}/≥3 张：{action}')
                 return Status.RUNNING
 
             if func in (100, 110):
@@ -283,17 +294,10 @@ class ToolOffset(TreeNode):
 
             return self.fail(f'工具偏移会话收到不支持的功能码 {func}', code='TOOLOFFSET-ORDER')
         except GuardError as exc:
-            if bb.read('tooloffset_session', None):
-                finish(ctx, bb, 'aborted', exc.what)
-            bb.write('error', str(exc), self.name)
-            bb.write('error_diagnostic', diagnostic(exc, where=self.name), self.name)
-            return Status.FAILURE
+            return self.fail(exc.what, code=exc.code, where=exc.where, hint=exc.hint)
         except Exception as exc:
-            if bb.read('tooloffset_session', None):
-                finish(ctx, bb, 'aborted', str(exc))
-            bb.write('error', str(exc), self.name)
-            bb.write('error_diagnostic', diagnostic(exc, where=self.name), self.name)
-            return Status.FAILURE
+            logging.getLogger(__name__).exception('工具偏移标定请求初始化异常')
+            return self.fail(str(exc))
 
     def on_running(self):
         """逐拍推进稳定采样、采图检测、三角定位/对准计算及 130 保存。"""
@@ -590,7 +594,9 @@ class ToolOffset(TreeNode):
         s['p_final'] = list(decision['p_final'])
         s['offset_xy'] = list(decision['offset_xy'])
         dx, dy = decision['delta_xy_mm']
-        self.publish('wait_130', f"工具 {tool} 已对准（ΔX={dx:+.3f}, ΔY={dy:+.3f} mm），偏移 {s['offset_xy'][0]:+.3f}, {s['offset_xy'][1]:+.3f}，等待 130 核对")
+        record['residual_xy_mm'] = [dx, dy]
+        record['offset_xy_uncorrected_mm'] = list(decision['offset_xy_uncorrected'])
+        self.publish('wait_130', f"工具 {tool} 已对准（ΔX={dx:+.3f}, ΔY={dy:+.3f} mm），残差修正后偏移 {s['offset_xy'][0]:+.3f}, {s['offset_xy'][1]:+.3f}，等待 130 核对")
         return self.set_reply(111 if tool == 1 else 121)
 
     def _handle_verify_130(self):
@@ -621,6 +627,8 @@ class ToolOffset(TreeNode):
         result_doc = {
             'tool': tool,
             'offset_xy_mm': [float(offset_xy[0]), float(offset_xy[1])],
+            'residual_xy_mm': s['alignment_record']['residual_xy_mm'],
+            'offset_xy_uncorrected_mm': s['alignment_record']['offset_xy_uncorrected_mm'],
             'target_xy_mm': list(s['triangulation_state']['target_xy']),
             'tip_xyz_mm': list(s['triangulation_state']['xyz']),
             'p0_xyz_mm': list(s['p0']),
@@ -642,6 +650,7 @@ class ToolOffset(TreeNode):
         refresh_pickacc_existing(ctx)
         refresh_baseline_existing(ctx)
         ctx.events.emit('tooloffset_saved', **result_doc)
-        self.publish('done', f"工具 {tool} 偏移标定完成并已保存：offset=({offset_xy[0]:+.4f}, {offset_xy[1]:+.4f}) mm")
+        self.publish('done', f"工具 {tool} 偏移标定完成并已保存：修正后偏移 ({offset_xy[0]:+.4f}, {offset_xy[1]:+.4f}) mm")
+        status = self.set_reply(130)
         finish(ctx, bb, 'done')
-        return self.set_reply(130)
+        return status

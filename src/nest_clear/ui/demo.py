@@ -8,7 +8,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from nest_clear.paths import supervisor_state_file, main_status_file, live_image_file, tooltip_preview_file
 
 
@@ -144,14 +144,16 @@ def _draw_offset_demo_images(root: Path, offset_state: str, step: int = 0) -> No
         img.save(tmp, format='JPEG')
         os.replace(tmp, path)
 
+    banner_font = ImageFont.truetype('DejaVuSans.ttf', 28)
     for view in ('front', 'side'):
         path = live_image_file(root, f'tooloffset_{view}_latest')
         path.parent.mkdir(parents=True, exist_ok=True)
         img = Image.new('RGB', (640, 480), (242, 244, 247))
         draw = ImageDraw.Draw(img)
+        view_name = 'Front' if view == 'front' else 'Side'
+        banner_color = (90, 100, 115)
         if offset_state == 'triangulate':
-            draw.rectangle((0, 0, 640, 28), fill=(255, 255, 255))
-            draw.text((12, 6), f'{"Front (X/Z)" if view == "front" else "Side (Y/Z)"} | Waiting for PLC 100/110', fill=(90, 100, 115))
+            info = f'{view_name} | Awaiting PLC 100/110'
         else:
             tx = 335 if (offset_state == 'align' and view == 'front') else 312 if offset_state == 'align' else 320
             ty = 265 if offset_state == 'align' else 245 if offset_state == 'done' else 362
@@ -171,14 +173,15 @@ def _draw_offset_demo_images(root: Path, offset_state: str, step: int = 0) -> No
             draw.line((tx, ty, rx, ry), fill=(190, 70, 210), width=1)
             banner_color = (185, 28, 28) if offset_state == 'failed' else (22, 130, 65) if offset_state == 'done' else (25, 40, 60)
             info = (
-                f"{'Front dX=+0.032mm' if view == 'front' else 'Side dY=-0.018mm'} | Gap=2.15mm"
+                f"{'Front dX=+0.082mm' if view == 'front' else 'Side dY=-0.058mm'} | Gap=2.15mm"
                 if offset_state == 'align'
-                else f"{'Front dX=+0.012mm' if view == 'front' else 'Side dY=-0.009mm'} | Gap=3.20mm | Aligned"
+                else f"{'Front dX=+0.012mm' if view == 'front' else 'Side dY=-0.009mm'} | Gap=3.20mm\nAligned"
                 if offset_state == 'done'
-                else f"{'Front' if view == 'front' else 'Side'} | Gap=0.72mm < 1.00mm COLLISION!"
+                else f"{view_name} | Gap=0.72mm < 1.00mm\nCollision"
             )
-            draw.rectangle((0, 0, 640, 28), fill=(255, 255, 255))
-            draw.text((10, 6), info, fill=banner_color)
+        _, _, _, bottom = draw.multiline_textbbox((10, 5), info, font=banner_font)
+        draw.rectangle((0, 0, 640, bottom + 5), fill=(255, 255, 255))
+        draw.multiline_text((10, 5), info, font=banner_font, fill=banner_color)
         tmp = path.with_suffix('.tmp')
         img.save(tmp, format='JPEG')
         os.replace(tmp, path)
@@ -268,11 +271,11 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
             d.update(
                 phase='aligning',
                 tool=1,
-                message='工具 1 对准 第 2 轮（ΔX=+0.032, ΔY=-0.018, 间隙 2.15 mm）',
+                message='工具 1 对准 第 2 轮（ΔX=+0.082, ΔY=-0.058, 间隙 2.15 mm）',
                 triangulation=tri_done,
                 p0=[101.850, 25.350, -6.800],
                 alignment={
-                    'probe_step': 4, 'align_iteration': 2, 'delta_xy_mm': [0.032, -0.018],
+                    'probe_step': 4, 'align_iteration': 2, 'delta_xy_mm': [0.082, -0.058],
                     'gap_mm': 2.15, 'predicted_gap_mm': 2.14, 'jacobians': jac_info,
                 },
             )
@@ -283,8 +286,8 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
                 message='工具 1 偏移标定完成并已保存：offset=(+10.5020, -5.2080) mm',
                 triangulation=tri_done,
                 p0=[101.850, 25.350, -6.800],
-                p_final=[102.510, 24.804, -6.800],
-                plc_final=[102.510, 24.805, -6.800],
+                p_final=[102.498, 24.813, -6.800],
+                plc_final=[102.498, 24.814, -6.800],
                 offset_xy=[10.502, -5.208],
                 alignment={
                     'probe_step': 4, 'align_iteration': 3, 'delta_xy_mm': [0.012, -0.009],

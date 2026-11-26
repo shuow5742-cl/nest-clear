@@ -116,7 +116,7 @@ class CheckToolID(Instant):
             reason = f"流程中 40905 从 {expected} 变为 {tool_id}"
         elif func == 90 and tool_id != 1:
             reason = f"工具偏移标定要求 40905=1，实际为 {tool_id}"
-        elif func in (100, 110) and tool_id == 1 and not bb.read("tooloffset_session", None):
+        elif func in (100, 110, 130) and tool_id == 1 and not bb.read("tooloffset_session", None):
             reason = "未收到 90 却收到工具偏移标定请求"
         else:
             return
@@ -135,21 +135,28 @@ def build_dispatch(ctx: FlowContext, branches: Mapping[int, Branch] | None = Non
     nodes = []
     for code, (allowed, factory) in entries.items():
         match = Predicate(f"功能码 == {code}", lambda bb, code=code: bb.read("request_func") == code)
-        steps = [CloseRequestPreviews(ctx), factory(ctx)]
+        steps = [factory(ctx)]
+        if factory is not ToolOffset:
+            steps.insert(0, CloseRequestPreviews(ctx))
         if code in (100, 110, 130) and factory in (change_tool_branch, finish_branch):
             steps = [Fallback([
                 Sequence([Predicate("工具偏移标定", lambda bb: bb.read("plc_tool_id") == 1),
-                          CloseRequestPreviews(ctx), ToolOffset(ctx)], name="执行工具偏移标定"),
+                          ToolOffset(ctx)], name="执行工具偏移标定"),
                 Sequence(steps, name="执行换针对刀"),
             ], name="按工具 ID 分流")]
         business = Fallback([Sequence(steps, name="执行请求"), PrepareError(ctx.events)], name=f"功能码 {code} 业务或 999")
-        checked = Fallback(
-            [
-                Sequence([Predicate("模式允许", lambda bb, allowed=allowed: bb.read("mode") != Mode.BASELINE and bb.read("mode") in allowed), business], name="模式允许后执行"),
-                Sequence([RejectMode(ctx), PrepareError(ctx.events)], name="模式拒绝并应答 999"),
-            ],
-            name="模式检查",
-        )
+        rejected = Sequence([RejectMode(ctx), PrepareError(ctx.events)], name="模式拒绝并应答 999")
+        routes = [
+            Sequence([Predicate("模式允许", lambda bb, allowed=allowed: bb.read("mode") != Mode.BASELINE and bb.read("mode") in allowed), business], name="模式允许后执行"),
+        ]
+        if code == 90 and factory is ToolOffset:
+            # 挑毛中的 90 属于协议拒绝。其他忙碌状态由 ToolOffset 回 99 并发布诊断。
+            routes.append(Sequence([
+                Predicate("非挑毛模式", lambda bb: bb.read("mode") != Mode.PICKING),
+                ToolOffset(ctx),
+            ], name="工具偏移标定忙碌应答"))
+        routes.append(rejected)
+        checked = Fallback(routes, name="模式检查")
         if code in (90, 100, 110, 130, 150, 155, 156):
             checked = Fallback([
                 Sequence([CheckToolID(ctx), checked], name="工具 ID 有效后检查模式"),

@@ -346,7 +346,10 @@ def _load_font(size: int):
                 return ImageFont.truetype(str(p), size)
             except OSError:
                 continue
-    return ImageFont.load_default()
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size)
+    except OSError:
+        return ImageFont.load_default()
 
 
 def render_tooloffset_side_overlay(
@@ -392,7 +395,7 @@ def render_tooloffset_side_overlay(
 
     rgb = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(rgb)
-    font = _load_font(16)
+    font = _load_font(max(16, round(w * 28 / 640)))
     axis_label = "ΔX" if view == "front" else "ΔY"
     title = "正面视图" if view == "front" else "侧面视图"
     parts = [title]
@@ -402,6 +405,15 @@ def render_tooloffset_side_overlay(
         parts.append(f"间隙={gap_mm:.2f}mm")
     if status_text:
         parts.append(status_text)
-    draw.rectangle((0, 0, w, 26), fill=(255, 255, 255))
-    draw.text((8, 4), "  |  ".join(parts), font=font, fill=(25, 35, 50))
+    lines = [parts[0]]
+    for part in parts[1:]:
+        line = f"{lines[-1]} | {part}"
+        if draw.textlength(line, font=font) <= w - 16:
+            lines[-1] = line
+        else:
+            lines.append(part)
+    text = "\n".join(lines)
+    _, _, _, bottom = draw.multiline_textbbox((8, 4), text, font=font)
+    draw.rectangle((0, 0, w, bottom + 4), fill=(255, 255, 255))
+    draw.multiline_text((8, 4), text, font=font, fill=(25, 35, 50))
     return cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)

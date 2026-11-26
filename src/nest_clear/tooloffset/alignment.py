@@ -307,9 +307,13 @@ class ToolAlignmentSession:
 
         if abs(dx) <= self.cfg.align_tol_mm and abs(dy) <= self.cfg.align_tol_mm:
             self.p_final = actual
-            self.offset_xy = (
+            offset_xy_uncorrected = (
                 float(actual[0] - self.target_xy_mm[0]),
                 float(actual[1] - self.target_xy_mm[1]),
+            )
+            self.offset_xy = (
+                float(actual[0] + dx - self.target_xy_mm[0]),
+                float(actual[1] + dy - self.target_xy_mm[1]),
             )
             self.history.append({
                 "kind": "converged",
@@ -318,6 +322,7 @@ class ToolAlignmentSession:
                 "delta_xy_mm": [dx, dy],
                 "current_gap_mm": cur_gap,
                 "p_final_xyz": list(self.p_final),
+                "offset_xy_uncorrected_mm": list(offset_xy_uncorrected),
                 "offset_xy_mm": list(self.offset_xy),
             })
             return {
@@ -326,6 +331,7 @@ class ToolAlignmentSession:
                 "delta_xy_mm": (dx, dy),
                 "current_gap_mm": cur_gap,
                 "p_final": self.p_final,
+                "offset_xy_uncorrected": offset_xy_uncorrected,
                 "offset_xy": self.offset_xy,
             }
 

@@ -1,6 +1,7 @@
 """工具偏移新协议骨架与挑取精度测试共享夹具。"""
 from dataclasses import replace
 from types import SimpleNamespace
+import json
 import math
 import time
 
@@ -47,6 +48,7 @@ class PLC(AsyncRequestWorker):
             return self.final_coords[payload['tool']]
         if op == 'reply':
             self.replies[payload['task_id']] = (payload['func'], payload['coordinates'])
+            self.diagnostic = payload['diagnostic']
 
 
 class Camera(AsyncRequestWorker):
@@ -91,13 +93,15 @@ class Camera(AsyncRequestWorker):
 
 
 @pytest.fixture
-def rig(tmp_path):
+def rig(tmp_path, request):
     cfg = load_config('config/nest_clear.yaml')
     directory = tmp_path / 'calibration'
     directory.mkdir()
     initialize_tools(directory / 'tools.yaml')
     camera_path = directory / 'camera.yaml'
-    camera_path.write_text('test')
+    camera_state = getattr(request, 'param', 'ready')
+    if camera_state != 'missing':
+        camera_path.write_text('test')
     cfg = replace(
         cfg,
         tools=((0., 0., 0.), (0., 0., 0.)),
@@ -106,7 +110,7 @@ def rig(tmp_path):
         camera_calibration={**cfg.camera_calibration, 'start_xyz': [130., 70., -5.], 'board_thickness_mm': 0.},
         tool_offset={**cfg.tool_offset, 'settle_window_s': .001},
     )
-    cal = Calibration(np.array([[2000., 0, 2000], [0, 2000., 1500], [0, 0, 1]]), np.zeros(5), np.diag([1., -1., -1.]), np.zeros(3), -105.)
+    cal = Calibration(np.array([[2000., 0, 2000], [0, 2000., 1500], [0, 0, 1]]), np.zeros(5), np.diag([1., -1., -1.]), np.zeros(3), -105., placeholder=camera_state == 'placeholder')
     events = EventRecorder(tmp_path, run=True)
     board = WorldBoard()
     plc = PLC()
@@ -127,12 +131,12 @@ def rig(tmp_path):
             time.sleep(.001)
         raise AssertionError('等待超时')
 
-    def request(task, code, tool_id=1):
+    def submit_request(task, code, tool_id=1):
         plc.request = (task, code, tool_id)
         until(lambda: task in plc.replies)
         return plc.replies[task]
 
-    yield SimpleNamespace(plc=plc, camera=camera, batch=batch, events=events, until=until, request=request, root=tmp_path, cfg=cfg)
+    yield SimpleNamespace(plc=plc, camera=camera, batch=batch, events=events, until=until, request=submit_request, root=tmp_path, cfg=cfg)
     clock.shutdown()
 
 
@@ -148,8 +152,36 @@ def test_removed_95_and_out_of_session_requests(rig):
     assert rig.request(8, 100, 2) == (999, {'pc_tool_id': 2})
 
 
-def test_missing_camera_calibration_rejects_90_with_999(rig):
-    camera_path = rig.root / 'calibration' / 'camera.yaml'
-    camera_path.unlink()
-    assert rig.request(1, 90, 1) == (999, {'pc_tool_id': 1})
+@pytest.mark.parametrize(('rig', 'reason_code'), [
+    ('missing', 'CALIBRATION-MISSING'),
+    ('placeholder', 'CALIBRATION-PLACEHOLDER'),
+], indirect=['rig'])
+def test_unusable_camera_calibration_rejects_90_with_99(rig, reason_code):
+    assert rig.request(1, 90, 1) == (99, {'pc_tool_id': 1})
+    assert rig.plc.diagnostic['reason_code'] == reason_code
+    assert rig.batch.blackboard.read('tooloffset_session') is None
+    assert rig.batch.blackboard.read('mode') == Mode.IDLE
+    state = rig.events.status.data['tooloffset']
+    assert state['phase'] == 'failed' and state['failure_code'] == reason_code
+    record_path, = (rig.events.run_directory / 'tooloffset').glob('*/session_record.json')
+    record = json.loads(record_path.read_text(encoding='utf-8'))
+    assert record['outcome'] == 'failed' and record['reason'] == rig.plc.diagnostic['what']
+    assert record['requests'] == [{'task_id': 1, 'func': 90, 'plc_tool_id': 1}]
+    assert record['replies'] == [{'task_id': 1, 'reply_func': 99, 'coordinates': {}, 'reason': record['reason']}]
+
+
+def test_90_while_baseline_is_active_replies_99(rig):
+    rig.batch.blackboard.write('mode', Mode.BASELINE, 'test')
+    assert rig.request(1, 90, 1) == (99, {'pc_tool_id': 1})
+    assert rig.plc.diagnostic['reason_code'] == 'TOOLOFFSET-BUSY'
+    assert rig.batch.blackboard.read('mode') == Mode.BASELINE
+
+
+def test_preview_release_failure_replies_99(rig):
+    def fail_release():
+        raise OSError('主相机预览释放失败')
+
+    rig.events.stop_main_preview = fail_release
+    assert rig.request(1, 90, 1) == (99, {'pc_tool_id': 1})
+    assert rig.plc.diagnostic['what'] == '主相机预览释放失败'
     assert rig.batch.blackboard.read('tooloffset_session') is None

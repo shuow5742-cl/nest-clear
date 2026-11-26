@@ -655,8 +655,8 @@ class App:
     def build_offset(self):
         self.offset_dialog = None
         self.offset_pending = 0
-        self.offset.columnconfigure(0, weight=58)
-        self.offset.columnconfigure(1, weight=42)
+        self.offset.columnconfigure(0, weight=58, uniform='offset_columns')
+        self.offset.columnconfigure(1, weight=42, uniform='offset_columns')
         self.offset.rowconfigure(1, weight=1)
 
         header = self.card(self.offset, '工具偏移标定', 0, 0, columnspan=2)
@@ -688,13 +688,14 @@ class App:
         left = tk.Frame(self.offset, bg=BG)
         left.grid(row=1, column=0, sticky='nsew')
         left.columnconfigure(0, weight=1)
-        left.rowconfigure(0, weight=4, minsize=180)
-        left.rowconfigure(1, weight=6, minsize=250)
+        left.rowconfigure(0, weight=1, minsize=140)
+        left.rowconfigure(1, weight=2, minsize=250)
 
         tri_card = self.card(left, '主相机三角定位视角叠加图 · 点击放大', 0, 0)
         for col in range(5):
             tri_card.columnconfigure(col, weight=1, uniform='tri_thumbs')
         tri_card.rowconfigure(0, weight=1)
+        tri_card.grid_propagate(False)
         self.offset_tri_pics = []
         self.offset_tri_labels = []
         for idx in range(5):
@@ -712,6 +713,7 @@ class App:
         side_card.columnconfigure(0, weight=1, uniform='offset_side')
         side_card.columnconfigure(1, weight=1, uniform='offset_side')
         side_card.rowconfigure(0, weight=1)
+        side_card.grid_propagate(False)
         front_box = tk.Frame(side_card, bg=WHITE)
         front_box.grid(row=0, column=0, sticky='nsew', padx=(0, 4))
         front_box.columnconfigure(0, weight=1)
@@ -751,13 +753,14 @@ class App:
         cmp_info = self.card(right, '新旧偏移对比与档案', 2, 0)
         self.offset_compare_grid = KeyValueGrid(
             cmp_info,
-            ('新 / 旧偏移', '差值 (新 - 旧)', '工具1 档案', '工具2 档案', '基准状态'),
+            ('修正后 / 旧偏移', '差值 (新 - 旧)', '工具1 档案', '工具2 档案', '基准状态'),
             self.theme,
         )
         self.offset_compare_grid.grid(row=0, column=0, sticky='nsew')
         for grid in (self.offset_tri_grid, self.offset_align_grid, self.offset_compare_grid):
             for widget in getattr(grid, 'winfo_children', lambda: ())():
                 widget.configure(font=(self.theme.body[0], 10), pady=1)
+                widget.grid_configure(pady=0)
 
     def build_baseline(self):
         self.baseline_pending = 0
@@ -1566,9 +1569,14 @@ class App:
             detail_lines.append(f"建议：{data.get('failure_hint') or '检查标定尖、相机视野与 PLC 坐标。'}")
             self.offset_failure_detail.config(text='\n'.join(detail_lines))
             self.offset_failure_detail.grid()
+            if not data.get('failure_what') or data['failure_what'] == msg:
+                self.offset_message.grid_remove()
+            else:
+                self.offset_message.grid()
         else:
             self.offset_failure_detail.config(text='')
             self.offset_failure_detail.grid_remove()
+            self.offset_message.grid()
 
         active = phase in ('triangulate', 'wait_tool_start', 'probing', 'aligning', 'wait_130') and not self.offset_pending and not data.get('abort_requested')
         self.offset_abort.config(state='normal' if active else 'disabled')
@@ -1659,7 +1667,7 @@ class App:
             if rec.get('baseline_stale'):
                 stale_flags.append(f'工具{i} 需重建基准')
         self.offset_compare_grid.set({
-            '新 / 旧偏移': cmp_text,
+            '修正后 / 旧偏移': cmp_text,
             '差值 (新 - 旧)': diff_text,
             '工具1 档案': tool_summaries[1],
             '工具2 档案': tool_summaries[2],
