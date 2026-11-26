@@ -197,22 +197,58 @@ camera_calibration:
   max_axis_scale_error: 0.01  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.002
   min_coverage: 0.7  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.9
 
-# 工具偏移标定
+# 工具偏移标定（主相机三角定位标定尖 + 对刀相机自动对准）
 tool_offset:
-  center_tol_mm: 1.0
-  outlier_mm: 0.3  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.1
-  min_points: 3  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 5
-  max_points: 12
-  se_tol_mm: 0.08  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.02
-  edge_warn_mm: 0.15  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.05
-  card_thickness_mm: 0.10
-  ring_cross_tol_mm: 0.2  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.08
   settle_window_s: 0.5
   settle_samples: 6
-  jitter_tol_mm: 0.06  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.02
-  prior_offset_mm: [29.3, 24.2]  # 11-23 工具1现场粗测值，仅用于排序选首点，不用于排除
-  point_order: [T02, T05, T26, T29, T12, T19, T03, T28, T10, T21]  # T60 起自动从 32 点选取，此项不再使用
-  edge_targets: [T12]
+  jitter_tol_mm: 0.02
+  card_thickness_mm: 0.10  # 菲林模式与挑取精度共用
+  ref_tip_top:  # 主相机标定尖检测（以下参数待实拍图确定）
+    bg_kernel_px: 101
+    min_contrast: 25.0
+    contrast_ratio: 0.18
+    min_area_px: 150
+    max_area_px: 500000
+    min_apex_angle_deg: 5.0
+    max_apex_angle_deg: 120.0
+    max_edge_rms_px: 1.0
+    max_tip_offset_px: 8.0
+    tip_skip_px: 4
+    base_trim_frac: 0.25
+  triangulation:
+    frames_per_shot: 3
+    frame_std_max_px: 0.3
+    baseline_min_mm: 20.0
+    baseline_max_mm: 30.0
+    min_views: 3
+    max_views: 5
+    max_ray_residual_mm: 0.02
+    min_baseline_ratio: 0.15
+    approx_tip_z_mm: null  # null 使用 camera.yaml plane_z
+    station_bounds_mm: null  # 对刀站附近可去范围 {x: [lo, hi], y: [lo, hi]}；null 默认 X >= 第1位置 X
+    center_margin_frac: 0.10  # 画面中央 80%
+    position_tolerance_mm: 0.1
+  ref_tip_side:  # 对刀相机标定尖检测（以下参数待实拍图确定）
+    min_contrast: 25.0
+    contrast_ratio: 0.22
+    min_area_px: 40
+    min_height_px: 15
+    min_cone_angle_deg: 4.0
+    max_edge_rms_px: 1.5
+    border_margin_px: 2
+  align:
+    probe_step_xy_mm: 0.2
+    probe_step_z_mm: 2.0
+    align_tol_mm: 0.05
+    max_align_iterations: 10
+    max_step_mm: 0.5
+    max_total_mm: 3.0
+    min_gap_mm: 1.0
+    consistency_tolerance_mm: 0.05
+    position_tolerance_mm: 0.1
+    fallback_um_per_px: 15.2
+    max_jacobian_rms_px: 2.0
+    max_jacobian_condition: 300.0
 
 pick_accuracy:
   min_points_a: 5  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 9

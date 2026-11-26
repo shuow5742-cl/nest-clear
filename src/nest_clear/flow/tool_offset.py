@@ -1,5 +1,4 @@
-"""PLC 90/95 工具偏移标定；所有等待均逐拍轮询。"""
-from datetime import datetime
+"""新协议工具偏移标定：主相机三角定位标定尖（90→91）+ 对刀相机对准（100/110→111/121）+ 核对保存（130）。"""
 import hashlib
 import json
 import math
@@ -13,28 +12,42 @@ from autoweaver.motion_policy.nodes.node import Status, TreeNode
 
 from nest_clear.guard import GuardError, diagnostic
 from nest_clear.tooloffset.commands import CommandReader
-from nest_clear.tooloffset.session import Session, stats
-from nest_clear.tooloffset.store import load_offset, save_confirmed
+from nest_clear.tooloffset.store import save_confirmed
 from .calibration import change_mode
 from .leaves import CallWorker
 from .modes import Mode
 
 
 def reader(ctx):
+    """获取或初始化界面命令读取器。"""
     if not hasattr(ctx.events, 'command_reader'):
         ctx.events.command_reader = CommandReader(ctx.events.directory, ctx.events)
     return ctx.events.command_reader
 
 
 def finish(ctx, bb, outcome, reason=None):
+    """结束工具偏移会话、写 session_record.json 并恢复空闲模式。"""
     session = bb.read('tooloffset_session', None)
     if session:
-        engine = session.get('engine')
-        record = {'tool': session.get('tool'), 'mode': session.get('mode'), 'start_time': session['start_time'],
-                  'end_time': ctx.events.clock().isoformat(), 'outcome': outcome, 'reason': reason,
-                  'samples': engine.samples if engine else [], 'edge_validation': engine.edges if engine else [],
-                  'skipped': engine.skipped if engine else [], 'commands': session['commands'],
-                  'camera_calibration_sha256': session.get('hash'), 'requests': session['requests'], 'shots':session['shots']}
+        record = {
+            'tool': session.get('tool'),
+            'plc_tool_id': session.get('plc_tool_id', 1),
+            'start_time': session['start_time'],
+            'end_time': ctx.events.clock().isoformat(),
+            'outcome': outcome,
+            'reason': reason,
+            'camera_calibration_sha256': session.get('hash'),
+            'requests': session.get('requests', []),
+            'replies': session.get('replies', []),
+            'commands': session.get('commands', []),
+            'triangulation': session.get('triangulation_record'),
+            'alignment': session.get('alignment_record'),
+            'p0_xyz_mm': session.get('p0'),
+            'p_final_xyz_mm': session.get('p_final'),
+            'plc_final_xyz_mm': session.get('plc_final'),
+            'offset_xy_mm': session.get('offset_xy'),
+            'shots': session.get('shots', 0),
+        }
         if ctx.events.run_directory is not None:
             path = ctx.events.run_directory / 'tooloffset' / session['directory'] / 'session_record.json'
             try:
@@ -50,129 +63,105 @@ def finish(ctx, bb, outcome, reason=None):
 
 
 def _existing(ctx, path, digest):
+    """读取现有两把工具偏移标定结果及标定失效标记。"""
     try:
-        import yaml
         data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
-        if not isinstance(data, dict): data = {}
+        if not isinstance(data, dict):
+            data = {}
     except (OSError, ValueError, yaml.YAMLError):
         data = {}
-    return {f'tool{i}': {**(data.get(f'tool{i}') or {}),
-                         'calibration_changed': bool(data.get(f'tool{i}') and data[f'tool{i}'].get('camera_calibration_sha256') != digest),
-                         'current_tools_xy': list(ctx.config.tools[i-1][:2])} for i in (1, 2)}
+    return {
+        f'tool{i}': {
+            **(data.get(f'tool{i}') or {}),
+            'calibration_changed': bool(data.get(f'tool{i}') and data[f'tool{i}'].get('camera_calibration_sha256') != digest),
+            'current_tools_xy': list(ctx.config.tools[i - 1][:2]),
+        }
+        for i in (1, 2)
+    }
+
+
+def _failure_fields(reason, code='TOOLOFFSET-FAILED', where='工具偏移标定', hint='检查标定尖、相机视野与 PLC 坐标。'):
+    """拆分结构化失败诊断，供状态与界面直接展示现象/位置/建议。"""
+    diag = diagnostic(reason, code=code, where=where, hint=hint)
+    return {'failure_code': diag['reason_code'], 'failure_what': diag['what'],
+            'failure_where': diag['where'], 'failure_hint': diag['hint']}
 
 
 class ToolOffset(TreeNode):
+    """工具偏移标定行为树节点；同时为 PickAccuracy 提供共享的采图/稳定采样基类方法。"""
+
     def __init__(self, ctx):
         super().__init__('工具偏移标定')
         self.ctx = ctx
         self.call = None
 
     def publish(self, phase, message='', **extra):
+        """向事件总线与主状态发布工具偏移实时进度。"""
         s = self._blackboard.read('tooloffset_session', None)
-        engine = s.get('engine') if s else None
-        fields = dict(phase=phase, message=message, tool=s.get('tool') if s else None,
-                      mode=s.get('mode') if s else None, command_seq=reader(self.ctx).last_seq)
+        fields = {
+            'phase': phase,
+            'message': message,
+            'tool': s.get('tool') if s else None,
+            'plc_tool_id': self._blackboard.read('plc_tool_id'),
+            'command_seq': reader(self.ctx).last_seq,
+        }
         if s:
             fields['existing'] = _existing(self.ctx, s['path'], s['hash'])
-            fields['recognition_warning'] = s.get('recognition_warning', '')
-        if engine:
-            mean, std, se = stats(engine.samples)
-            display_samples = [dict(sample, distance_from_mean_mm=float(np.linalg.norm(np.asarray(sample['offset_xy_mm']) - mean)) if mean is not None else 0.) for sample in engine.samples]
-            fields.update(target=f'T{engine.current:02d}' if engine.current is not None else None,
-                          samples=display_samples, edges=engine.edges, skipped=engine.skipped,
-                          mean=mean.tolist() if mean is not None else None,
-                          std=std.tolist() if std is not None and np.isfinite(std).all() else None,
-                          se=se.tolist() if se is not None and np.isfinite(se).all() else None,
-                          se_tol_mm=engine.cfg['se_tol_mm'], min_points=engine.cfg['min_points'], edge_warn_mm=engine.cfg['edge_warn_mm'])
+            fields['abort_requested'] = bool(s.get('abort_requested'))
+            if s.get('triangulation_state') is not None:
+                fields['triangulation'] = s['triangulation_state']
+            if s.get('alignment_state') is not None:
+                fields['alignment'] = s['alignment_state']
+            if s.get('p0') is not None:
+                fields['p0'] = s['p0']
+            if s.get('p_final') is not None:
+                fields['p_final'] = s['p_final']
+            if s.get('offset_xy') is not None:
+                fields['offset_xy'] = s['offset_xy']
+            if s.get('old_offset_xy') is not None:
+                fields['old_offset_xy'] = s['old_offset_xy']
         fields.update(extra)
         self.ctx.events.emit('tooloffset_state', **fields)
 
-    def set_reply(self, code, coords=None, reason=None):
+    def set_reply(self, code, coords=None, reason=None, *, code_id='TOOLOFFSET-FAILED', where='工具偏移标定', hint='检查标定尖、相机视野与 PLC 坐标。'):
+        """设置应答功能码与数据区；40935 由统一应答出口自动写入。"""
         bb = self._blackboard
+        s = bb.read('tooloffset_session', None)
+        if s is not None:
+            s.setdefault('replies', []).append({
+                'task_id': bb.read('task_id'),
+                'reply_func': code,
+                'coordinates': dict(coords or {}),
+                'reason': reason,
+            })
         bb.write('reply_func', code, self.name)
         bb.write('reply_coordinates', coords or {}, self.name)
         bb.write('reply_tool', None, self.name)
         if reason:
-            bb.write('reply_diagnostic', diagnostic(reason, code='TOOLOFFSET-FAILED', where='工具偏移标定', hint='检查标定卡、位置和光照。'), self.name)
+            bb.write('reply_diagnostic', diagnostic(reason, code=code_id, where=where, hint=hint), self.name)
         return Status.SUCCESS
 
-    def fail(self, reason, business=True):
-        self.publish('failed', reason)
+    def fail(self, reason, *, code='TOOLOFFSET-FAILED', where='工具偏移标定', hint='检查标定尖、相机视野与 PLC 坐标。'):
+        """新协议业务失败统一结束会话、发布失败诊断并回 99。"""
+        diag_fields = _failure_fields(reason, code=code, where=where, hint=hint)
+        self.publish('failed', reason, **diag_fields)
         finish(self.ctx, self._blackboard, 'failed', reason)
-        if business:
-            return self.set_reply(92, reason=reason)
-        self._blackboard.write('error', reason, self.name)
-        self._blackboard.write('error_diagnostic', diagnostic(reason, code='TOOLOFFSET-PROTOCOL', where='工具偏移标定'), self.name)
-        return Status.FAILURE
-
-    def on_start(self):
-        self.call = None
-        bb, ctx = self._blackboard, self.ctx
-        s = bb.read('tooloffset_session', None)
-        func = bb.read('request_func')
-        try:
-            if func == 90 and s is None:
-                start = ctx.config.camera_calibration.get('start_xyz')
-                if start is None:
-                    raise GuardError('CAMCAL-START-UNSET', '未配置相机标定起始坐标', '工具偏移标定', '配置 camera_calibration.start_xyz。')
-                path = Path(ctx.calibration_path or ctx.config.vision.calibration)
-                if ctx.calibration is None or getattr(ctx.calibration, 'placeholder', False) or not path.is_file():
-                    raise ValueError('相机标定文件不存在或未完成标定')
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                travel = ctx.config.travel
-                if any(not lo <= v <= hi for v, (lo, hi) in zip(start, travel)):
-                    raise ValueError('工具偏移标定起始坐标超出行程')
-                now = ctx.events.clock()
-                s = {'phase':'select', 'tool':None, 'mode':None, 'engine':None, 'start':tuple(start), 'travel':travel,
-                     'path':path.parent / 'tool_offset.yaml', 'hash':digest, 'shots':0, 'commands':[],
-                     'start_time':now.isoformat(), 'directory':now.strftime('%Y%m%d_%H%M%S_%f'), 'requests':[{'task_id':bb.read('task_id'), 'func':90}]}
-                bb.write('tooloffset_session', s, self.name)
-                change_mode(bb, ctx, Mode.TOOL_OFFSET, self.name)
-                ctx.events.abort_tooloffset = lambda reason: finish(ctx, bb, 'aborted', reason)
-                self.stage = 'select'
-                self.publish('select', '请选择工具和模式并开始')
-                return Status.RUNNING
-            if s is None:
-                raise ValueError('无工具偏移会话时收到 95')
-            s['requests'].append({'task_id':bb.read('task_id'), 'func':func})
-            if func == 90:
-                if s['phase'] != 'wait90':
-                    return self.fail('工具偏移会话中收到错序 90', False)
-                s['phase'] = 'wait95'
-                self.publish('moving', '边缘验证中，不需要移动工具' if s['engine'].phase == 'edge' else '相机移动中')
-                return self.set_reply(90, {'scan_xyz': tuple(s['engine'].target_pose)})
-            if func != 95 or s['phase'] != 'wait95':
-                return self.fail('工具偏移会话收到错序功能码', False)
-            self.stage = 'settle_arrival'
-            self.samples, self.round, self.next_read = [], 0, 0.
-            self.publish('arrival', '边缘验证中，不需要移动工具' if s['engine'].phase == 'edge' else '检查相机到位')
-            return Status.RUNNING
-        except Exception as exc:
-            if bb.read('tooloffset_session', None):
-                finish(ctx, bb, 'aborted', str(exc))
-            bb.write('error', str(exc), self.name)
-            bb.write('error_diagnostic', diagnostic(exc, where=self.name), self.name)
-            return Status.FAILURE
-
-    def command(self, allowed):
-        item = reader(self.ctx).poll(set(allowed) | {'abort'})
-        if item:
-            s = self._blackboard.read('tooloffset_session')
-            s['commands'].append({'seq':reader(self.ctx).last_seq, 'command':item[0], 'params':item[1]})
-            self.publish(self.stage)
-        return item
+        return self.set_reply(99, reason=reason, code_id=code, where=where, hint=hint)
 
     def start_call(self, target, payload, result):
+        """发起非阻塞 Worker 调用。"""
         self.call = CallWorker(self.ctx.board, target, payload, result, name='工具偏移设备调用')
         self.call.set_blackboard(self._blackboard)
 
     def tick_call(self):
+        """推进一次 Worker 调用。"""
         status = self.call.tick(self.snapshot, self.tick_ctx)
         if status != Status.RUNNING:
             self.call = None
         return status
 
     def settle(self):
+        """非阻塞等待 PLC 实时坐标在窗口内稳定，取均值。"""
         cfg = self.ctx.config.tool_offset
         if self.call:
             status = self.tick_call()
@@ -194,119 +183,209 @@ class ToolOffset(TreeNode):
                 return False
             self.samples = []
         if self.call is None and time.monotonic() >= self.next_read:
-            self.start_call('plc', {'operation':'actual'}, 'tooloffset_actual')
+            self.start_call('plc', {'operation': 'actual'}, 'tooloffset_actual')
         return None
 
-    def process_result(self, result):
-        s = self._blackboard.read('tooloffset_session')
-        engine = s['engine']
-        if result == 'failed':
-            return self.fail(engine.failure)
-        if result == 'continue':
-            s['phase'] = 'wait90'
-            message = '边缘验证中，不需要移动工具' if engine.phase == 'edge' else '等待下一相机位置'
-            if engine.samples and engine.samples[-1]['outlier'] and engine.samples[-1]['target'] not in s.get('reported_outliers', []):
-                sample = engine.samples[-1]; message = f"第 {len(engine.samples)} 点（{sample['target']}）离群，已剔除并加入重测"
-                s.setdefault('reported_outliers', []).append(sample['target'])
-            self.publish('wait90', message)
-            return self.set_reply(95)
-        if result == 'tool':
-            self.stage = 'tool'
-            self.publish('tool', f'请手动移动工具{s["tool"]}到 T{engine.current:02d} 中心，到位后按【工具到位】')
-            return Status.RUNNING
-        if result == 'confirm':
-            self.stage = 'confirm'
-            self.publish('confirm', '等待确认覆盖', candidate=engine.result())
-            return Status.RUNNING
-        raise ValueError(f'未知工具偏移阶段 {result}')
+    def on_start(self):
+        """校验会话与请求顺序，准备稳定采样或 130 核对。"""
+        self.call = None
+        self.stage = None
+        bb, ctx = self._blackboard, self.ctx
+        s = bb.read('tooloffset_session', None)
+        func = bb.read('request_func')
+        task_id = bb.read('task_id')
+        try:
+            if func == 90 and s is None:
+                path = Path(ctx.calibration_path or ctx.config.vision.calibration)
+                if ctx.calibration is None or not path.is_file():
+                    raise GuardError('CALIBRATION-MISSING', '相机标定文件不存在', '工具偏移标定', '请先完成主相机标定。')
+                if getattr(ctx.calibration, 'placeholder', False) and not ctx.config.vision.allow_placeholder_calibration:
+                    raise GuardError('CALIBRATION-PLACEHOLDER', '相机标定为占位值，不能执行工具偏移标定', '工具偏移标定', '请先完成主相机标定。')
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                now = ctx.events.clock()
+                s = {
+                    'phase': 'triangulate',
+                    'tool': None,
+                    'plc_tool_id': bb.read('plc_tool_id'),
+                    'path': Path(ctx.config.tool_calibration.directory) / 'tool_offset.yaml',
+                    'hash': digest,
+                    'shots': 0,
+                    'commands': [],
+                    'abort_requested': False,
+                    'start_time': now.isoformat(),
+                    'directory': now.strftime('%Y%m%d_%H%M%S_%f'),
+                    'requests': [{'task_id': task_id, 'func': func, 'plc_tool_id': bb.read('plc_tool_id')}],
+                    'replies': [],
+                    'tri_session': None,
+                    'triangulation_state': {'views': [], 'xyz': None, 'target_xy': None, 'max_residual_mm': None, 'max_baseline_ratio': None},
+                    'align_session': None,
+                    'alignment_state': None,
+                    'triangulation_record': None,
+                    'alignment_record': None,
+                    'p0': None,
+                    'p_final': None,
+                    'plc_final': None,
+                    'offset_xy': None,
+                    'old_offset_xy': None,
+                }
+                bb.write('tooloffset_session', s, self.name)
+                change_mode(bb, ctx, Mode.TOOL_OFFSET, self.name)
+                ctx.events.abort_tooloffset = lambda reason: finish(ctx, bb, 'aborted', reason)
+                self.stage = 'settle_triangulate'
+                self.samples, self.round, self.next_read = [], 0, 0.0
+                self.publish('triangulate', '三角定位 第 1/≥3 张：读取实时坐标')
+                return Status.RUNNING
+
+            if s is None:
+                raise GuardError('TOOLOFFSET-NO-SESSION', f'无工具偏移会话时收到 {func}', '工具偏移标定', '请先从功能码 90 发起工具偏移标定。')
+
+            s['requests'].append({'task_id': task_id, 'func': func, 'plc_tool_id': bb.read('plc_tool_id')})
+            if s.get('abort_requested'):
+                return self.fail('用户放弃标定', code='TOOLOFFSET-ABORTED', where='工具偏移标定', hint='重新从 90 发起标定。')
+
+            if func == 90:
+                if s['phase'] != 'triangulate':
+                    return self.fail(f"当前处于 {s['phase']} 阶段，却收到功能码 90", code='TOOLOFFSET-ORDER', where='请求顺序检查')
+                self.stage = 'settle_triangulate'
+                self.samples, self.round, self.next_read = [], 0, 0.0
+                shot_no = len(s['triangulation_state']['views']) + 1
+                self.publish('triangulate', f'三角定位 第 {shot_no}/≥3 张：检查相机到位')
+                return Status.RUNNING
+
+            if func in (100, 110):
+                tool = 1 if func == 100 else 2
+                if s['phase'] == 'wait_tool_start':
+                    s['tool'] = tool
+                    s['old_offset_xy'] = list(ctx.config.tools[tool - 1][:2])
+                    s['phase'] = 'probing'
+                elif s['phase'] in ('probing', 'aligning'):
+                    if s['tool'] != tool:
+                        return self.fail(f"标定工具 {s['tool']} 过程中收到另一把工具功能码 {func}", code='TOOLOFFSET-TOOL-MISMATCH', where='工具功能码检查')
+                else:
+                    return self.fail(f"当前处于 {s['phase']} 阶段，却收到功能码 {func}", code='TOOLOFFSET-ORDER', where='请求顺序检查')
+                self.stage = 'settle_tool'
+                self.samples, self.round, self.next_read = [], 0, 0.0
+                label = '读取初始坐标 P0' if s['align_session'] is None else '检查工具到位'
+                self.publish(s['phase'], label)
+                return Status.RUNNING
+
+            if func == 130:
+                if s['phase'] != 'wait_130':
+                    return self.fail(f"未完成工具对准（当前阶段 {s['phase']}）却收到 130", code='TOOLOFFSET-ORDER', where='130 完成核对')
+                self.start_call('plc', {'operation': 'calibration_final', 'tool': s['tool']}, 'tooloffset_plc_final')
+                self.stage = 'verify_130'
+                self.publish('wait_130', '读取 PLC 最终坐标并核对')
+                return Status.RUNNING
+
+            return self.fail(f'工具偏移会话收到不支持的功能码 {func}', code='TOOLOFFSET-ORDER')
+        except GuardError as exc:
+            if bb.read('tooloffset_session', None):
+                finish(ctx, bb, 'aborted', exc.what)
+            bb.write('error', str(exc), self.name)
+            bb.write('error_diagnostic', diagnostic(exc, where=self.name), self.name)
+            return Status.FAILURE
+        except Exception as exc:
+            if bb.read('tooloffset_session', None):
+                finish(ctx, bb, 'aborted', str(exc))
+            bb.write('error', str(exc), self.name)
+            bb.write('error_diagnostic', diagnostic(exc, where=self.name), self.name)
+            return Status.FAILURE
 
     def on_running(self):
+        """逐拍推进稳定采样、采图检测、三角定位/对准计算及 130 保存。"""
         bb, ctx = self._blackboard, self.ctx
         s = bb.read('tooloffset_session', None)
         if s is None:
-            return self.fail('工具偏移会话已结束', False)
+            return self.set_reply(99, reason='工具偏移会话已结束')
         try:
-            allowed = {'select': {'select_tool_and_start'}, 'tool': {'tool_in_place'}, 'confirm': {'confirm_overwrite'}}.get(self.stage, set())
-            cmd = self.command(allowed)
-            if cmd and cmd[0] == 'abort':
-                return self.fail('用户放弃')
-            if self.stage == 'select':
-                if not cmd: return Status.RUNNING
-                tool, mode = cmd[1].get('tool'), cmd[1].get('mode')
-                if type(tool) is not int or tool not in (1,2) or mode not in ('center','center_edge'):
-                    self.publish('select', '工具或模式无效')
-                    return Status.RUNNING
-                try:
-                    prior = load_offset(s['path'], tool)
-                except (ValueError, OSError, yaml.YAMLError):
-                    prior = None
-                s.update(tool=tool, mode=mode, engine=Session(ctx.calibration, s['start'], s['travel'], ctx.config.tool_offset, mode, tool, board_thickness_mm=ctx.config.camera_calibration['board_thickness_mm'], prior_offset=prior), phase='wait95')
-                self.publish('moving', '相机移动至起始位置')
-                return self.set_reply(90, {'scan_xyz':s['start']})
-            if self.stage.startswith('settle_'):
+            cmd = reader(ctx).poll({'tooloffset_abort', 'abort'})
+            if cmd:
+                s['commands'].append({'seq': reader(ctx).last_seq, 'command': cmd[0], 'params': cmd[1]})
+                s['abort_requested'] = True
+                return self.fail('用户放弃标定', code='TOOLOFFSET-ABORTED', where='工具偏移标定', hint='重新从 90 发起标定。')
+
+            if self.stage == 'settle_triangulate':
                 actual = self.settle()
-                if actual is None: return Status.RUNNING
-                if actual is False:
-                    if self.stage == 'settle_tool':
-                        self.stage = 'tool'
-                        self.publish('tool', '轴还在动或抖动过大，请稍后再按【工具到位】')
-                        return Status.RUNNING
-                    return self.fail('相机到位坐标未停稳', False)
-                if self.stage == 'settle_tool':
-                    return self.process_result(s['engine'].add_sample(actual))
-                expected = s['engine'].target_pose
-                tolerance = ctx.config.camera_calibration.get('position_tolerance_mm', .05)
-                if any(abs(a-b) > tolerance for a,b in zip(actual, expected)):
-                    return self.fail(f'相机到位超差：期望 {expected}，实际 {actual}', False)
-                self.actual = actual
-                self.start_call('camera', {'stage':'tooloffset', 'task_id':bb.read('task_id')}, 'tooloffset_image')
-                self.stage = 'capture'
-                return Status.RUNNING
-            if self.stage == 'capture':
-                status = self.tick_call()
-                if status == Status.RUNNING: return status
-                if status == Status.FAILURE: return self.fail('采图失败：' + str(bb.read('error')))
-                self.start_call('tooloffset', {'captured':bb.read('tooloffset_image'), 'context':ctx, 'session':s, 'task_id':bb.read('task_id')}, 'tooloffset_detection')
-                self.stage = 'detect'
-                return Status.RUNNING
-            if self.stage == 'detect':
-                status = self.tick_call()
-                if status == Status.RUNNING: return status
-                if status == Status.FAILURE: return self.fail('目标识别失败：' + str(bb.read('error')))
-                data = bb.read('tooloffset_detection')
-                current = next((t for t in data['targets'] if t.index == s['engine'].current), None)
-                s['recognition_warning'] = (f'{current.label} 圆环与十字中心差 {current.cross_error_mm:.3f} mm，请检查打印和光照'
-                                            if current and current.cross_error_mm > s['engine'].cfg['ring_cross_tol_mm'] else '')
-                if s['recognition_warning']:
-                    ctx.events.emit('tooloffset_quality_warning', target=current.label, cross_error_mm=current.cross_error_mm, reason='圆环与十字中心差异偏大')
-                bb.write('raw_path', data['raw_path'], self.name)
-                return self.process_result(s['engine'].image(data['targets'], self.actual, data['size']))
-            if self.stage == 'tool':
-                if not cmd: return Status.RUNNING
-                self.stage, self.samples, self.round, self.next_read = 'settle_tool', [], 0, 0.
-                return Status.RUNNING
-            if self.stage == 'confirm':
-                if not cmd: return Status.RUNNING
-                accept = cmd[1].get('accept')
-                if type(accept) is not bool:
-                    self.publish('confirm', '确认参数无效', candidate=s['engine'].result())
+                if actual is None:
                     return Status.RUNNING
-                if not accept: return self.fail('用户取消保存')
-                result = s['engine'].result()
-                try:
-                    commit = subprocess.run(['git','rev-parse','HEAD'], capture_output=True, text=True, timeout=2, check=True).stdout.strip()
-                except (OSError, subprocess.SubprocessError): commit = None
-                result.update(time=ctx.events.clock().isoformat(), camera_calibration_sha256=s['hash'], git_commit=commit)
-                _, _, xyz = save_confirmed(s['path'], Path(ctx.config.tool_calibration.directory) / 'tools.yaml', s['tool'], result, task_id=bb.read('task_id'))
-                offsets = list(ctx.config.tools); offsets[s['tool']-1] = xyz
-                object.__setattr__(ctx.config, 'tools', tuple(offsets))
-                from .pick_accuracy import refresh_existing
-                refresh_existing(ctx)
-                from nest_clear.baseline.session import refresh_existing as refresh_baseline_existing
-                refresh_baseline_existing(ctx)
-                self.publish('done', '保存成功', candidate=result)
-                finish(ctx, bb, 'done')
-                return self.set_reply(91)
-            raise ValueError('未知等待阶段')
+                if actual is False:
+                    return self.fail('三角定位拍照前模组坐标未停稳', code='TOOLOFFSET-SETTLE', where='90 坐标稳定检查', hint='检查模组振动、PLC 到位时序与 jitter_tol_mm。')
+                self.actual = actual
+                if s['tri_session'] is not None and s['tri_session'].target_pose is not None:
+                    expected = s['tri_session'].target_pose
+                    tol = ctx.config.tool_offset['triangulation']['position_tolerance_mm']
+                    if any(abs(a - b) > tol for a, b in zip(actual, expected)):
+                        return self.fail(f'相机到位超差：期望 {expected}，实际 {actual}，公差 {tol} mm', code='TOOLOFFSET-ARRIVAL', where='90 相机到位核对', hint='检查 PLC 运动控制与到位公差。')
+                self.tri_frames = []
+                self.tri_target_frames = ctx.config.tool_offset['triangulation']['frames_per_shot']
+                self.start_call('camera', {'stage': 'tooloffset', 'task_id': bb.read('task_id')}, 'tooloffset_image')
+                self.stage = 'capture_triangulate'
+                return Status.RUNNING
+
+            if self.stage == 'capture_triangulate':
+                status = self.tick_call()
+                if status == Status.RUNNING:
+                    return Status.RUNNING
+                if status == Status.FAILURE:
+                    return self.fail('主相机采图失败：' + str(bb.read('error')), code='CAMERA-CAPTURE', where='90 主相机采图', hint='检查主相机连接与触发。')
+                self.tri_frames.append(bb.read('tooloffset_image'))
+                if len(self.tri_frames) < self.tri_target_frames:
+                    self.start_call('camera', {'stage': 'tooloffset', 'task_id': bb.read('task_id')}, 'tooloffset_image')
+                    return Status.RUNNING
+                return self._handle_triangulate()
+
+            if self.stage == 'settle_tool':
+                actual = self.settle()
+                if actual is None:
+                    return Status.RUNNING
+                if actual is False:
+                    return self.fail('对刀拍照前模组坐标未停稳', code='TOOLOFFSET-SETTLE', where='100/110 坐标稳定检查', hint='检查模组振动、PLC 到位时序与 jitter_tol_mm。')
+                self.actual = actual
+                align_sess = s.get('align_session')
+                if align_sess is not None and align_sess.last_target is not None:
+                    tol = ctx.config.tool_offset['align']['position_tolerance_mm']
+                    if any(abs(a - b) > tol for a, b in zip(actual, align_sess.last_target)):
+                        return self.fail(f'工具到位超差：期望 {align_sess.last_target}，实际 {actual}，公差 {tol} mm', code='TOOLOFFSET-ARRIVAL', where='100/110 工具到位核对', hint='检查 PLC 运动控制与到位公差。')
+                from nest_clear.baseline.runout import FRAME_COUNT
+                self.start_call('calib_camera', {
+                    'task_id': bb.read('task_id'),
+                    'request_func': bb.read('request_func'),
+                    'actual': actual,
+                    'target': align_sess.last_target if align_sess and align_sess.last_target else actual,
+                    'iteration': s['shots'] + 1,
+                    'frames_per_view': FRAME_COUNT,
+                    'capture_after': time.monotonic(),
+                }, 'tooloffset_calib_images')
+                self.stage = 'capture_tool'
+                return Status.RUNNING
+
+            if self.stage == 'capture_tool':
+                status = self.tick_call()
+                if status == Status.RUNNING:
+                    return Status.RUNNING
+                if status == Status.FAILURE:
+                    return self.fail('对刀相机采图失败：' + str(bb.read('error')), code='CALIB-CAMERA-CAPTURE', where='100/110 对刀相机采图', hint='检查正面/侧面相机连接与触发。')
+                return self._handle_tool_align()
+
+            if self.stage == 'verify_130':
+                status = self.tick_call()
+                if status == Status.RUNNING:
+                    return Status.RUNNING
+                if status == Status.FAILURE:
+                    return self.fail('读取 PLC 130 最终坐标失败：' + str(bb.read('error')), code='COMM-READ', where='130 坐标读取', hint='检查 PLC 连接与寄存器 40917–40927。')
+                return self._handle_verify_130()
+
+            raise ValueError(f'未知工具偏移阶段 {self.stage}')
+        except GuardError as exc:
+            return self.fail(exc.what, code=exc.code, where=exc.where, hint=exc.hint)
         except Exception as exc:
-            return self.fail(str(exc), business=self.stage not in ('settle_arrival',))
+            return self.fail(str(exc))
+
+    def _handle_triangulate(self):
+        raise NotImplementedError('三角定位将在 T86-2 实现')
+
+    def _handle_tool_align(self):
+        raise NotImplementedError('对刀相机对准将在 T86-3 实现')
+
+    def _handle_verify_130(self):
+        raise NotImplementedError('130 核对保存将在 T86-3 实现')

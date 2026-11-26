@@ -364,7 +364,7 @@ def test_table_rejects_collinear_nodes():
         e._table()
 
 
-@pytest.mark.parametrize("code", [90, 95, 100, 110, 130, 150, 155, 156])
+@pytest.mark.parametrize("code", [90, 100, 110, 130, 150, 155, 156])
 def test_invalid_plc_tool_id_gets_999_with_raw_echo(rig, code):
     rows = []
     rig.events.listener = rows.append

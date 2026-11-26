@@ -28,10 +28,9 @@ BRANCHES: dict[int, Branch] = {
     60: (frozenset((Mode.IDLE, Mode.PICKING)), next_branch),
     80: (frozenset((Mode.IDLE, Mode.CAMERA_CALIBRATING)), camera_branch),
     90: (frozenset((Mode.IDLE, Mode.TOOL_OFFSET)), ToolOffset),
-    95: (frozenset((Mode.IDLE, Mode.TOOL_OFFSET)), ToolOffset),
     100: (frozenset((Mode.IDLE, Mode.CALIBRATING_1, Mode.TOOL_OFFSET)), change_tool_branch),
     110: (frozenset((Mode.IDLE, Mode.CALIBRATING_2, Mode.TOOL_OFFSET)), change_tool_branch),
-    130: (frozenset((Mode.CALIBRATING_1, Mode.CALIBRATING_2)), finish_branch),
+    130: (frozenset((Mode.CALIBRATING_1, Mode.CALIBRATING_2, Mode.TOOL_OFFSET)), finish_branch),
     150: (frozenset((Mode.IDLE, Mode.PICK_ACCURACY)), PickAccuracy),
     155: (frozenset((Mode.IDLE, Mode.PICK_ACCURACY)), PickAccuracy),
     156: (frozenset((Mode.IDLE, Mode.PICK_ACCURACY)), PickAccuracy),
@@ -67,7 +66,7 @@ class RejectMode(Instant):
         func = bb.read("request_func")
         cycle = bb.read("work_cycle", None)
         if mode == Mode.TOOL_OFFSET:
-            finish_tooloffset(self.ctx, bb, "aborted", reason=f"标定中收到非 90/95 功能码 {func}")
+            finish_tooloffset(self.ctx, bb, "aborted", reason=f"标定中收到非工具偏移功能码 {func}")
         if mode == Mode.PICK_ACCURACY:
             finish_pickaccuracy(self.ctx, bb, "aborted", reason=f"标定中收到非 150/155/156 功能码 {func}")
         if mode == Mode.CAMERA_CALIBRATING:
@@ -109,13 +108,13 @@ class CheckToolID(Instant):
         else:
             session = bb.read("tooltip_session", None)
             expected = {Mode.TOOL_OFFSET: 1, Mode.CALIBRATING_1: 2, Mode.CALIBRATING_2: 2}.get(mode)
-            page = "tooloffset_state" if func in (90, 95) or mode == Mode.TOOL_OFFSET else "tooltip_state"
+            page = "tooloffset_state" if func == 90 or tool_id == 1 or mode == Mode.TOOL_OFFSET else "tooltip_state"
             tool = session["tool"] if session else {100: 1, 110: 2}.get(func)
         if tool_id not in (1, 2):
             reason = f"40905={tool_id} 非法，必须为 1 或 2"
         elif expected is not None and tool_id != expected:
             reason = f"流程中 40905 从 {expected} 变为 {tool_id}"
-        elif func in (90, 95) and tool_id != 1:
+        elif func == 90 and tool_id != 1:
             reason = f"工具偏移标定要求 40905=1，实际为 {tool_id}"
         elif func in (100, 110) and tool_id == 1 and not bb.read("tooloffset_session", None):
             reason = "未收到 90 却收到工具偏移标定请求"
@@ -130,21 +129,6 @@ class CheckToolID(Instant):
         raise GuardError("PLC-TOOL-ID", reason, "PLC 地址 40905", "检查工具 ID 及当前标定会话。")
 
 
-class PendingToolOffset(Instant):
-    def __init__(self, ctx: FlowContext) -> None:
-        super().__init__(name="工具偏移标定新流程")
-        self.events = ctx.events
-
-    def perform(self) -> None:
-        bb = self._blackboard
-        reason = "工具偏移标定新流程尚未实现"
-        self.events.emit("tooloffset_state", message=reason)
-        bb.write("reply_func", 99, self.name)
-        bb.write("reply_coordinates", {}, self.name)
-        bb.write("reply_tool", None, self.name)
-        bb.write("reply_diagnostic", diagnostic(reason, code="TOOLOFFSET-PENDING", where=self.name), self.name)
-
-
 def build_dispatch(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -> TreeNode:
     """每项先匹配功能码，再统一检查模式并执行对应工厂。"""
     entries = BRANCHES if branches is None else branches
@@ -152,10 +136,10 @@ def build_dispatch(ctx: FlowContext, branches: Mapping[int, Branch] | None = Non
     for code, (allowed, factory) in entries.items():
         match = Predicate(f"功能码 == {code}", lambda bb, code=code: bb.read("request_func") == code)
         steps = [CloseRequestPreviews(ctx), factory(ctx)]
-        if code in (100, 110) and factory is change_tool_branch:
+        if code in (100, 110, 130) and factory in (change_tool_branch, finish_branch):
             steps = [Fallback([
                 Sequence([Predicate("工具偏移标定", lambda bb: bb.read("plc_tool_id") == 1),
-                          PendingToolOffset(ctx)], name="暂回工具偏移标定失败"),
+                          CloseRequestPreviews(ctx), ToolOffset(ctx)], name="执行工具偏移标定"),
                 Sequence(steps, name="执行换针对刀"),
             ], name="按工具 ID 分流")]
         business = Fallback([Sequence(steps, name="执行请求"), PrepareError(ctx.events)], name=f"功能码 {code} 业务或 999")
@@ -166,7 +150,7 @@ def build_dispatch(ctx: FlowContext, branches: Mapping[int, Branch] | None = Non
             ],
             name="模式检查",
         )
-        if code in (90, 95, 100, 110, 130, 150, 155, 156):
+        if code in (90, 100, 110, 130, 150, 155, 156):
             checked = Fallback([
                 Sequence([CheckToolID(ctx), checked], name="工具 ID 有效后检查模式"),
                 PrepareError(ctx.events),

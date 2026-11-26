@@ -359,7 +359,59 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     from nest_clear.tooloffset.session import DEFAULTS as offset_defaults
     if not isinstance(root["tool_offset"], dict):
         _fail("tool_offset", "应为映射")
-    offset = _mapping({**offset_defaults, **root["tool_offset"]}, "tool_offset", list(offset_defaults))
+    new_offset_defaults = {
+        "ref_tip_top": {
+            "bg_kernel_px": 101,
+            "min_contrast": 25.0,
+            "contrast_ratio": 0.18,
+            "min_area_px": 150,
+            "max_area_px": 500000,
+            "min_apex_angle_deg": 5.0,
+            "max_apex_angle_deg": 120.0,
+            "max_edge_rms_px": 1.0,
+            "max_tip_offset_px": 8.0,
+            "tip_skip_px": 4,
+            "base_trim_frac": 0.25,
+        },
+        "triangulation": {
+            "frames_per_shot": 3,
+            "frame_std_max_px": 0.3,
+            "baseline_min_mm": 20.0,
+            "baseline_max_mm": 30.0,
+            "min_views": 3,
+            "max_views": 5,
+            "max_ray_residual_mm": 0.02,
+            "min_baseline_ratio": 0.15,
+            "approx_tip_z_mm": None,
+            "station_bounds_mm": None,
+            "center_margin_frac": 0.10,
+            "position_tolerance_mm": 0.1,
+        },
+        "ref_tip_side": {
+            "min_contrast": 25.0,
+            "contrast_ratio": 0.22,
+            "min_area_px": 40,
+            "min_height_px": 15,
+            "min_cone_angle_deg": 4.0,
+            "max_edge_rms_px": 1.5,
+            "border_margin_px": 2,
+        },
+        "align": {
+            "probe_step_xy_mm": 0.2,
+            "probe_step_z_mm": 2.0,
+            "align_tol_mm": 0.05,
+            "max_align_iterations": 10,
+            "max_step_mm": 0.5,
+            "max_total_mm": 3.0,
+            "min_gap_mm": 1.0,
+            "consistency_tolerance_mm": 0.05,
+            "position_tolerance_mm": 0.1,
+            "fallback_um_per_px": 15.2,
+            "max_jacobian_rms_px": 2.0,
+            "max_jacobian_condition": 300.0,
+        },
+    }
+    offset = _mapping({**offset_defaults, **new_offset_defaults, **root["tool_offset"]}, "tool_offset", list(offset_defaults) + list(new_offset_defaults))
     for key in ("center_tol_mm", "outlier_mm", "se_tol_mm", "edge_warn_mm", "card_thickness_mm", "ring_cross_tol_mm", "settle_window_s", "jitter_tol_mm"):
         offset[key] = _number(offset[key], "tool_offset." + key, True)
     for key in ("min_points", "max_points", "settle_samples"):
@@ -373,6 +425,65 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     for key in ("point_order", "edge_targets"):
         if not isinstance(offset[key], list) or not offset[key] or any(not isinstance(v, str) or len(v) != 3 or v[0] != "T" or not v[1:].isdigit() or int(v[1:]) > 31 for v in offset[key]):
             _fail("tool_offset." + key, "须为 T00–T31 列表")
+    top_cfg = _mapping({**new_offset_defaults["ref_tip_top"], **(offset["ref_tip_top"] if isinstance(offset["ref_tip_top"], dict) else _fail("tool_offset.ref_tip_top", "应为映射"))}, "tool_offset.ref_tip_top", list(new_offset_defaults["ref_tip_top"]))
+    if type(top_cfg["bg_kernel_px"]) is not int or top_cfg["bg_kernel_px"] < 3 or top_cfg["bg_kernel_px"] % 2 != 1:
+        _fail("tool_offset.ref_tip_top.bg_kernel_px", "须为不小于 3 的奇数")
+    for key in ("min_area_px", "max_area_px", "tip_skip_px"):
+        if type(top_cfg[key]) is not int or top_cfg[key] < 1:
+            _fail("tool_offset.ref_tip_top." + key, "须为正整数")
+    if top_cfg["max_area_px"] < top_cfg["min_area_px"]:
+        _fail("tool_offset.ref_tip_top.max_area_px", "不能小于 min_area_px")
+    for key in ("min_contrast", "contrast_ratio", "min_apex_angle_deg", "max_apex_angle_deg", "max_edge_rms_px", "max_tip_offset_px", "base_trim_frac"):
+        top_cfg[key] = _number(top_cfg[key], "tool_offset.ref_tip_top." + key, True)
+    if not 0 < top_cfg["contrast_ratio"] < 1 or not 0 < top_cfg["base_trim_frac"] < 0.8 or top_cfg["max_apex_angle_deg"] <= top_cfg["min_apex_angle_deg"]:
+        _fail("tool_offset.ref_tip_top", "比例或顶角范围无效")
+    offset["ref_tip_top"] = top_cfg
+    tri_cfg = _mapping({**new_offset_defaults["triangulation"], **(offset["triangulation"] if isinstance(offset["triangulation"], dict) else _fail("tool_offset.triangulation", "应为映射"))}, "tool_offset.triangulation", list(new_offset_defaults["triangulation"]))
+    for key in ("frames_per_shot", "min_views", "max_views"):
+        if type(tri_cfg[key]) is not int or tri_cfg[key] < 1:
+            _fail("tool_offset.triangulation." + key, "须为正整数")
+    if tri_cfg["min_views"] < 3 or tri_cfg["max_views"] < tri_cfg["min_views"]:
+        _fail("tool_offset.triangulation", "视角数须满足 3 <= min_views <= max_views")
+    for key in ("frame_std_max_px", "baseline_min_mm", "baseline_max_mm", "max_ray_residual_mm", "min_baseline_ratio", "center_margin_frac", "position_tolerance_mm"):
+        tri_cfg[key] = _number(tri_cfg[key], "tool_offset.triangulation." + key, True)
+    if tri_cfg["baseline_max_mm"] < tri_cfg["baseline_min_mm"] or not 0 < tri_cfg["center_margin_frac"] < 0.5:
+        _fail("tool_offset.triangulation", "基线范围或画面边距无效")
+    if tri_cfg["approx_tip_z_mm"] is not None:
+        tri_cfg["approx_tip_z_mm"] = _number(tri_cfg["approx_tip_z_mm"], "tool_offset.triangulation.approx_tip_z_mm")
+    if tri_cfg["station_bounds_mm"] is not None:
+        sb = tri_cfg["station_bounds_mm"]
+        if not isinstance(sb, dict) or not set(sb) <= {"x", "y", "z"}:
+            _fail("tool_offset.triangulation.station_bounds_mm", "应为含 x/y/z 键的映射或 null")
+        parsed_sb = {}
+        for axis in ("x", "y", "z"):
+            if axis in sb and sb[axis] is not None:
+                vec = _vector(sb[axis], f"tool_offset.triangulation.station_bounds_mm.{axis}", 2)
+                if vec[0] >= vec[1]:
+                    _fail(f"tool_offset.triangulation.station_bounds_mm.{axis}", "最小值必须小于最大值")
+                parsed_sb[axis] = list(vec)
+        tri_cfg["station_bounds_mm"] = parsed_sb
+    offset["triangulation"] = tri_cfg
+    side_cfg = _mapping({**new_offset_defaults["ref_tip_side"], **(offset["ref_tip_side"] if isinstance(offset["ref_tip_side"], dict) else _fail("tool_offset.ref_tip_side", "应为映射"))}, "tool_offset.ref_tip_side", list(new_offset_defaults["ref_tip_side"]))
+    for key in ("min_area_px", "min_height_px"):
+        if type(side_cfg[key]) is not int or side_cfg[key] < 1:
+            _fail("tool_offset.ref_tip_side." + key, "须为正整数")
+    if type(side_cfg["border_margin_px"]) is not int or side_cfg["border_margin_px"] < 0:
+        _fail("tool_offset.ref_tip_side.border_margin_px", "须为非负整数")
+    for key in ("min_contrast", "contrast_ratio", "min_cone_angle_deg", "max_edge_rms_px"):
+        side_cfg[key] = _number(side_cfg[key], "tool_offset.ref_tip_side." + key, True)
+    if not 0 < side_cfg["contrast_ratio"] < 1:
+        _fail("tool_offset.ref_tip_side.contrast_ratio", "应在 0 到 1 之间")
+    offset["ref_tip_side"] = side_cfg
+    align_cfg = _mapping({**new_offset_defaults["align"], **(offset["align"] if isinstance(offset["align"], dict) else _fail("tool_offset.align", "应为映射"))}, "tool_offset.align", list(new_offset_defaults["align"]))
+    if type(align_cfg["max_align_iterations"]) is not int or align_cfg["max_align_iterations"] < 1:
+        _fail("tool_offset.align.max_align_iterations", "须为正整数")
+    for key in ("probe_step_xy_mm", "probe_step_z_mm", "align_tol_mm", "max_step_mm", "max_total_mm", "min_gap_mm", "consistency_tolerance_mm", "position_tolerance_mm", "fallback_um_per_px", "max_jacobian_rms_px", "max_jacobian_condition"):
+        align_cfg[key] = _number(align_cfg[key], "tool_offset.align." + key, True)
+    if align_cfg["probe_step_z_mm"] > 2.0:
+        _fail("tool_offset.align.probe_step_z_mm", "Z 向探测步长不得超过 2.0 mm")
+    if align_cfg["max_jacobian_condition"] < 1.0:
+        _fail("tool_offset.align.max_jacobian_condition", "条件数门限须 >= 1.0")
+    offset["align"] = align_cfg
     camcal = _camera_calibration(root["camera_calibration"])
     start = camcal.get("start_xyz")
     plc_data = root["plc"]

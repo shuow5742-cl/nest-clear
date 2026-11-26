@@ -6,7 +6,6 @@ from nest_clear.preview.eligibility import MODE_CAMERAS
 REQUEST_CAMERAS = {
     1: frozenset({'main'}), 20: frozenset({'main'}), 80: frozenset({'main'}),
     90: frozenset({'main'}),
-    95: frozenset({'main'}),  # 旧工具偏移流程仍使用，下一任务删除
     150: frozenset({'main'}), 155: frozenset({'main'}),
     100: frozenset({'front', 'side'}),
     110: frozenset({'front', 'side'}),

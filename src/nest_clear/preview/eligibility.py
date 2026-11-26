@@ -7,7 +7,7 @@ MODE_CAMERAS = {
     '空闲': frozenset(),
     '挑毛中': frozenset({'main'}),
     '相机标定中': frozenset({'main'}),
-    '工具偏移标定中': frozenset({'main'}),
+    '工具偏移标定中': frozenset({'main', 'front', 'side'}),
     '挑取精度标定中': frozenset({'main'}),
     '对刀基准建立中': frozenset({'front', 'side'}),
     '对刀中(工具1)': frozenset({'front', 'side'}),

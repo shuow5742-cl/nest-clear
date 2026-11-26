@@ -108,11 +108,16 @@ class WaitRequest(CallWorker):
         # 没有挂起的标定请求时，也消费并记录不合时宜的界面命令。
         reader_ctx = type("CommandContext", (), {"events": self.events})()
         accuracy_session = self._blackboard.read("pickaccuracy_session", None)
-        session = self._blackboard.read("tooloffset_session", None) or accuracy_session
+        offset_session = self._blackboard.read("tooloffset_session", None)
         baseline_commands = {'baseline_start', 'baseline_select', 'baseline_measure', 'baseline_manual',
                              'baseline_aux', 'baseline_save', 'baseline_confirm', 'baseline_end'}
         preview_commands = PREVIEW_COMMANDS
-        command = reader(reader_ctx).poll(baseline_commands | preview_commands | ({"abort"} if session else set()))
+        abort_commands = set()
+        if accuracy_session:
+            abort_commands.add("abort")
+        if offset_session:
+            abort_commands.update(("tooloffset_abort", "abort"))
+        command = reader(reader_ctx).poll(baseline_commands | preview_commands | abort_commands)
         preparation = getattr(self.events, 'tooltip_preparation', None)
         baseline = getattr(self.events, 'baseline_session', None)
         if baseline and baseline.closed:
@@ -142,12 +147,17 @@ class WaitRequest(CallWorker):
             elif name == 'baseline_end' and preparation and preparation.active:
                 for camera in ('front', 'side'):
                     if preparation.enabled[camera]: preparation.command('tooltip_preview', {'camera':camera, 'on':False})
-        if command and command[0] == "abort":
-            session["commands"].append({"seq": reader(reader_ctx).last_seq, "command": "abort", "params": command[1]})
-            callback = getattr(self.events, "abort_pickaccuracy" if accuracy_session else "abort_tooloffset", None)
-            if callback:
-                callback("用户放弃")
-            self.events.emit("pickacc_state" if accuracy_session else "tooloffset_state", phase="failed", message="用户放弃")
+        if command and command[0] in ("abort", "tooloffset_abort"):
+            if accuracy_session and command[0] == "abort":
+                accuracy_session["commands"].append({"seq": reader(reader_ctx).last_seq, "command": "abort", "params": command[1]})
+                callback = getattr(self.events, "abort_pickaccuracy", None)
+                if callback:
+                    callback("用户放弃")
+                self.events.emit("pickacc_state", phase="failed", message="用户放弃")
+            elif offset_session:
+                offset_session["commands"].append({"seq": reader(reader_ctx).last_seq, "command": command[0], "params": command[1]})
+                offset_session["abort_requested"] = True
+                self.events.emit("tooloffset_state", abort_requested=True, message="用户已点击放弃，下一个 PLC 请求将回 99 结束")
         status = super().on_running()
         if status == Status.RUNNING:
             return status
@@ -453,7 +463,7 @@ class CommitReply(Instant):
         elif cycle is not None and bb.read("reply_func") == 3:
             cycle.fine_not_sent("挑取应答未提交")
         details = {}
-        if func in (999, 131, 99, 82, 92):
+        if func in (999, 131, 99, 82):
             actual = getattr(self.events, "reply_diagnostics", {}).pop(bb.read("task_id"), None)
             details = actual or bb.read("reply_diagnostic", None) or diagnostic(bb.read("error"), code="REPLY-ERROR", where="应答提交")
         self.events.emit(
