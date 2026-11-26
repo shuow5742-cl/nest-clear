@@ -133,6 +133,7 @@ def test_full_tray_and_wrap(running, monkeypatch):
     writes = [address for address, _ in plc.writes]
     i = writes.index(plc.contract["pick1_x"].address)
     assert writes[i:i + 4] == [plc.contract[name].address for name in ("pick1_x", "pick2_x", "reply_func", "result_id")]
+    assert plc.contract["pc_tool_id"].address not in writes
     assert plc.wait_reply(plc.request(1), 5)["func_code"] == 999
 
 

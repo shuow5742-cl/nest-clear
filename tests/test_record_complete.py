@@ -367,7 +367,7 @@ def test_report_mode_rejection_deduplicates_and_translates_older_diagnostics(tmp
     text = report(tmp_path, day)
     attention = text.split("需要人看的：", 1)[1]
     assert attention.count("Task_ID=8") == 1
-    assert "模式不允许：挑毛中 时收到 100（工具1开始对刀），须先停止挑毛并由 PLC 重新初始化" in attention
+    assert "模式不允许：挑毛中 时收到 100（工具1对刀），须先停止挑毛并由 PLC 重新初始化" in attention
     assert "Task_ID=9" in attention and "999 次数：2" in text
     assert "no dark component" not in text
     assert "    错误码：TOOLTIP-FAILED；发生了什么：正面相机无法识别针尖：图像中未找到暗色针尖区域\n    排查建议：检查背光与曝光" in attention

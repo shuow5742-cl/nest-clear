@@ -17,7 +17,7 @@ def main(root, state):
     if state == 'idle':
         for name in ('front', 'side'):
             write_live(root, f'calib_{name}_latest', np.full((480,640), 235, np.uint8))
-        data = {'phase':'idle', 'message':'等待 PLC 100/101', 'tool':None, 'rounds':[]}
+        data = {'phase':'idle', 'message':'等待 PLC 100/110', 'tool':None, 'rounds':[]}
     else:
         # 两个画面的竖直偏移一致，与相机雅可比的公共 Z 方向相符。
         positions = {'probe':(324,320,242), 'confirm_move':(329,314,245),

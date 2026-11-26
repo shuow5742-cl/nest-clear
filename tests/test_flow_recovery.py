@@ -209,8 +209,12 @@ def test_idle_rejects_calibration_continuation(prepared: tuple, code: int) -> No
 
 @pytest.mark.parametrize("code", [101, 120])
 def test_removed_code_diagnostic(prepared, code):
+    import json
     plc, app = prepared
     task = plc.request(code, tool_id=2)
-    drive_until(app, lambda: plc.io.read("result_id") == task)
+    drive_until(app, lambda: plc.io.read("result_id") == task and task not in app.events.reply_diagnostics)
     assert plc.io.read("reply_func") == 999
-    assert app.events.reply_diagnostics[task]["what"] == f"未知功能码 {code}"
+    assert plc.io.read("pc_tool_id") == 2
+    rows = [json.loads(line) for line in (app.events.run_directory / "events.jsonl").read_text().splitlines()]
+    reply = next(row for row in rows if row.get("event") == "reply" and row.get("task_id") == task)
+    assert reply["what"] == f"未知功能码 {code}"

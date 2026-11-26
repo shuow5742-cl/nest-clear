@@ -139,7 +139,7 @@ class PendingToolOffset(Instant):
         bb = self._blackboard
         reason = "工具偏移标定新流程尚未实现"
         self.events.emit("tooloffset_state", message=reason)
-        bb.write("reply_func", 131, self.name)
+        bb.write("reply_func", 99, self.name)
         bb.write("reply_coordinates", {}, self.name)
         bb.write("reply_tool", None, self.name)
         bb.write("reply_diagnostic", diagnostic(reason, code="TOOLOFFSET-PENDING", where=self.name), self.name)

@@ -88,3 +88,33 @@ def test_plc_exception_and_reconnect(caplog):
         assert client.read("task_id") == 0
         assert "重连成功" in caplog.text
         client.close()
+
+
+def test_tool_reply_write_order_and_skip_40935():
+    """通过内存 Modbus 假设备验证工具应答与非工具应答的寄存器写入顺序。"""
+    with FakePLC() as plc:
+        client = PLCClient(plc.host, plc.port, 1, plc.contract)
+        hand = Handshake(client, plc.contract)
+        try:
+            for tool, addr_name in ((1, "calibration1_x"), (2, "calibration2_x")):
+                task = plc.request(155, tool_id=tool)
+                assert hand.read_request() == (task, 155, tool)
+                plc.writes.clear()
+                hand.write_reply(task, 155, {f"calibration{tool}_xyz": [10., 20., -10.], "pc_tool_id": tool})
+                assert [a for a, _ in plc.writes] == [plc.contract[n].address for n in (addr_name, "pc_tool_id", "reply_func", "result_id")]
+                reply = plc.wait_reply(task, 5)
+                assert reply["func_code"] == 155 and reply["pc_tool_id"] == tool
+
+            task = plc.request(100, tool_id=9)
+            assert hand.read_request() == (task, 100, 9)
+            plc.writes.clear()
+            hand.write_reply(task, 999, {"pc_tool_id": 9})
+            assert [a for a, _ in plc.writes] == [plc.contract[n].address for n in ("pc_tool_id", "reply_func", "result_id")]
+
+            task = plc.request(80)
+            assert hand.read_request() == (task, 80, None)
+            plc.writes.clear()
+            hand.write_reply(task, 80, {"scan_xyz": [1., 2., 3.]})
+            assert [a for a, _ in plc.writes] == [plc.contract[n].address for n in ("scan_x", "reply_func", "result_id")]
+        finally:
+            client.close()

@@ -70,7 +70,7 @@ def test_defocus_hold_and_clear_alignment(monkeypatch):
     node.perform()
     assert board.read('reply_func') == 100
     node.perform()
-    assert board.read('reply_func') == 110
+    assert board.read('reply_func') == 100
     with pytest.raises(GuardError, match='镜头焦点与基准位置不一致'):
         node.perform()
     focus['front']['focused'] = True

@@ -296,7 +296,7 @@ def test_new_offset_flow_placeholder(rig, code):
     assert rig.request(1, code, 1) == (999, {"pc_tool_id": 1})
     assert "未收到 90 却收到工具偏移标定请求" in rig.events.status.data["tooltip"]["message"]
     assert rig.begin(2) == (90, {"scan_xyz": (130., 70., -5.), "pc_tool_id": 1})
-    assert rig.request(3, code, 1) == (131, {"pc_tool_id": 1})
+    assert rig.request(3, code, 1) == (99, {"pc_tool_id": 1})
     assert rig.events.status.data["tooloffset"]["message"] == "工具偏移标定新流程尚未实现"
     assert rig.request(4, 95, 2) == (999, {"pc_tool_id": 2})
     assert "40905 从 1 变为 2" in rig.events.status.data["tooloffset"]["message"]

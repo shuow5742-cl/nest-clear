@@ -167,6 +167,7 @@ def test_five_frame_replies_keep_task_id(tmp_path, monkeypatch, reply, groups):
     try:
         requested = time.monotonic()
         registers.words[contract['request_func'].address] = 100
+        registers.words[contract['plc_tool_id'].address] = 2
         registers.words[contract['task_id'].address] = task
         deadline = requested + 8
         sent = False
@@ -176,7 +177,7 @@ def test_five_frame_replies_keep_task_id(tmp_path, monkeypatch, reply, groups):
                 send(tmp_path, 'tooltip_confirm_result')
                 sent = True
             time.sleep(.002)
-        assert registers.writes == [(40934, reply), (40933, task)]
+        assert registers.writes == [(40935, 2), (40934, reply), (40933, task)]
         assert all(len(starts) == 5 * groups and starts[0] > requested for starts in reads.values())
         record = json.loads((events.run_directory / 'tooltip' / str(task) / 'session_record.json').read_text())
         attempts = record['measurements']

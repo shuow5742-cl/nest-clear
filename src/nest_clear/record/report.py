@@ -75,11 +75,10 @@ def _mode_rejection(row: dict[str, Any]) -> str:
     """根据协议解释被拒绝的功能码及恢复操作。"""
     func = row.get("request_func")
     mode = row.get("mode", "未知模式")
-    names = {1: "扫描", 60: "挑取完成", 100: "工具1开始对刀", 101: "工具2开始对刀",
-             110: "工具1对刀继续", 120: "工具2对刀继续", 130: "对刀完成"}
-    if mode == "挑毛中" and func in (100, 101):
+    names = {1: "扫描", 60: "挑取完成", 100: "工具1对刀", 110: "工具2对刀", 130: "对刀完成"}
+    if mode == "挑毛中" and func in (100, 110):
         hint = "须先停止挑毛并由 PLC 重新初始化"
-    elif func in (110, 120, 130) and mode == "空闲":
+    elif func == 130 and mode == "空闲":
         hint = "须先开始对应工具的对刀会话"
     elif mode.startswith("对刀中"):
         hint = "须先完成当前工具对刀，再发送允许的指令"

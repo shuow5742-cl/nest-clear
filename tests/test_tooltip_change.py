@@ -47,7 +47,7 @@ def setup(rig, tool=1, pending=False, offset=(0.,0.,0.)):
     views = [ViewCalib(n, (320,242), None if pending else j) for n,j in J.items()]
     baseline = ToolTipBaseline(f'tool{tool}', P0, views, ctx.config.tools[tool-1], jacobian_pending=pending)
     save_baseline(baseline, root / f'tool{tool}_baseline.yaml', tool=tool, source='test')
-    bb = Board(request_func=99+tool, task_id=1, mode=Mode.IDLE, actual=P0)
+    bb = Board(request_func=100 if tool == 1 else 110, task_id=1, mode=Mode.IDLE, actual=P0)
     start = StartCalibration(ctx); start._blackboard = bb; start.perform()
     bb.write('mode', Mode.CALIBRATING_1 if tool == 1 else Mode.CALIBRATING_2, 'test')
     cameras = {}
@@ -98,7 +98,7 @@ def test_pending_probe_confirm_align_and_save(rig, tool):
         if index == 4:
             target = (target[0] - .04, target[1], target[2])
         bb.write('actual', target, 'test'); bb.write('reply_func', None, 'test')
-    assert codes == [99+tool] + [110 if tool == 1 else 120]*5
+    assert codes == [100 if tool == 1 else 110]*6
     saved = load_baseline(root / f'tool{tool}_baseline.yaml')
     assert not saved.jacobian_pending and all(v.jacobian is not None for v in saved.views)
     assert saved.jacobian_measured_at and list((root/'history').glob('*.yaml'))
@@ -181,7 +181,7 @@ def test_two_corrections_and_position_validation(rig):
     second = frame(ctx,bb,cameras)
     assert not second.aligned
     assert command(ctx,second,'tooltip_confirm_move') == Status.SUCCESS
-    assert bb.read('reply_func') == 110
+    assert bb.read('reply_func') == 100
     bb.write('actual', bb.read('reply_coordinates')['calibration1_xyz'], 'test')
     check.perform()
     third = frame(ctx,bb,cameras)

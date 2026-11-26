@@ -134,7 +134,7 @@ class Handshake:
                 self.events.status.observe({"event": "reply", "task_id": task_id, "reply_func": func_code, "wall": self.events.clock().isoformat()})
             except Exception:
                 logger.exception("更新应答状态失败")
-        if self.events and func_code in (999, 131, 82, 92):
+        if self.events and func_code in (999, 131, 99, 82, 92):
             details = dict(failure or diagnostic(f"功能码 {func_code} 异常应答", code="REPLY-ERROR", where="应答提交", hint="检查请求及设备状态。"))
             if hasattr(self.events, "reply_diagnostics"):
                 self.events.reply_diagnostics[task_id] = details
@@ -143,5 +143,5 @@ class Handshake:
             self.events.plc("reply", task_id=task_id, func=func_code, coordinates=dict(payload),
                             removable_count=payload.get("removable_count"), pc_tool_id=payload.get("pc_tool_id"), readback=readback_result,
                             elapsed_ms=round((time.monotonic() - started) * 1000, 3),
-                            **(details if func_code in (999, 131, 82, 92) else {}))
+                            **(details if func_code in (999, 131, 99, 82, 92) else {}))
         logger.info("应答完成：Task_ID=%s，功能码=%s（%s），坐标=%s", task_id, func_code, REPLY_FUNCTION_NAMES.get(func_code, "未知功能码"), dict(payload))

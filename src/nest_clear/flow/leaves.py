@@ -384,7 +384,7 @@ class PrepareError(Instant):
         error_type = bb.read("error_type")
         if cycle is not None:
             cycle.fine_not_sent(str(reason))
-        if error_type != ProtocolViolation.__name__:
+        if not self.unknown and error_type != ProtocolViolation.__name__:
             state = cycle.state.value if cycle is not None else "IDLE"
             reason = f"当前状态 {state}，收到功能码 {func}，处理时出错：{error_type or '业务错误'}: {reason}"
         logger.error("Task_ID=%s 处理失败：%s", bb.read("task_id"), reason)
@@ -453,7 +453,7 @@ class CommitReply(Instant):
         elif cycle is not None and bb.read("reply_func") == 3:
             cycle.fine_not_sent("挑取应答未提交")
         details = {}
-        if func in (999, 131, 82, 92):
+        if func in (999, 131, 99, 82, 92):
             actual = getattr(self.events, "reply_diagnostics", {}).pop(bb.read("task_id"), None)
             details = actual or bb.read("reply_diagnostic", None) or diagnostic(bb.read("error"), code="REPLY-ERROR", where="应答提交")
         self.events.emit(
