@@ -222,14 +222,17 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert any('推荐 3000.0' in str(value) for value in ui.exposure_message.options.values())
         assert next(iter(ui.exposure_table.rows.values()))['tags'] == ('recommended',)
         ui.update_preview({'pid': 1, 'preview': {'on': False}})
-        assert all(b.options['state'] == 'disabled' for b in ui.offset_tool_buttons + ui.offset_mode_buttons)
-        assert ui.offset_start.options['state'] == 'disabled'
-        assert ui.offset_tool_buttons[0].options['style'] == 'OffsetSelected.TButton'
-        ui.update_offset({'tooloffset': {'phase':'select'}, 'command_seq':0})
-        assert all(b.options['state'] == 'normal' for b in ui.offset_tool_buttons + ui.offset_mode_buttons)
-        ui.update_offset({'tooloffset': {'phase':'edge', 'tool':2, 'mode':'center_edge', 'edges':[{'target':'T12','corner':2,'delta_xy_mm':[0,0], 'distance_mm':0}]}, 'command_seq':0})
-        assert all(b.options['state'] == 'disabled' for b in ui.offset_tool_buttons + ui.offset_mode_buttons)
-        assert ui.offset_edges.rows['0']['values'][1] == '左下'
+        assert not any(hasattr(ui, attr) for attr in ('offset_tool_buttons', 'offset_mode_buttons', 'offset_start', 'offset_place'))
+        assert len(ui.offset_tri_pics) == 5
+        assert ui.offset_abort.options['state'] == 'disabled'
+        ui.update_offset({'plc_tool_id': 1, 'tooloffset': {'phase': 'triangulate', 'plc_tool_id': 1, 'triangulation': {'views': [{'index': 1, 'uv': [515.0, 360.0], 'quality': 0.91}]}} , 'command_seq': 0})
+        assert ui.offset_abort.options['state'] == 'normal'
+        assert ui.offset_plc_id.options['text'] == '40905=1'
+        assert '三角定位' in ui.offset_stage.options['text']
+        assert '515.0' in ui.offset_tri_labels[0].options['text']
+        ui.update_offset({'plc_tool_id': 1, 'tooloffset': {'phase': 'failed', 'tool': 1, 'plc_tool_id': 1, 'message': '会碰到标定尖', 'failure_code': 'TOOLOFFSET-COLLISION', 'failure_what': '预测间隙 0.7mm', 'failure_where': '防撞', 'failure_hint': '抬高 Z'}, 'command_seq': 0})
+        assert ui.offset_abort.options['state'] == 'disabled'
+        assert 'TOOLOFFSET-COLLISION' in ui.offset_failure_detail.options['text']
         ui.update_pickacc({'pickacc':{'phase':'select'},'command_seq':0})
         assert ui.pickacc_start.options['state'] == 'disabled'
         assert not hasattr(ui, 'pickacc_buttons')
@@ -588,20 +591,28 @@ def test_key_value_wrap_tracks_card_width():
 
 
 @pytest.mark.parametrize('tool,color', [(1, '#2563eb'), (2, '#d56713')])
-def test_offset_confirm_identifies_tool(tmp_path, monkeypatch, tool, color):
+def test_offset_heading_identifies_tool(tmp_path, monkeypatch, tool, color):
     from nest_clear.ui import app
-    class Dialog(Widget):
-        def title(self, value): self.window_title = value
-    monkeypatch.setattr(app.tk, 'Toplevel', Dialog)
-    monkeypatch.setattr(app.tk, 'Label', Widget)
-    monkeypatch.setattr(app.ttk, 'Button', Widget)
+
     ui = object.__new__(app.App)
-    ui.root = Widget(); ui.theme = SimpleNamespace(title=('font',13), body=('font',12))
+    ui.root = Widget()
     ui.offset_dialog = None
-    ui.offset_confirm({'tool':tool, 'candidate':{}}, {})
-    expected = f'确认覆盖【工具{tool}】的偏移标定结果'
-    assert ui.offset_dialog.window_title == expected
-    assert any(child.options.get('text') == expected and child.options.get('bg') == color for child in ui.offset_dialog.children)
+    ui.offset_pending = 0
+    ui.offset_heading = Widget()
+    ui.offset_plc_id = Widget()
+    ui.offset_stage = Widget()
+    ui.offset_abort = Widget()
+    ui.offset_message = Widget()
+    ui.offset_failure_detail = Widget()
+    ui.offset_warning = Widget()
+    ui.offset_caution = Widget()
+    ui.offset_tri_labels = [Widget() for _ in range(5)]
+    ui.offset_tri_grid = SimpleNamespace(set=lambda values: None)
+    ui.offset_align_grid = SimpleNamespace(set=lambda values: None)
+    ui.offset_compare_grid = SimpleNamespace(set=lambda values: None)
+    ui.update_offset({'plc_tool_id': 1, 'tooloffset': {'phase': 'aligning', 'tool': tool, 'plc_tool_id': 1}}, )
+    assert f'工具{tool}' in ui.offset_heading.options['text']
+    assert ui.offset_heading.options['bg'] == color
 
 
 @pytest.mark.parametrize('tool,color', [(1, '#2563eb'), (2, '#d56713')])
@@ -636,7 +647,9 @@ def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
     from nest_clear.ui import app
 
     names = (
-        'latest', 'camcal_latest', 'preview_latest', 'tooloffset_latest', 'tooloffset_crop',
+        'latest', 'camcal_latest', 'preview_latest',
+        'tooloffset_tri_1', 'tooloffset_tri_2', 'tooloffset_tri_3', 'tooloffset_tri_4', 'tooloffset_tri_5',
+        'tooloffset_front_latest', 'tooloffset_side_latest',
         'pickacc_latest', 'pickacc_crop', 'baseline_front', 'baseline_side',
         'calib_front_latest', 'calib_side_latest',
     )

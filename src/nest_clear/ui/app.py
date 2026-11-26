@@ -653,67 +653,111 @@ class App:
         result_scroll.grid(row=0, column=1, sticky='ns'); self.cam_result.configure(yscrollcommand=result_scroll.set)
 
     def build_offset(self):
-        self.offset_tool = None; self.offset_mode = 'center'; self.offset_pending = 0; self.offset_dialog = None; self.offset_last_phase = None
-        self.offset.columnconfigure(0, weight=60); self.offset.columnconfigure(1, weight=40)
+        self.offset_dialog = None
+        self.offset_pending = 0
+        self.offset.columnconfigure(0, weight=58)
+        self.offset.columnconfigure(1, weight=42)
         self.offset.rowconfigure(1, weight=1)
+
         header = self.card(self.offset, '工具偏移标定', 0, 0, columnspan=2)
         header.columnconfigure(0, weight=1)
-        heading = tk.Frame(header, bg=WHITE); heading.grid(row=0, column=0, sticky='ew')
-        self.offset_heading = tk.Label(heading, text='当前：等待 PLC 指定', bg='#667085', fg=WHITE, font=(self.theme.title[0], 28, 'bold'), anchor='center', padx=18)
-        self.offset_heading.grid(row=0, column=0, sticky='w', padx=(0,15))
-        self.offset_mode_text = tk.Label(heading, text='模式：仅中心', bg=WHITE, fg=INK, font=self.theme.title)
-        self.offset_mode_text.grid(row=0, column=1, sticky='w')
-        self.offset_message = tk.Label(header, text='等待 PLC 请求', bg=WHITE, fg=INK, font=(self.theme.title[0], 20), anchor='w')
-        self.offset_message.grid(row=1, column=0, sticky='ew')
-        controls = tk.Frame(header, bg=WHITE); controls.grid(row=2, column=0, sticky='ew', pady=3)
-        controls.columnconfigure(1, weight=1)
-        left = tk.Frame(controls, bg=WHITE); left.grid(row=0, column=0, sticky='w')
-        style = ttk.Style(self.root)
-        style.configure('OffsetSelected.TButton', foreground='white', background='#2563eb')
-        style.map('OffsetSelected.TButton', background=[('disabled', '#a9c9f8')], foreground=[('disabled', '#405575')])
-        style.configure('OffsetPlace.TButton', foreground='white', background='#168448', font=(self.theme.title[0], 17, 'bold'))
-        self.offset_tool_buttons = []
-        for col, tool in enumerate((1,2)):
-            button = ttk.Button(left, text=f'工具{tool}', command=lambda n=tool: self.choose_offset_tool(n))
-            button.grid(row=0, column=col, padx=2); self.offset_tool_buttons.append(button)
-        tk.Label(left, text='｜', bg=WHITE, fg=MUTED).grid(row=0, column=2)
-        self.offset_mode_buttons = []
-        for col, (label, mode) in enumerate((('仅中心','center'), ('中心+边缘验证','center_edge')), 3):
-            button = ttk.Button(left, text=label, command=lambda m=mode: self.choose_offset_mode(m))
-            button.grid(row=0, column=col, padx=2); self.offset_mode_buttons.append(button)
-        tk.Label(left, text='｜', bg=WHITE, fg=MUTED).grid(row=0, column=5)
-        self.offset_start = ttk.Button(left, text='开始', command=self.start_offset); self.offset_start.grid(row=0, column=6, padx=3)
-        right_controls = tk.Frame(controls, bg=WHITE); right_controls.grid(row=0, column=2, sticky='e')
-        self.offset_place = ttk.Button(right_controls, text='工具到位', style='OffsetPlace.TButton', command=lambda: self.offset_command('tool_in_place')); self.offset_place.grid(row=0, column=0, padx=5)
-        self.offset_abort = ttk.Button(right_controls, text='放弃本次标定', command=lambda: self.offset_command('abort')); self.offset_abort.grid(row=0, column=1, padx=5)
-        self.offset_warning = tk.Label(header, text='', bg=WHITE, fg=COLORS['red'], font=self.theme.body, anchor='w')
+        heading = tk.Frame(header, bg=WHITE)
+        heading.grid(row=0, column=0, sticky='ew')
+        heading.columnconfigure(3, weight=1)
+        self.offset_heading = tk.Label(heading, text='当前：等待 PLC 指定', bg='#667085', fg=WHITE, font=(self.theme.title[0], 24, 'bold'), anchor='center', padx=16, pady=2)
+        self.offset_heading.grid(row=0, column=0, sticky='w', padx=(0, 12))
+        self.offset_plc_id = tk.Label(heading, text='40905=—', bg='#eef2f6', fg=INK, font=self.theme.body, padx=10, pady=4)
+        self.offset_plc_id.grid(row=0, column=1, sticky='w', padx=(0, 12))
+        self.offset_stage = tk.Label(heading, text='阶段：空闲', bg='#eef2f6', fg=INK, font=self.theme.title, padx=12, pady=3)
+        self.offset_stage.grid(row=0, column=2, sticky='w')
+        self.offset_abort = ttk.Button(heading, text='放弃本次标定', command=lambda: self.offset_command('tooloffset_abort'))
+        self.offset_abort.grid(row=0, column=4, sticky='e', padx=4)
+
+        self.offset_message = tk.Label(header, text='等待 PLC 90 (40905=1)', bg=WHITE, fg=INK, font=(self.theme.title[0], 17), anchor='w', justify='left', wraplength=1260)
+        self.offset_message.grid(row=1, column=0, sticky='ew', pady=(4, 2))
+        self.offset_failure_detail = tk.Label(header, text='', bg='#fff1f0', fg=COLORS['red'], font=self.theme.body, anchor='w', justify='left', wraplength=1260)
+        self.offset_failure_detail.grid(row=2, column=0, sticky='ew')
+        self.offset_failure_detail.grid_remove()
+        self.offset_warning = tk.Label(header, text='', bg=WHITE, fg=COLORS['red'], font=self.theme.body, anchor='w', wraplength=1260)
         self.offset_warning.grid(row=3, column=0, sticky='ew')
-        self.offset_caution = tk.Label(header, text='', bg=WHITE, fg=COLORS['yellow'], font=self.theme.body, anchor='w')
+        self.offset_warning.grid_remove()
+        self.offset_caution = tk.Label(header, text='', bg=WHITE, fg=COLORS['yellow'], font=self.theme.body, anchor='w', wraplength=1260)
         self.offset_caution.grid(row=4, column=0, sticky='ew')
-        self.picture(self.card(self.offset, '标定图像 · 点击放大', 1, 0), 'tooloffset_latest')
-        right = tk.Frame(self.offset, bg=BG); right.grid(row=1, column=1, sticky='nsew')
-        right.columnconfigure(0, weight=1); right.rowconfigure(0, weight=4, minsize=135); right.rowconfigure(1, weight=0); right.rowconfigure(2, weight=2, minsize=145)
-        self.offset.bind('<Configure>', lambda event: right.rowconfigure(2, minsize=175 if self.offset.winfo_height() > 850 else 145))
-        self.picture(self.card(right, '当前目标放大图 · 绿：圆环中心/拟合线  紫：十字中心  蓝：主点', 0, 0), 'tooloffset_crop')
-        existing = self.card(right, '已有结果与当前补偿', 1, 0)
-        self.offset_existing = tk.Label(existing, text='无数据', bg=WHITE, fg=INK, font=self.theme.body, justify='left', anchor='w', wraplength=680)
-        self.offset_existing.grid(row=0, column=0, sticky='ew')
-        tables = tk.Frame(right, bg=BG); tables.grid(row=2, column=0, sticky='nsew')
-        tables.columnconfigure(0, weight=1); tables.columnconfigure(1, weight=1); tables.rowconfigure(0, weight=1)
-        samples = self.card(tables, '样本与统计', 0, 0)
-        self.offset_samples = self.table_widget(samples, ('序号','目标','dx','dy','均值差','离群'), (38,43,55,55,55,42))
-        scrollbar = ttk.Scrollbar(samples, orient='vertical', command=self.offset_samples.yview)
-        scrollbar.grid(row=0, column=1, sticky='ns'); self.offset_samples.configure(yscrollcommand=scrollbar.set)
-        style.configure('Offset.Treeview', rowheight=19, font=(self.theme.body[0], 9))
-        self.offset_samples.configure(style='Offset.Treeview')
-        self.offset_stats = tk.Label(samples, text='均值 / std / SE：—', bg=WHITE, fg=INK, font=(self.theme.body[0], 9), anchor='w')
-        self.offset_stats.grid(row=1, column=0, sticky='ew')
-        edge = self.card(tables, '边缘验证', 0, 1)
-        self.offset_edges = self.table_widget(edge, ('目标','角','Δx','Δy','差值'), (48,35,58,58,60))
-        self.offset_edges.configure(style='Offset.Treeview')
-        self.offset_edges.tag_configure('warning', foreground=COLORS['yellow'])
-        scrollbar = ttk.Scrollbar(edge, orient='vertical', command=self.offset_edges.yview)
-        scrollbar.grid(row=0, column=1, sticky='ns'); self.offset_edges.configure(yscrollcommand=scrollbar.set)
+        self.offset_caution.grid_remove()
+
+        left = tk.Frame(self.offset, bg=BG)
+        left.grid(row=1, column=0, sticky='nsew')
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=4, minsize=180)
+        left.rowconfigure(1, weight=6, minsize=250)
+
+        tri_card = self.card(left, '主相机三角定位视角叠加图 · 点击放大', 0, 0)
+        for col in range(5):
+            tri_card.columnconfigure(col, weight=1, uniform='tri_thumbs')
+        tri_card.rowconfigure(0, weight=1)
+        self.offset_tri_pics = []
+        self.offset_tri_labels = []
+        for idx in range(5):
+            slot = tk.Frame(tri_card, bg=WHITE)
+            slot.grid(row=0, column=idx, sticky='nsew', padx=3)
+            slot.columnconfigure(0, weight=1)
+            slot.rowconfigure(0, weight=1)
+            pic = self.picture(slot, f'tooloffset_tri_{idx + 1}')
+            caption = tk.Label(slot, text=f'视角 {idx + 1}：—', bg=WHITE, fg=MUTED, font=(self.theme.body[0], 9), anchor='center')
+            caption.grid(row=1, column=0, sticky='ew')
+            self.offset_tri_pics.append(pic)
+            self.offset_tri_labels.append(caption)
+
+        side_card = self.card(left, '对刀相机实时叠加（工具尖 + 标定尖 + 过工具尖 Z 方向线）', 1, 0)
+        side_card.columnconfigure(0, weight=1, uniform='offset_side')
+        side_card.columnconfigure(1, weight=1, uniform='offset_side')
+        side_card.rowconfigure(0, weight=1)
+        front_box = tk.Frame(side_card, bg=WHITE)
+        front_box.grid(row=0, column=0, sticky='nsew', padx=(0, 4))
+        front_box.columnconfigure(0, weight=1)
+        front_box.rowconfigure(0, weight=1)
+        side_box = tk.Frame(side_card, bg=WHITE)
+        side_box.grid(row=0, column=1, sticky='nsew', padx=(4, 0))
+        side_box.columnconfigure(0, weight=1)
+        side_box.rowconfigure(0, weight=1)
+        self.offset_front_pic = self.picture(front_box, 'tooloffset_front_latest')
+        self.offset_side_pic = self.picture(side_box, 'tooloffset_side_latest')
+        tk.Label(front_box, text='正面相机 (X / Z)', bg=WHITE, fg=MUTED, font=(self.theme.body[0], 10)).grid(row=1, column=0, sticky='ew')
+        tk.Label(side_box, text='侧面相机 (Y / Z)', bg=WHITE, fg=MUTED, font=(self.theme.body[0], 10)).grid(row=1, column=0, sticky='ew')
+
+        right = tk.Frame(self.offset, bg=BG)
+        right.grid(row=1, column=1, sticky='nsew')
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=4)
+        right.rowconfigure(1, weight=5)
+        right.rowconfigure(2, weight=5)
+
+        tri_info = self.card(right, '三角定位三维结果', 0, 0)
+        self.offset_tri_grid = KeyValueGrid(
+            tri_info,
+            ('标定尖 XYZ', '目标机台 XY', '视角 / 夹角', '射线最大残差'),
+            self.theme,
+        )
+        self.offset_tri_grid.grid(row=0, column=0, sticky='nsew')
+
+        align_info = self.card(right, '对刀姿态、对准与防撞', 1, 0)
+        self.offset_align_grid = KeyValueGrid(
+            align_info,
+            ('姿态测量', '对准 ΔX / ΔY', '安全间隙', 'P0 / P_final', '130 核对'),
+            self.theme,
+        )
+        self.offset_align_grid.grid(row=0, column=0, sticky='nsew')
+
+        cmp_info = self.card(right, '新旧偏移对比与档案', 2, 0)
+        self.offset_compare_grid = KeyValueGrid(
+            cmp_info,
+            ('新 / 旧偏移', '差值 (新 - 旧)', '工具1 档案', '工具2 档案', '基准状态'),
+            self.theme,
+        )
+        self.offset_compare_grid.grid(row=0, column=0, sticky='nsew')
+        for grid in (self.offset_tri_grid, self.offset_align_grid, self.offset_compare_grid):
+            for widget in getattr(grid, 'winfo_children', lambda: ())():
+                widget.configure(font=(self.theme.body[0], 10), pady=1)
 
     def build_baseline(self):
         self.baseline_pending = 0
@@ -1474,99 +1518,170 @@ class App:
         y=self.root.winfo_rooty()+max(0,(self.root.winfo_height()-top.winfo_reqheight())//2)
         top.geometry(f'+{x}+{y}')
 
-    def choose_offset_tool(self, tool):
-        self.offset_tool = tool
-        self.offset_heading.config(text=f"当前：工具{tool}", bg='#2563eb' if tool == 1 else '#d56713')
-        for i, button in enumerate(self.offset_tool_buttons, 1):
-            button.config(style='OffsetSelected.TButton' if i == tool else 'TButton')
-
-    def choose_offset_mode(self, mode):
-        self.offset_mode = mode
-        for i, button in enumerate(self.offset_mode_buttons):
-            button.config(style='OffsetSelected.TButton' if mode == ('center','center_edge')[i] else 'TButton')
-        self.offset_mode_text.config(text='模式：' + ('仅中心' if mode == 'center' else '中心+边缘验证'))
-        if self.offset_tool: self.choose_offset_tool(self.offset_tool)
-
     def offset_command(self, name, params=None):
         self._send_page_command('offset', name, params)
 
-    def start_offset(self):
-        if self.offset_tool:
-            self.offset_command('select_tool_and_start', {'tool':self.offset_tool, 'mode':self.offset_mode})
-
     def update_offset(self, main):
-        data = main.get('tooloffset') or {}; phase = data.get('phase')
-        if phase == 'select' and self.offset_last_phase != 'select':
-            self.offset_tool, self.offset_mode = None, 'center'
-        self.offset_last_phase = phase
+        data = main.get('tooloffset') or {}
+        phase = data.get('phase') or 'idle'
         self.offset_ack = main.get('command_seq', 0)
         self._check_page_command('offset', self.offset_ack)
-        tool = data.get('tool') or self.offset_tool
-        mode = data.get('mode') or self.offset_mode
-        self.offset_heading.config(text=f"当前：{'工具' + str(tool) if tool else '未选择'}", bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else '#667085')
-        self.offset_mode_text.config(text='模式：' + ('仅中心' if mode == 'center' else '中心+边缘验证'))
-        for i, button in enumerate(self.offset_tool_buttons, 1): button.config(style='OffsetSelected.TButton' if i == tool else 'TButton')
-        for i, button in enumerate(self.offset_mode_buttons): button.config(style='OffsetSelected.TButton' if mode == ('center','center_edge')[i] else 'TButton')
-        skipped = data.get('skipped') or []
-        skip_text = '；跳过：' + '、'.join(f"{x.get('target')} {x.get('reason')}" for x in skipped) if skipped else ''
-        self.offset_message.config(text=(getattr(self, 'offset_command_message', '') or ('上一条命令处理中' if self.offset_pending else data.get('message')) or '等待 PLC 请求') + skip_text, fg=COLORS['red'] if getattr(self, 'offset_command_message', '') else INK)
-        selection_state = 'normal' if phase == 'select' and not self.offset_pending else 'disabled'
-        for button in self.offset_tool_buttons + self.offset_mode_buttons:
-            button.config(state=selection_state)
-        self.offset_start.config(state=selection_state)
-        self.offset_place.config(state='normal' if phase == 'tool' and not self.offset_pending else 'disabled')
-        self.offset_abort.config(state='normal' if phase in ('select','tool','confirm','moving','wait90','arrival') and not self.offset_pending else 'disabled')
-        existing = data.get('existing') or {}
-        text = []; warnings = []
-        for i in (1,2):
-            old = existing.get(f'tool{i}') or {}
-            text.append(f"工具{i} {display_time(old.get('time'))}  XY={old.get('offset_xy_mm','—')}  n={old.get('n','—')}  SE={old.get('se','—')}  当前={old.get('current_tools_xy','—')}")
-            if old.get('calibration_changed'): warnings.append(f'工具{i}：相机标定已变更，原工具偏移可能失效')
-            if old.get('baseline_stale'): warnings.append(f'工具{i} 偏移已重新标定，需重建对刀基准后才能换针对刀')
-        self.offset_existing.config(text='\n'.join(text))
-        self.offset_warning.config(text='；'.join(w for w in warnings if '对刀基准' in w))
-        self.offset_caution.config(text='；'.join([*(w for w in warnings if '相机标定已变更' in w), *([data['recognition_warning']] if data.get('recognition_warning') else [])]))
-        if hasattr(self, 'tip_stale'): self.tip_stale.config(text='；'.join(w for w in warnings if '对刀基准' in w))
-        self.offset_samples.delete(*self.offset_samples.get_children())
-        for i, sample in enumerate(data.get('samples') or [], 1):
-            xy = sample.get('offset_xy_mm', [0,0])
-            self.offset_samples.insert('', 'end', values=(i, sample.get('target'), f'{xy[0]:.4f}', f'{xy[1]:.4f}', f"{sample.get('distance_from_mean_mm',0):.4f}", '离群' if sample.get('outlier') else ''))
-        se = data.get('se'); good = isinstance(se, list) and len(se) == 2 and sum(not x.get('outlier') for x in data.get('samples', [])) >= data.get('min_points',5) and max(se) <= data.get('se_tol_mm', .02)
-        self.offset_stats.config(text=f"均值{data.get('mean') or '—'} std{data.get('std') or '—'} SE{se or '—'}", fg=COLORS['green'] if good else INK)
-        self.offset_edges.delete(*self.offset_edges.get_children())
-        for edge in data.get('edges') or []:
-            xy = edge.get('delta_xy_mm', [0,0]); distance = edge.get('distance_mm',0)
-            self.offset_edges.insert('', 'end', values=(edge.get('target'), edge_corner_label(edge.get('corner')), f'{xy[0]:.4f}', f'{xy[1]:.4f}', f'{distance:.4f}' + (' ⚠' if distance > data.get('edge_warn_mm',.05) else '')), tags=('warning',) if distance > data.get('edge_warn_mm',.05) else ())
-        if phase == 'confirm' and self.offset_dialog is None:
-            self.offset_confirm(data, existing.get(f'tool{tool}', {}))
-        elif phase != 'confirm' and self.offset_dialog is not None:
-            self.offset_dialog.destroy(); self.offset_dialog = None
 
-    def offset_confirm(self, data, old):
         tool = data.get('tool')
-        heading = f'确认覆盖【工具{tool}】的偏移标定结果'
-        top = tk.Toplevel(self.root); self.offset_dialog = top; top.title(heading)
-        modal_window(top, self.root)
-        candidate = data.get('candidate') or {}
-        prior, new = old.get('offset_xy_mm'), candidate.get('offset_xy_mm')
-        delta = [round(new[i]-prior[i], 5) for i in range(2)] if isinstance(prior, list) and isinstance(new, list) and len(prior)==len(new)==2 else '—'
-        tk.Label(top, text=heading, bg='#2563eb' if tool == 1 else '#d56713', fg=WHITE, font=(self.theme.title[0], 20, 'bold'), padx=12, pady=6).grid(row=0, column=0, columnspan=2, sticky='ew')
-        columns = [('旧结果', old), ('新结果', candidate)]
-        for col, (title, result) in enumerate(columns):
-            tk.Label(top, text=title, font=self.theme.title).grid(row=1, column=col, padx=24, pady=5)
-            details = (f"时间：{result.get('time','本次' if col else '无')}\n"
-                       f"偏移 XY：{result.get('offset_xy_mm','—')}\n"
-                       f"有效点数：{result.get('n','—')}\nSE：{result.get('se','—')}")
-            tk.Label(top, text=details, justify='left', font=self.theme.body).grid(row=2, column=col, padx=24, sticky='nw')
-        tk.Label(top, text=f"偏移差值：{delta}　　tools.yaml 当前 XY：{old.get('current_tools_xy','—')}", font=self.theme.body).grid(row=3, column=0, columnspan=2, pady=8)
-        ttk.Button(top, text='覆盖保存', command=lambda: self.offset_command('confirm_overwrite', {'accept':True})).grid(row=4, column=0, pady=8)
-        ttk.Button(top, text='不保存', command=lambda: self.offset_command('confirm_overwrite', {'accept':False})).grid(row=4, column=1, pady=8)
-        if hasattr(top, 'protocol'): top.protocol('WM_DELETE_WINDOW', lambda: self.offset_command('confirm_overwrite', {'accept':False}))
-        if hasattr(top, 'winfo_reqwidth'):
-            top.update_idletasks()
-            x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - top.winfo_reqwidth()) // 2)
-            y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - top.winfo_reqheight()) // 2)
-            top.geometry(f'+{x}+{y}')
+        plc_tool_id = data.get('plc_tool_id', main.get('plc_tool_id'))
+        self.offset_heading.config(
+            text=f"当前：{'工具' + str(tool) + '（PLC 100/110 指定）' if tool in (1, 2) else '等待 PLC 100/110 指定'}",
+            bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else '#667085',
+        )
+        self.offset_plc_id.config(text=f"40905={plc_tool_id if plc_tool_id is not None else '—'}")
+
+        tri = data.get('triangulation') or {}
+        tri_views = tri.get('views') or []
+        align = data.get('alignment') or {}
+        probe_step = align.get('probe_step') or 0
+        align_iter = align.get('align_iteration') or 0
+
+        stage_map = {
+            'idle': ('空闲（等待 PLC 90）', '#eef2f6', INK),
+            'triangulate': (f"三角定位 第 {len(tri_views)}/≥3 张", '#dbeafe', '#1d4ed8'),
+            'wait_tool_start': ('三角定位完成 · 等待 100/110', '#e0f2fe', '#0369a1'),
+            'probing': (f"姿态测量 第 {max(1, probe_step)}/4 步", '#fef3c7', '#92400e'),
+            'aligning': (f"对准 第 {max(1, align_iter)} 轮", '#fef3c7', '#92400e'),
+            'wait_130': ('已对准 · 等待 PLC 130 核对', '#dcfce7', '#166534'),
+            'done': ('完成并已保存', '#dcfce7', '#166534'),
+            'failed': ('失败（已回 99/999）', '#fee2e2', '#b91c1c'),
+        }
+        stage_text, stage_bg, stage_fg = stage_map.get(phase, (f'阶段：{phase}', '#eef2f6', INK))
+        self.offset_stage.config(text=f"阶段：{stage_text}", bg=stage_bg, fg=stage_fg)
+
+        msg = getattr(self, 'offset_command_message', '') or ('上一条命令处理中' if self.offset_pending else data.get('message')) or '等待 PLC 请求 90 (40905=1)'
+        msg_fg = COLORS['red'] if getattr(self, 'offset_command_message', '') or phase == 'failed' else '#168448' if phase == 'done' else INK
+        self.offset_message.config(text=msg, fg=msg_fg)
+
+        if phase == 'failed' and any(data.get(k) for k in ('failure_code', 'failure_what', 'failure_where', 'failure_hint')):
+            detail_lines = []
+            if data.get('failure_code'):
+                detail_lines.append(f"错误码：{data['failure_code']}    位置：{data.get('failure_where') or '工具偏移标定'}")
+            detail_lines.append(f"现象：{data.get('failure_what') or data.get('message') or '—'}")
+            detail_lines.append(f"建议：{data.get('failure_hint') or '检查标定尖、相机视野与 PLC 坐标。'}")
+            self.offset_failure_detail.config(text='\n'.join(detail_lines))
+            self.offset_failure_detail.grid()
+        else:
+            self.offset_failure_detail.config(text='')
+            self.offset_failure_detail.grid_remove()
+
+        active = phase in ('triangulate', 'wait_tool_start', 'probing', 'aligning', 'wait_130') and not self.offset_pending and not data.get('abort_requested')
+        self.offset_abort.config(state='normal' if active else 'disabled')
+
+        for idx, lbl in enumerate(self.offset_tri_labels, 1):
+            view = tri_views[idx - 1] if idx - 1 < len(tri_views) else None
+            if view and view.get('uv'):
+                uv = view['uv']
+                lbl.config(text=f"视角{idx} ({uv[0]:.1f},{uv[1]:.1f}) 质={view.get('quality', 0):.2f}", fg=INK)
+            elif view and not view.get('ok', True):
+                lbl.config(text=f"视角{idx}：失败", fg=COLORS['red'])
+            else:
+                lbl.config(text=f"视角{idx}：—", fg=MUTED)
+
+        xyz = tri.get('xyz')
+        target_xy = tri.get('target_xy')
+        max_res = tri.get('max_residual_mm')
+        ratio = tri.get('max_baseline_ratio')
+        angle_deg = tri.get('max_angle_deg')
+        views_geom = f"{len(tri_views)} 张"
+        if ratio is not None and angle_deg is not None:
+            views_geom += f"  (基线比 {ratio:.3f} / {angle_deg:.1f}°)"
+        self.offset_tri_grid.set({
+            '标定尖 XYZ': f"({xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f}) mm" if xyz else '—',
+            '目标机台 XY': f"({target_xy[0]:.4f}, {target_xy[1]:.4f}) mm" if target_xy else '—',
+            '视角 / 夹角': views_geom if tri_views else '—',
+            '射线最大残差': f"{max_res:.4f} mm" if max_res is not None else '—',
+        })
+
+        dxy = align.get('delta_xy_mm')
+        gap_mm = align.get('gap_mm')
+        pred_gap = align.get('predicted_gap_mm')
+        p0 = data.get('p0')
+        p_final = data.get('p_final')
+        plc_final = data.get('plc_final')
+        jacs = align.get('jacobians') or {}
+        if jacs:
+            f_rms = (jacs.get('front') or {}).get('rms_px')
+            s_rms = (jacs.get('side') or {}).get('rms_px')
+            pose_text = f"4/4 完成  RMS {f_rms:.2f} / {s_rms:.2f} px" if f_rms is not None and s_rms is not None else '4/4 完成'
+        elif probe_step:
+            pose_text = f"第 {probe_step}/4 步进行中"
+        else:
+            pose_text = '未开始'
+        gap_str = f"当前 {gap_mm:.2f} mm" if gap_mm is not None else '—'
+        if pred_gap is not None:
+            gap_str += f"  (预测 {pred_gap:.2f})"
+        verify_str = '—'
+        if plc_final and p_final:
+            diff_max = max(abs(a - b) for a, b in zip(plc_final, p_final))
+            verify_str = f"已核对，最大轴差 {diff_max:.4f} mm"
+        elif p_final:
+            verify_str = '等待 PLC 130'
+        p0_s = f"({p0[0]:.2f},{p0[1]:.2f},{p0[2]:.2f})" if p0 else '—'
+        pf_s = f"({p_final[0]:.2f},{p_final[1]:.2f},{p_final[2]:.2f})" if p_final else '—'
+        self.offset_align_grid.set({
+            '姿态测量': pose_text,
+            '对准 ΔX / ΔY': (f"第{align_iter}轮  {dxy[0]:+.4f}, {dxy[1]:+.4f} mm" if dxy else f"第{align_iter}轮" if align_iter else '—'),
+            '安全间隙': gap_str,
+            'P0 / P_final': f"{p0_s}  /  {pf_s}" if (p0 or p_final) else '—',
+            '130 核对': verify_str,
+        })
+
+        existing = data.get('existing') or {}
+        new_off = data.get('offset_xy')
+        old_off = data.get('old_offset_xy')
+        if new_off and old_off:
+            cmp_text = f"({new_off[0]:+.3f},{new_off[1]:+.3f}) / ({old_off[0]:+.3f},{old_off[1]:+.3f})"
+            diff_text = f"({new_off[0] - old_off[0]:+.4f}, {new_off[1] - old_off[1]:+.4f}) mm"
+        elif new_off:
+            cmp_text = f"({new_off[0]:+.4f}, {new_off[1]:+.4f}) mm"
+            diff_text = '—'
+        else:
+            cmp_text = '—'
+            diff_text = '—'
+        warnings = []
+        stale_flags = []
+        tool_summaries = {}
+        for i in (1, 2):
+            rec = existing.get(f'tool{i}') or {}
+            xy = rec.get('offset_xy_mm')
+            cxy = rec.get('current_tools_xy')
+            xy_s = f"{xy[0]:+.3f},{xy[1]:+.3f}" if xy else '未标'
+            cxy_s = f"{cxy[0]:+.3f},{cxy[1]:+.3f}" if cxy else '—'
+            tool_summaries[i] = f"off=({xy_s})  tools=({cxy_s})"
+            if rec.get('calibration_changed'):
+                warnings.append(f'工具{i}：相机标定已变更')
+            if rec.get('baseline_stale'):
+                stale_flags.append(f'工具{i} 需重建基准')
+        self.offset_compare_grid.set({
+            '新 / 旧偏移': cmp_text,
+            '差值 (新 - 旧)': diff_text,
+            '工具1 档案': tool_summaries[1],
+            '工具2 档案': tool_summaries[2],
+            '基准状态': '；'.join(stale_flags) if stale_flags else '均有效',
+        })
+        if stale_flags:
+            self.offset_warning.config(text='；'.join(stale_flags))
+            self.offset_warning.grid()
+        else:
+            self.offset_warning.config(text='')
+            self.offset_warning.grid_remove()
+        if warnings:
+            self.offset_caution.config(text='；'.join(warnings))
+            self.offset_caution.grid()
+        else:
+            self.offset_caution.config(text='')
+            self.offset_caution.grid_remove()
+        if hasattr(self, 'tip_stale'):
+            self.tip_stale.config(text='；'.join(w + '，需重建对刀基准后才能换针对刀' for w in stale_flags))
+        if self.offset_dialog is not None:
+            self.offset_dialog.destroy()
+            self.offset_dialog = None
 
     def build_tip(self):
         self.tip.columnconfigure(0, weight=1, uniform='tipcols'); self.tip.columnconfigure(1, weight=1, uniform='tipcols')

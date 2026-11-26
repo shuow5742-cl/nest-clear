@@ -117,6 +117,73 @@ def pickacc_demo(state, stamp):
                         'tool2':existing_tool2}, 'candidate':candidate}
 
 
+def _draw_offset_demo_images(root: Path, offset_state: str, step: int = 0) -> None:
+    """用纯 PIL 绘制新协议工具偏移标定的主相机三角定位缩略图与对刀相机叠加图（无 cv2/numpy 依赖）。"""
+    views_count = 2 if offset_state == 'triangulate' else 3
+    for idx in range(1, 6):
+        path = live_image_file(root, f'tooloffset_tri_{idx}')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if idx > views_count:
+            path.unlink(missing_ok=True)
+            continue
+        img = Image.new('RGB', (1006, 759), (232, 236, 240))
+        draw = ImageDraw.Draw(img)
+        # 中央 80% 安全区域框
+        draw.rectangle((100, 76, 906, 683), outline=(40, 160, 200), width=3)
+        cx, cy = 460 + idx * 55, 360 + (idx - 2) * 35
+        # 斜视锥体深色剪影及两侧拟合线
+        draw.polygon([(cx, cy), (cx - 125, cy - 195), (cx - 45, cy - 230)], fill=(38, 42, 48))
+        draw.line((cx - 120, cy - 187, cx, cy), fill=(0, 220, 255), width=3)
+        draw.line((cx - 43, cy - 220, cx, cy), fill=(0, 220, 255), width=3)
+        draw.ellipse((cx - 10, cy - 10, cx + 10, cy + 10), outline=(255, 60, 0), width=3)
+        draw.line((cx - 18, cy, cx + 18, cy), fill=(255, 60, 0), width=2)
+        draw.line((cx, cy - 18, cx, cy + 18), fill=(255, 60, 0), width=2)
+        draw.rectangle((16, 16, 440, 78), fill=(255, 255, 255), outline=(200, 210, 220))
+        draw.text((28, 26), f'Shot #{idx}  RefTip=({cx:.1f}, {cy:.1f}) px  Q=0.92', fill=(20, 120, 60))
+        tmp = path.with_suffix('.tmp')
+        img.save(tmp, format='JPEG')
+        os.replace(tmp, path)
+
+    for view in ('front', 'side'):
+        path = live_image_file(root, f'tooloffset_{view}_latest')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.new('RGB', (640, 480), (242, 244, 247))
+        draw = ImageDraw.Draw(img)
+        if offset_state == 'triangulate':
+            draw.rectangle((0, 0, 640, 28), fill=(255, 255, 255))
+            draw.text((12, 6), f'{"Front (X/Z)" if view == "front" else "Side (Y/Z)"} | Waiting for PLC 100/110', fill=(90, 100, 115))
+        else:
+            tx = 335 if (offset_state == 'align' and view == 'front') else 312 if offset_state == 'align' else 320
+            ty = 265 if offset_state == 'align' else 245 if offset_state == 'done' else 362
+            rx, ry = 320, 395
+            # 顶部三棱针剪影
+            draw.polygon([(tx - 16, 0), (tx + 16, 0), (tx + 12, ty - 48), (tx - 12, ty - 48)], fill=(30, 34, 40))
+            for off, ln in ((-8, 32), (0, 48), (8, 34)):
+                draw.rectangle((tx + off - 2, ty - 48, tx + off + 2, ty - 48 + ln), fill=(30, 34, 40))
+            # 底部朝上标定锥
+            draw.polygon([(rx, ry), (rx - 28, 480), (rx + 28, 480)], fill=(25, 28, 34))
+            # 过工具尖沿 Z 方向直线（略倾斜 3°）与交点标记
+            slope = 0.052 if view == 'front' else -0.052
+            draw.line((tx - 240 * slope, 0, tx + 240 * slope, 480), fill=(0, 165, 255), width=2)
+            draw.line((tx - 12, ty, tx + 12, ty), fill=(0, 185, 65), width=3)
+            draw.line((tx, ty - 12, tx, ty + 12), fill=(0, 185, 65), width=3)
+            draw.ellipse((rx - 8, ry - 8, rx + 8, ry + 8), outline=(240, 50, 20), width=3)
+            draw.line((tx, ty, rx, ry), fill=(190, 70, 210), width=1)
+            banner_color = (185, 28, 28) if offset_state == 'failed' else (22, 130, 65) if offset_state == 'done' else (25, 40, 60)
+            info = (
+                f"{'Front dX=+0.032mm' if view == 'front' else 'Side dY=-0.018mm'} | Gap=2.15mm"
+                if offset_state == 'align'
+                else f"{'Front dX=+0.012mm' if view == 'front' else 'Side dY=-0.009mm'} | Gap=3.20mm | Aligned"
+                if offset_state == 'done'
+                else f"{'Front' if view == 'front' else 'Side'} | Gap=0.72mm < 1.00mm COLLISION!"
+            )
+            draw.rectangle((0, 0, 640, 28), fill=(255, 255, 255))
+            draw.text((10, 6), info, fill=banner_color)
+        tmp = path.with_suffix('.tmp')
+        img.save(tmp, format='JPEG')
+        os.replace(tmp, path)
+
+
 def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None, focus_state=None, camcal_state=None, wb_state=None, temporary_exposure=False, film_mode=False):
     root = Path(root)
     from nest_clear.film_mode import write_mode
@@ -147,11 +214,9 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
         'camcal':{'event': 'camcal_step' if preview_state == 'blocked' else 'camcal_done', 'sequence':sequence,'plan':points,'start_xyz':[0,0,0],'kind':'move','detail':{
             'detected_corners':35,'predicted_corners':40,'saturated_fraction':0.01,'bbox':[510,120,560,170]}},
         'tooltip':{'tool':1,'plc_tool_id':2,'iterations':2,'event':'tooltip_aligned','history':history,'new':[0.02,-0.01,0.01]},
-        'command_seq':0, 'tooloffset':{'phase':'tool', 'tool':1, 'mode':'center', 'target':'T12',
-            'message':'请手动移动工具1到 T12 中心，到位后按【工具到位】',
-            'existing':{'tool1':{'time':stamp,'offset_xy_mm':[1.2,-0.3],'n':5,'se':[.01,.01], 'current_tools_xy':[1.2,-0.3], 'baseline_stale':True}, 'tool2':{}},
-            'samples':[{'target':'T02','offset_xy_mm':[1.2,-.3], 'distance_from_mean_mm':.01, 'outlier':False}],
-            'mean':[1.2,-.3], 'std':[.01,.01], 'se':[.005,.005], 'edges':[]}})
+        'command_seq':0, 'tooloffset':{'phase':'idle', 'tool':None, 'plc_tool_id':None,
+            'message':'等待 PLC 请求 90 (40905=1)',
+            'existing':{'tool1':{'saved_at':stamp,'offset_xy_mm':[10.480,-5.240],'current_tools_xy':[10.480,-5.240],'baseline_stale':True}, 'tool2':{}}}})
     if camcal_state:
         path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
         data['camcal'].update(event='camcal_failed' if camcal_state == 'failed' else 'camcal_step',
@@ -162,24 +227,93 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
     if offset_state:
         path = main_status_file(root)
         data = json.loads(path.read_text(encoding='utf-8'))
-        data['mode'] = '工具偏移标定中'
+        data['mode'] = '空闲' if offset_state in ('done', 'failed') else '工具偏移标定中'
+        data['plc_tool_id'] = 1
         d = data['tooloffset']
-        d.update(existing={
-            'tool1':{'time':stamp,'offset_xy_mm':[1.2,-.3],'n':8,'se':[.012,.011], 'current_tools_xy':[1.21,-.31], 'baseline_stale':True, 'calibration_changed':True},
-            'tool2':{'time':stamp,'offset_xy_mm':[2.1,.4],'n':7,'se':[.013,.014], 'current_tools_xy':[2.1,.4]}},
-            samples=[{'target':f'T{i:02d}','offset_xy_mm':[1.201+i*.001,-.301+i*.001], 'distance_from_mean_mm':.008, 'outlier':False} for i in range(5)],
-            mean=[1.203,-.299], std=[.012,.011], se=[.005,.005])
-        if offset_state == 'select': d.update(phase='select',tool=None,message='请选择工具和模式并开始')
-        elif offset_state == 'wait_tool': d.update(phase='tool',tool=1,message='请手动移动工具1到 T12 中心，到位后按【工具到位】')
-        elif offset_state == 'edge':
-            d.update(phase='wait90',tool=1,mode='center_edge',message='边缘验证中，不需要移动工具', edges=[{'target':'T12','corner':i,'delta_xy_mm':[.012,.008] if i != 2 else [.06,.02], 'distance_mm':.014 if i != 2 else .063} for i in range(4)])
-        elif offset_state == 'confirm':
-            d.update(phase='confirm',tool=1,message='等待确认覆盖',candidate={'time':stamp,'offset_xy_mm':[1.203,-.299],'n':8,'se':[.005,.005]})
+        views_3 = [
+            {'index': 1, 'pose': [162.0, 70.0, 122.0], 'uv': [515.2, 360.4], 'quality': 0.91, 'ok': True},
+            {'index': 2, 'pose': [174.5, 91.6, 122.0], 'uv': [570.4, 395.1], 'quality': 0.93, 'ok': True},
+            {'index': 3, 'pose': [174.5, 48.4, 122.0], 'uv': [625.1, 325.8], 'quality': 0.90, 'ok': True},
+        ]
+        tri_done = {
+            'views': views_3,
+            'xyz': [92.008, 30.012, 11.994],
+            'target_xy': [92.008, 30.012],
+            'max_residual_mm': 0.0082,
+            'rms_residual_mm': 0.0049,
+            'max_baseline_ratio': 0.224,
+            'max_angle_deg': 12.8,
+        }
+        jac_info = {
+            'front': {'rms_px': 0.12, 'condition_number': 18.4},
+            'side': {'rms_px': 0.14, 'condition_number': 19.1},
+        }
+        d.update(
+            plc_tool_id=1,
+            existing={
+                'tool1': {'saved_at': stamp, 'offset_xy_mm': [10.480, -5.240], 'current_tools_xy': [10.480, -5.240], 'baseline_stale': True},
+                'tool2': {'saved_at': stamp, 'offset_xy_mm': [-8.310, 6.420], 'current_tools_xy': [-8.310, 6.420], 'baseline_stale': False},
+            },
+            old_offset_xy=[10.480, -5.240],
+        )
+        if offset_state == 'triangulate':
+            d.update(
+                phase='triangulate',
+                tool=None,
+                message='三角定位 第 2/≥3 张完成，下发下一相机坐标 (174.50, 48.40, 122.00) 并回 90',
+                triangulation={'views': views_3[:2], 'xyz': None, 'target_xy': None, 'max_residual_mm': None},
+                alignment=None,
+            )
+        elif offset_state == 'align':
+            d.update(
+                phase='aligning',
+                tool=1,
+                message='工具 1 对准 第 2 轮（ΔX=+0.032, ΔY=-0.018, 间隙 2.15 mm）',
+                triangulation=tri_done,
+                p0=[101.850, 25.350, -6.800],
+                alignment={
+                    'probe_step': 4, 'align_iteration': 2, 'delta_xy_mm': [0.032, -0.018],
+                    'gap_mm': 2.15, 'predicted_gap_mm': 2.14, 'jacobians': jac_info,
+                },
+            )
+        elif offset_state == 'done':
+            d.update(
+                phase='done',
+                tool=1,
+                message='工具 1 偏移标定完成并已保存：offset=(+10.5020, -5.2080) mm',
+                triangulation=tri_done,
+                p0=[101.850, 25.350, -6.800],
+                p_final=[102.510, 24.804, -6.800],
+                plc_final=[102.510, 24.805, -6.800],
+                offset_xy=[10.502, -5.208],
+                alignment={
+                    'probe_step': 4, 'align_iteration': 3, 'delta_xy_mm': [0.012, -0.009],
+                    'gap_mm': 3.20, 'predicted_gap_mm': 3.20, 'jacobians': jac_info,
+                },
+                existing={
+                    'tool1': {'saved_at': stamp, 'offset_xy_mm': [10.502, -5.208], 'current_tools_xy': [10.502, -5.208], 'baseline_stale': True},
+                    'tool2': {'saved_at': stamp, 'offset_xy_mm': [-8.310, 6.420], 'current_tools_xy': [-8.310, 6.420], 'baseline_stale': False},
+                },
+            )
+        elif offset_state == 'failed':
+            d.update(
+                phase='failed',
+                tool=1,
+                message='会碰到标定尖：移动后预测竖直间隙 0.720 mm 小于安全下限 1 mm',
+                failure_code='TOOLOFFSET-COLLISION',
+                failure_what='会碰到标定尖：移动后预测竖直间隙 0.720 mm 小于安全下限 1 mm',
+                failure_where='工具 1 防撞检查（间隙 0.720 mm）',
+                failure_hint='抬高工具 Z 坐标或调整工具装夹高度后再重新标定。',
+                triangulation=tri_done,
+                p0=[101.850, 25.350, -7.800],
+                alignment={
+                    'probe_step': 3, 'align_iteration': 0, 'delta_xy_mm': [0.180, -0.110],
+                    'gap_mm': 2.18, 'predicted_gap_mm': 0.72, 'jacobians': None,
+                },
+            )
         atomic(path, data)
         if initial:
-            project = Path(__file__).resolve().parents[3]
-            env = dict(os.environ, PYTHONPATH=str(project / 'src'))
-            subprocess.run([str(project / '.venv/bin/python'), '-m', 'nest_clear.tools.offset_demo_image', str(root)], cwd=project, env=env, check=True, timeout=30)
+            _draw_offset_demo_images(root, offset_state, step)
     if pickacc_state:
         path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
         data['mode']='挑取精度标定中'; data['pickacc']=pickacc_demo(pickacc_state,stamp)
@@ -328,7 +462,7 @@ def generate(root):
 
 def main():
     from .__main__ import add_view_arguments, validate_view_arguments
-    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','z_step','constant','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm','prepare','prepare_error','prepare_unassigned')); parser.add_argument('--tooltip-state', choices=('idle','probe','confirm_move','in_range','done','fail')); add_view_arguments(parser)
+    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('triangulate','align','done','failed')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','z_step','constant','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm','prepare','prepare_error','prepare_unassigned')); parser.add_argument('--tooltip-state', choices=('idle','probe','confirm_move','in_range','done','fail')); add_view_arguments(parser)
     parser.add_argument('--film-mode', action='store_true')
     parser.add_argument('--temporary-exposure', action='store_true')
     parser.add_argument('--wb-state', choices=('running','success','fail'), default=None)
@@ -338,7 +472,7 @@ def main():
     if args.camcal_state:
         args.preview_state = 'on' if args.camcal_state == 'preview' else 'blocked'
     if args.offset_state is None and args.page in ('offset', 'tool-offset', '工具偏移标定', '工具偏移标定页'):
-        args.offset_state = 'wait_tool'
+        args.offset_state = 'align'
     if args.wb_state: args.focus_state = 'live'
     if args.focus_state == 'off':
         args.preview_state = 'off'

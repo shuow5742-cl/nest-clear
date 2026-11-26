@@ -52,7 +52,11 @@ class MainStatus:
                     d['camcal']['completed_indices'] = list(range(min(count, len(row.get('plan') or []))))
                     d['camcal']['current_index'] = count if count < len(row.get('plan') or []) else None
             if e == 'tooloffset_command': d['command_seq'] = row.get('seq', d['command_seq'])
-            if e == 'tooloffset_state': d['tooloffset'].update(row)
+            if e == 'tooloffset_state':
+                if row.get('phase') == 'triangulate' and not (row.get('triangulation') or {}).get('views'):
+                    for key in ('triangulation', 'alignment', 'p0', 'p_final', 'plc_final', 'offset_xy', 'old_offset_xy', 'failure_code', 'failure_what', 'failure_where', 'failure_hint', 'next_camera_xyz'):
+                        d['tooloffset'].pop(key, None)
+                d['tooloffset'].update(row)
             if e == 'pickacc_state': d['pickacc'].update(row)
             if e == 'baseline_state': d['baseline'].update(row)
             if e == 'tooltip_start': d['tooltip'] = {}

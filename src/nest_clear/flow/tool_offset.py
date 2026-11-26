@@ -118,6 +118,8 @@ class ToolOffset(TreeNode):
                 fields['p0'] = s['p0']
             if s.get('p_final') is not None:
                 fields['p_final'] = s['p_final']
+            if s.get('plc_final') is not None:
+                fields['plc_final'] = s['plc_final']
             if s.get('offset_xy') is not None:
                 fields['offset_xy'] = s['offset_xy']
             if s.get('old_offset_xy') is not None:
