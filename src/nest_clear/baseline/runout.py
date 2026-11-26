@@ -1,5 +1,6 @@
 """离心测试的采集、逐帧质量检查和记录，运行于相机拥有者进程。"""
 from concurrent.futures import ThreadPoolExecutor
+import copy
 from datetime import datetime
 import json
 import threading
@@ -13,7 +14,7 @@ from nest_clear.tooltip.factory import make_tip_detector
 from nest_clear.tooltip.runout import RunoutSession
 
 
-def evaluate_frames(frames, configs, session, std_max=0.3, scales=(13.5, 13.5)):
+def detect_frames(frames, configs, std_max=0.3):
     coords, reasons = {}, []
     for camera, label in (('front', '正面'), ('side', '侧面')):
         detector = make_tip_detector(configs.get(camera, {}))
@@ -40,9 +41,18 @@ def evaluate_frames(frames, configs, session, std_max=0.3, scales=(13.5, 13.5)):
                     reasons.append(f'{label}五帧 {axis} 标准差 {std[j]:.3f} > {std_max:g} px')
     if reasons:
         return coords, {'rejected': True, 'reason': '；'.join(reasons)}
+    return coords, None
+
+
+def add_coordinates(coords, session, scales):
     maps = [np.eye(2) * scale / 1000 for scale in scales]
-    return coords, session.add_press(coords['front'], coords['side'], *maps,
-                                     meta={'scale_um_per_px': list(scales), 'scale_source': '11-25 实测：Y 每 0.04mm 侧面平移 2.95px'})
+    return session.add_press(coords['front'], coords['side'], *maps,
+                             meta={'scale_um_per_px': list(scales), 'scale_source': '11-25 实测：Y 每 0.04mm 侧面平移 2.95px'})
+
+
+def evaluate_frames(frames, configs, session, std_max=0.3, scales=(13.5, 13.5)):
+    coords, result = detect_frames(frames, configs, std_max)
+    return coords, result if result is not None else add_coordinates(coords, session, scales)
 
 
 class RunoutController:
@@ -97,10 +107,12 @@ class RunoutController:
                 self.attempt += 1
                 pressed = time.monotonic()
                 self.publish(busy=True, message='正在采集并计算')
-                self.thread = threading.Thread(target=self._press, args=(pressed, seq, self.attempt), daemon=True, name='tooltip-runout')
+                self.pending_seq = seq
+                snapshot = copy.deepcopy(self.session)
+                self.thread = threading.Thread(target=self._press, args=(pressed, seq, self.attempt, self.session, snapshot, self.directory), daemon=True, name='tooltip-runout')
                 self.thread.start()
 
-    def _press(self, pressed, seq, attempt):
+    def _press(self, pressed, seq, attempt, session, snapshot, directory):
         frames, coords = {}, {}
         try:
             with ThreadPoolExecutor(max_workers=2) as pool:
@@ -111,35 +123,41 @@ class RunoutController:
                     except Exception as exc:
                         raise RuntimeError(f'{"正面" if n == "front" else "侧面"}采集失败：{exc}') from exc
             for n in ('front', 'side'):
-                if not cv2.imwrite(str(self.directory / f'{attempt:03d}_{n}.png'), frames[n][0]):
+                if not cv2.imwrite(str(directory / f'{attempt:03d}_{n}.png'), frames[n][0]):
                     raise OSError(f'{n} 原图保存失败')
             configs = self.prep.config.tool_calibration.detection if self.prep.config else {}
             scales = (self.prep.ui_config.get('main_um_per_px', 13.5), self.prep.ui_config.get('aux_um_per_px', 13.5))
-            coords, result = evaluate_frames(frames, configs, self.session, self.prep.ui_config.get('runout_frame_std_max_px', .3), scales)
+            coords, result = detect_frames(frames, configs, self.prep.ui_config.get('runout_frame_std_max_px', .3))
+            if result is None:
+                with self.lock:
+                    active = self.session is session
+                if active:
+                    result = add_coordinates(coords, snapshot, scales)
         except Exception as exc:
             result = {'rejected': True, 'reason': str(exc)}
         with self.lock:
-            record = {'attempt': attempt, 'time': datetime.now().astimezone().isoformat(), 'coordinates': coords, 'result': result}
-            with (self.directory / 'session.jsonl').open('a', encoding='utf-8') as f:
+            interrupted = self.session is not session
+            if interrupted:
+                result = {'rejected': True, 'reason': '离心测试已结束，本次记录被中断'}
+            elif not result['rejected']:
+                self.session = snapshot
+            record = {'attempt': attempt, 'time': datetime.now().astimezone().isoformat(), 'coordinates': coords, 'result': result, 'interrupted': interrupted}
+            with (directory / 'session.jsonl').open('a', encoding='utf-8') as f:
                 f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
             self.events.emit('tooltip_runout_press', **record)
             if result['rejected']:
                 self.events.emit('tooltip_runout_rejected', **record)
-            self.publish(busy=False, reply_seq=seq, result=self.state.get('result') if result['rejected'] else result,
-                         rejected_reason=result.get('reason') or self.state.get('rejected_reason', ''), message=result.get('reason') or result['message'])
+            if not interrupted:
+                self.publish(busy=False, reply_seq=seq, result=self.state.get('result') if result['rejected'] else result,
+                             rejected_reason=result.get('reason') or self.state.get('rejected_reason', ''), message=result.get('reason') or result['message'])
 
     def end(self, reason, seq=None):
-        # The caller may be the PLC handoff; allow the worker to finish before summary.
-        thread = self.thread
-        if thread and thread.is_alive() and thread is not threading.current_thread():
-            self.lock.release()
-            try: thread.join()
-            finally: self.lock.acquire()
         if self.session:
             (self.directory / 'summary.json').write_text(json.dumps(self.session.to_record(), ensure_ascii=False, indent=2), encoding='utf-8')
             self.events.emit('tooltip_runout_end', reason=reason, directory=str(self.directory))
             self.session = None
-        self.publish(active=False, busy=False, reply_seq=seq if seq is not None else self.state.get('reply_seq'), message=reason)
+        reply_seq = seq if seq is not None else (getattr(self, 'pending_seq', None) if self.state.get('busy') else self.state.get('reply_seq'))
+        self.publish(active=False, busy=False, reply_seq=reply_seq, message=reason)
 
     def interrupt(self, reason):
         with self.lock:

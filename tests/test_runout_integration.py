@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -41,7 +42,7 @@ def test_record_and_plc_interruption(tmp_path, monkeypatch):
                            config=None, ui_config={}, capture_after=lambda *args: [SimpleNamespace(frame=frame)] * 5)
     prep.runout = RunoutController(prep)
     prep.stop_previews = lambda cameras: list(cameras)
-    monkeypatch.setattr('nest_clear.baseline.runout.evaluate_frames', lambda frames, configs, session, *args: ({'front': [[0, 0]]*5, 'side': [[0, 0]]*5}, session.add_press([[0, 0]]*5, [[0, 0]]*5, np.eye(2)*.0135, np.eye(2)*.0135)))
+    monkeypatch.setattr('nest_clear.baseline.runout.detect_frames', lambda frames, configs, *args: ({'front': [[0, 0]]*5, 'side': [[0, 0]]*5}, None))
     prep.runout.command('tooltip_runout_start', 1)
     prep.runout.command('tooltip_runout_press', 2)
     prep.runout.thread.join(3)
@@ -54,6 +55,88 @@ def test_record_and_plc_interruption(tmp_path, monkeypatch):
     assert (path/'001_front.png').exists() and (path/'001_side.png').exists()
     assert prep.runout.state['message'] == '被 PLC 请求中断'
     assert {event for event, _ in events.rows} >= {'tooltip_runout_start', 'tooltip_runout_press', 'tooltip_runout_end'}
+
+
+def test_plc_interrupt_does_not_wait_for_capture(tmp_path, monkeypatch):
+    events = SimpleNamespace(directory=tmp_path, rows=[])
+    events.emit = lambda event, **fields: events.rows.append((event, fields))
+    entered = threading.Event()
+    frame = np.zeros((10, 10), dtype=np.uint8)
+
+    def capture(*args):
+        entered.set()
+        time.sleep(3)
+        return [SimpleNamespace(frame=frame)] * 5
+
+    prep = SimpleNamespace(events=events, lock=threading.RLock(), enabled={'front': True, 'side': True},
+                           streams={'front': 1, 'side': 1}, state={name: {'detection_status': '精定位'} for name in ('front', 'side')},
+                           config=None, ui_config={}, capture_after=capture)
+    prep.runout = RunoutController(prep)
+    stopped = []
+    prep.stop_previews = lambda cameras: stopped.extend(cameras) or list(cameras)
+    events.tooltip_preparation = prep
+    monkeypatch.setattr('nest_clear.baseline.runout.detect_frames', lambda frames, configs, *args: ({'front': [[0, 0]]*5, 'side': [[0, 0]]*5}, None))
+    additions = []
+    monkeypatch.setattr('nest_clear.baseline.runout.add_coordinates', lambda *args: additions.append(args))
+    prep.runout.command('tooltip_runout_start', 1)
+    prep.runout.session.add_press([[0, 0]] * 5, [[0, 0]] * 5, np.eye(2) * .0135, np.eye(2) * .0135)
+    prep.runout.command('tooltip_runout_press', 2)
+    assert entered.wait(1)
+    directory = prep.runout.directory
+    worker = prep.runout.thread
+    start = time.monotonic()
+    close_previews_for(events, {'front', 'side'}, 'plc_request', func=100)
+    assert time.monotonic() - start < .2
+    assert set(stopped) == {'front', 'side'}
+    assert len(json.loads((directory / 'summary.json').read_text())['presses']) == 1
+    assert prep.runout.state['message'] == '被 PLC 请求中断'
+    assert prep.runout.state['reply_seq'] == 2
+    assert any(event == 'tooltip_runout_end' for event, _ in events.rows)
+    assert worker.is_alive()
+    worker.join(4)
+    assert not worker.is_alive()
+    assert additions == []
+    record = json.loads((directory / 'session.jsonl').read_text())
+    assert record['interrupted'] is True and record['result']['rejected']
+    assert len(json.loads((directory / 'summary.json').read_text())['presses']) == 1
+    assert prep.runout.state['message'] == '被 PLC 请求中断'
+
+
+def test_interrupt_during_calculation_keeps_new_session_untouched(tmp_path, monkeypatch):
+    from nest_clear.baseline.runout import add_coordinates
+    events = SimpleNamespace(directory=tmp_path, rows=[])
+    events.emit = lambda event, **fields: events.rows.append((event, fields))
+    entered, release = threading.Event(), threading.Event()
+    frame = np.zeros((10, 10), dtype=np.uint8)
+    prep = SimpleNamespace(events=events, lock=threading.RLock(), enabled={'front': True, 'side': True},
+                           streams={'front': 1, 'side': 1}, state={name: {'detection_status': '精定位'} for name in ('front', 'side')},
+                           config=None, ui_config={}, capture_after=lambda *args: [SimpleNamespace(frame=frame)] * 5)
+    prep.runout = RunoutController(prep)
+    monkeypatch.setattr('nest_clear.baseline.runout.detect_frames', lambda *args: ({'front': [[0, 0]]*5, 'side': [[0, 0]]*5}, None))
+
+    def calculate(*args):
+        entered.set()
+        assert release.wait(3)
+        return add_coordinates(*args)
+
+    monkeypatch.setattr('nest_clear.baseline.runout.add_coordinates', calculate)
+    prep.runout.command('tooltip_runout_start', 1)
+    prep.runout.command('tooltip_runout_press', 2)
+    assert entered.wait(1)
+    directory, worker = prep.runout.directory, prep.runout.thread
+    start = time.monotonic()
+    prep.runout.interrupt('被 PLC 请求中断')
+    assert time.monotonic() - start < .2
+    assert json.loads((directory / 'summary.json').read_text())['presses'] == []
+    prep.runout.command('tooltip_runout_start', 3)
+    new_session = prep.runout.session
+    release.set()
+    worker.join(4)
+    assert not worker.is_alive()
+    assert json.loads((directory / 'session.jsonl').read_text())['interrupted'] is True
+    assert prep.runout.session is new_session
+    assert new_session.to_record()['presses'] == []
+    assert prep.runout.state['active'] and prep.runout.state['reply_seq'] == 3
 
 @pytest.mark.parametrize('host', ['supervisor', 'main'])
 def test_both_hosts_route_commands(host, monkeypatch):

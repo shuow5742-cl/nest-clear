@@ -892,7 +892,7 @@ class App:
         enable(self.runout_end, active and not busy)
         result = runout.get('result') or {}
         maximum = result.get('max_deviation_um')
-        self.runout_max.config(text=f'最大离心量 {maximum:.1f} µm' if maximum is not None else '最大离心量 — µm',
+        self.runout_max.config(text=f'最大离心量 {maximum:.1f} µm　{"合格" if result.get("pass") else "不合格"}' if maximum is not None else '最大离心量 — µm',
                                fg=(COLORS['green'] if result.get('pass') else COLORS['red']) if maximum is not None else INK)
         if result:
             diameter = result.get('circle_fit_diameter_um')
