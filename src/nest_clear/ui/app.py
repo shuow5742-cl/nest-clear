@@ -696,18 +696,20 @@ class App:
         self.baseline_save = ttk.Button(controls, text='保存基准', command=lambda:self.baseline_command('baseline_save')); self.baseline_save.grid(row=0, column=7, padx=2)
         self.baseline_end = ttk.Button(controls, text='结束/放弃', command=lambda:self.baseline_command('baseline_end')); self.baseline_end.grid(row=0, column=8, padx=2)
         runout = tk.Frame(head, bg=WHITE, padx=6, pady=3)
-        tk.Label(runout, text='离心测试', bg=WHITE, fg=INK).grid(row=0, column=4, padx=4)
         runout.grid(row=4, column=0, sticky='ew')
-        self.runout_start = ttk.Button(runout, text='开始离心测试', command=lambda:self.baseline_command('tooltip_runout_start'))
+        tk.Label(runout, text='离心测试', bg=WHITE, fg=INK).grid(row=0, column=0, sticky='w', padx=4)
+        runout_controls = tk.Frame(runout, bg=WHITE)
+        runout_controls.grid(row=1, column=0, sticky='w')
+        self.runout_start = ttk.Button(runout_controls, text='开始离心测试', command=lambda:self.baseline_command('tooltip_runout_start'))
         self.runout_start.grid(row=0, column=0, padx=3)
-        self.runout_press = ttk.Button(runout, text='记录并计算', command=lambda:self.baseline_command('tooltip_runout_press'))
+        self.runout_press = ttk.Button(runout_controls, text='记录并计算', command=lambda:self.baseline_command('tooltip_runout_press'))
         self.runout_press.grid(row=0, column=1, padx=3)
-        self.runout_end = ttk.Button(runout, text='结束', command=lambda:self.baseline_command('tooltip_runout_end'))
+        self.runout_end = ttk.Button(runout_controls, text='结束', command=lambda:self.baseline_command('tooltip_runout_end'))
         self.runout_end.grid(row=0, column=2, padx=3)
-        self.runout_max = tk.Label(runout, text='最大离心量 — µm', bg=WHITE, fg=INK, font=(self.theme.title[0], 20, 'bold'))
+        self.runout_max = tk.Label(runout_controls, text='最大离心量 — µm', bg=WHITE, fg=INK, font=(self.theme.title[0], 20, 'bold'))
         self.runout_max.grid(row=0, column=3, padx=12)
         self.runout_detail = tk.Label(runout, text='请打开两路预览并精定位', bg=WHITE, fg=MUTED, anchor='w', justify='left')
-        self.runout_detail.grid(row=1, column=0, columnspan=4, sticky='ew')
+        self.runout_detail.grid(row=2, column=0, sticky='ew')
         self.baseline_live = tk.Label(head, text='实时辅助：等待针尖', bg=WHITE, fg=MUTED, anchor='w', font=self.theme.body)
         self.baseline_live.grid(row=2, column=0, sticky='ew')
         self.baseline_notice = tk.Label(head, text='', bg=WHITE, fg=COLORS['yellow'], anchor='w', font=self.theme.body)
@@ -903,7 +905,9 @@ class App:
                       f"噪声 正面 {noise.get('front', 0):.1f} / 侧面 {noise.get('side', 0):.1f} µm")
         else:
             detail = '次数 0　等待记录'
-        detail += '　' + (runout.get('message') or '')
+        message = runout.get('message') or ''
+        if message and not (ready_reason and message == '请打开两路预览并精定位'):
+            detail += '　' + message
         if ready_reason: detail += '　' + ready_reason
         if runout.get('rejected_reason'): detail += '\n最近一次作废：' + runout['rejected_reason']
         self.runout_detail.config(text=detail)
