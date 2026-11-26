@@ -274,7 +274,9 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         active['mode'] = '挑毛中'
         ui.update_baseline(active, supervisor)
         for view in ui.baseline_views.values():
-            assert all(view[key].options['state'] == 'normal' for key in ('toggle', 'exposure', 'reset'))
+            assert all(view[key].options['state'] == 'normal' for key in ('toggle', 'reset'))
+            assert view['exposure'].options['state'] == 'disabled'
+            assert '精定位' in view['scan_status'].options['text']
             assert not view['reason'].visible
         active['baseline']['preview']['front']['on'] = False
         ui.update_baseline(active, supervisor)
@@ -321,6 +323,11 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         low_main['baseline']['preview']['front']['exposure_saved'] = {'exposure': 30, 'source': 'manual', 'time': '2026-11-25'}
         ui.update_baseline(low_main)
         view = ui.baseline_views['front']
+        low_main['baseline']['preview']['front']['exposure_progress'] = '正在测曝光 第2/4档'
+        low_main['baseline']['preview']['front']['exposure_scan_rows'] = [dict(exposure=3, recognized=True, prongs=3, contrast=70., sharpness_percent=100., background=230., saturated_fraction=.1, tool_whiteness=.01, qualified=True, selected=True, reasons=[])]
+        ui.update_baseline(low_main)
+        assert '第2/4档' in view['scan_status'].options['text']
+        assert '0.3' in view['scan_table'].options['text'] and '★' in view['scan_table'].options['text']
         assert '3.0 ms' in view['exposure_saved'].options['text']
         assert view['exposure_save'].options['state'] == 'normal'
         with monkeypatch.context() as scoped:

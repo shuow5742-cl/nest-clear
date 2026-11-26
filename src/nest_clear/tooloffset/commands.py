@@ -61,7 +61,7 @@ class CommandReader:
         self.events.emit('tooloffset_command', seq=seq, command=name, params=params, accepted=accepted)
         if name == 'baseline_start' and not accepted:
             self.events.emit('baseline_state', message=rejection_message or '当前正在挑毛或标定，忽略开始请求')
-        if accepted and (name.startswith('tooltip_runout_') or name in ('tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save')):
+        if accepted and (name.startswith('tooltip_runout_') or name in ('tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save')):
             params = {**params, '_seq': seq}
         return (name, params) if accepted else None
 

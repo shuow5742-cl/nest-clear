@@ -128,6 +128,12 @@ tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把�
     front: {backend: uvc, device: auto}
     side: {backend: uvc, device: auto}
   camera_controls: {}  # 默认 YUYV 1920x1080、手动曝光及固定图像控制
+  exposure_scan:  # 对刀相机按工具质量选档；每单位为 100µs
+    method: quality_scan  # 可选 brightness，使用旧背景亮度算法
+    max_exposure: 10  # 扫描 1 至 10，即 0.1–1.0ms
+    contrast_min: 40
+    sharpness_ratio: 0.9
+    saturation_max: 0.05  # 工具区域高于 230 灰度的比例上限
   auto_exposure:  # P99 200–235，饱和率 < 0.1%
     max_exposure: 1600  # 160ms，约 6fps 的帧周期；再长会降帧，背光足够时不应需要（设备上限 5000）
   detection:  # method 可选 trident（默认）或 silhouette（旧剪影法）

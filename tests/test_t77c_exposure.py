@@ -10,7 +10,7 @@ from nest_clear.devices.tooltip_exposure import auto_exposure, measure
 from test_t77b_capture import make_preparation, wait_for
 
 
-@pytest.mark.parametrize('command', ['tooltip_exposure_set', 'tooltip_exposure_save'])
+@pytest.mark.parametrize('command', ['tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_save'])
 def test_command_reader_preserves_execution_sequence(tmp_path, command):
     from nest_clear.tooloffset.commands import CommandReader, send
     from nest_clear.flow.leaves import PREVIEW_COMMANDS
@@ -152,6 +152,7 @@ def test_close_during_exposure_reports_error(tmp_path, monkeypatch):
 
 def test_set_is_rejected_during_retest(tmp_path, monkeypatch):
     prep, camera = make_preparation(tmp_path, monkeypatch, .01)
+    prep.config = SimpleNamespace(tool_calibration=SimpleNamespace(exposure_scan={'method': 'brightness'}, auto_exposure={}, detection={'front': {}, 'side': {}}))
     camera.exposure_limits = lambda: {'min': 1, 'max': 100, 'step': 1}
     entered, release = threading.Event(), threading.Event()
     def retest(camera, **options):
@@ -162,6 +163,7 @@ def test_set_is_rejected_during_retest(tmp_path, monkeypatch):
     try:
         prep.command('tooltip_preview', {'camera': 'front', 'on': True})
         wait_for(lambda: prep.state['front'].get('exposure_limits'))
+        with prep.lock: prep.state['front']['detection_status'] = '精定位'
         prep.command('tooltip_exposure_retest', {'camera': 'front'})
         assert entered.wait(3)
         prep.command('tooltip_exposure_set', {'camera': 'front', '_seq': 99, 'exposure_ms': '.3'})

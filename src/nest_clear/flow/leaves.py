@@ -60,7 +60,7 @@ def handle_preview_command(events, mode, name, params):
     if not allowed:
         if name.startswith('tooltip_runout_'):
             preparation.runout.publish(reply_seq=params.get('_seq'), message=reason)
-        if name in ('tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save'):
+        if name in ('tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save'):
             preparation.exposure_reply(params.get('camera'), params.get('_seq'), 'error', reason)
         events.emit('baseline_state', message=reason)
         return
@@ -75,6 +75,8 @@ def handle_preview_command(events, mode, name, params):
             worker.on_stop()
         preparation.command(name, params)
     except Exception as exc:
+        if name in ('tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save'):
+            preparation.exposure_reply(params.get('camera'), params.get('_seq'), 'error', str(exc))
         events.emit('baseline_state', message=str(exc))
 
 

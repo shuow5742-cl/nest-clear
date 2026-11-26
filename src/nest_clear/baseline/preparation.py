@@ -20,10 +20,11 @@ from nest_clear.tooltip.detector import SilhouetteTipDetector
 from nest_clear.tooltip.factory import make_tip_detector
 from nest_clear.tooltip.focus_metrics import focus_metrics, EdgeWidthTracker, BandGradientTracker
 from nest_clear.tooltip.trident import TridentResult
+from nest_clear.tooltip.exposure_scan import scan_exposure
 from nest_clear.baseline.latest_capture import FrameBroker
 
 logger = logging.getLogger(__name__)
-LOW_FREQUENCY_PREVIEW_KEYS = ('on', 'device', 'error', 'exposure_source', 'exposure_error', 'exposure_limits', 'exposure_result', 'exposure_busy', 'exposure_saved')
+LOW_FREQUENCY_PREVIEW_KEYS = ('on', 'device', 'error', 'exposure_source', 'exposure_error', 'exposure_limits', 'exposure_result', 'exposure_busy', 'exposure_saved', 'exposure_progress', 'exposure_scan_rows')
 
 
 def exposure_source(measured):
@@ -129,6 +130,7 @@ class Preparation:
         self.streams = {}
         self.capture_threads = {}
         self.exposure_requests = {name: None for name in self.enabled}
+        self.retest_seq = {name: None for name in self.enabled}
         self._preview_last_write = None
         self._preview_timer = None
         self._last_summary = {n: None for n in self.enabled}
@@ -358,24 +360,51 @@ class Preparation:
                     with self.lock:
                         self.state[name]['exposure_busy'] = True
                         self.retest[name].clear()
+                        request_seq = self.retest_seq[name]
+                        self.retest_seq[name] = None
                     stream.invalidate()
                     self.reset_peak[name].set()
                     with self.lock:
                         previous_source = self.state[name].get('exposure_source', '默认')
                         self.state[name]['exposure_source'] = '正在测曝光…'; self.state[name].pop('exposure_error', None)
+                        self.state[name]['exposure_progress'] = '正在测曝光，准备采集'
+                        self.state[name]['exposure_scan_rows'] = []
                     self.publish()
+                    rows = []
+                    scan_options = getattr(getattr(self.config, 'tool_calibration', None), 'exposure_scan', {}) or {}
+                    method = scan_options.get('method', 'quality_scan')
+                    scan_error = None
+                    result = None
+                    initial = None
+                    saved_ok = False
                     try:
                         initial = camera.get_exposure()
                         try:
                             options = dict(getattr(self.config.tool_calibration, 'auto_exposure', {}) if self.config else {})
-                            if not measured:
-                                options['initial_exposure'] = max(1, limits['min'] if limits else 1)
-                            result = auto_exposure(ExposureCamera(self), **options)
+                            if method == 'brightness':
+                                if not measured:
+                                    options['initial_exposure'] = max(1, limits['min'] if limits else 1)
+                                result = auto_exposure(ExposureCamera(self), **options)
+                            else:
+                                detector_cfg = self.config.tool_calibration.detection[name] if self.config else {}
+                                detector = make_tip_detector(detector_cfg, SilhouetteTipDetector)
+                                def progress(k, total, row):
+                                    rows.append(row)
+                                    with self.lock:
+                                        self.state[name]['exposure_progress'] = f'正在测曝光 第{k}/{total}档'
+                                    self.publish()
+                                result = scan_exposure(ExposureCamera(self), detector, 3 if name == 'front' else 2,
+                                    levels=scan_options.get('max_exposure', 10), contrast_min=scan_options.get('contrast_min', 40.),
+                                    sharpness_ratio=scan_options.get('sharpness_ratio', .9), saturation_max=scan_options.get('saturation_max', .05), progress=progress)
+                                rows = result['rows']
                         except Exception:
                             camera.set_exposure(initial); raise
+                        snapshot = camera.settings_snapshot()
+                        snapshot['exposure_status'] = '已测曝光'
+                        save_measurement(path, name, snapshot, result)
+                        saved_ok = True
                         camera.exposure_status = '已测曝光'
                         if hasattr(camera, 'actual_settings'): camera.actual_settings['exposure_status'] = '已测曝光'
-                        save_measurement(path, name, camera.settings_snapshot(), result)
                         with self.lock:
                             measured = measurement_for_device(load_settings(path), device)
                             self.state[name].update(exposure_source=exposure_source(measured), exposure_saved=measured)
@@ -383,6 +412,11 @@ class Preparation:
                         self.publish()
                         self.refresh_existing()
                     except Exception as exc:
+                        scan_error = str(exc)
+                        rows = getattr(exc, 'rows', rows)
+                        if result is not None and initial is not None and not saved_ok:
+                            try: camera.set_exposure(initial)
+                            except Exception: logger.exception('保存曝光失败后恢复原曝光失败')
                         if stop.is_set():
                             break
                         with self.lock:
@@ -390,10 +424,33 @@ class Preparation:
                         self.events.emit('tooltip_exposure_failed', camera=name, reason=str(exc))
                         self.publish()
                     finally:
+                        if method == 'quality_scan':
+                            record = {'camera': name, 'device': device, 'time': self._clock().isoformat(), 'rows': rows,
+                                      'exposure': result.get('exposure') if result else None,
+                                      'reason': scan_error or (result.get('reason') if result else None), 'success': result is not None and scan_error is None}
+                            try:
+                                now = self._clock()
+                                directory = Path(self.events.directory) / now.date().isoformat() / 'tooltip_exposure'
+                                directory.mkdir(parents=True, exist_ok=True)
+                                path_record = directory / (now.strftime('%H%M%S_%f') + '_' + name + '.json')
+                                path_record.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
+                                self.events.emit('tooltip_exposure_scan', camera=name, success=record['success'], path=str(path_record), reason=record['reason'])
+                            except Exception as exc:
+                                self.events.emit('warning', reason=f'曝光扫描记录失败：{exc}')
+                                self.events.emit('tooltip_exposure_scan', camera=name, success=record['success'], path=None, reason=record['reason'])
+                            with self.lock:
+                                self.state[name]['exposure_scan_rows'] = rows
+                        with self.lock:
+                            self.state[name].pop('exposure_progress', None)
                         self.reset_peak[name].set()
                         with self.lock:
                             self.state[name]['exposure_busy'] = False
                         self.publish()
+                        if request_seq is not None:
+                            if scan_error:
+                                self.exposure_reply(name, request_seq, 'error', '预览已关闭' if stop.is_set() else scan_error)
+                            elif result:
+                                self.exposure_reply(name, request_seq, 'done', f'曝光已设为 {result["exposure"]/10:g} ms')
                 with self.lock:
                     request = self.exposure_requests[name]
                     self.exposure_requests[name] = None
@@ -454,7 +511,7 @@ class Preparation:
                 self.state[camera].update(on=on, error=None)
                 self.state[camera]['exposure_busy'] = on
                 self.state[camera].pop('exposure_limits', None)
-                for key in ('tenengrad','peak','percent','edge_width_um','edge_width_px','contrast','source','tip_uv','history','exposure_error','exposure_ms','fps'):
+                for key in ('tenengrad','peak','percent','edge_width_um','edge_width_px','contrast','source','tip_uv','history','exposure_error','exposure_ms','fps','detection_status','detection_reason'):
                     self.state[camera].pop(key, None)
                 self._preview_cameras.pop(camera, None)
             if not on:
@@ -473,7 +530,19 @@ class Preparation:
                              message='请调焦后开始对刀基准建立' if self.active else '请开始对刀基准建立')
             if not on: self.events.emit('tooltip_preview_close', camera=camera)
         elif name == 'tooltip_exposure_retest':
-            self.retest[camera].set()
+            with self.lock:
+                if not self.enabled[camera] or camera not in self.streams:
+                    error = '预览未打开'
+                elif self.state[camera].get('exposure_busy') or self.retest[camera].is_set() or self.exposure_requests[camera] is not None:
+                    error = '曝光操作进行中，请稍后重试'
+                elif self.state[camera].get('detection_status') != '精定位':
+                    error = '当前未精定位工具'
+                else:
+                    error = None
+                    self.retest_seq[camera] = params.get('_seq')
+                    self.state[camera]['exposure_busy'] = True
+                    self.retest[camera].set()
+            if error: self.exposure_reply(camera, params.get('_seq'), 'error', error)
         elif name in ('tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save'):
             with self.lock:
                 if not self.enabled[camera] or camera not in self.streams:

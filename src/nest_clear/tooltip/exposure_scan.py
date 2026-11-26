@@ -1,0 +1,123 @@
+"""Tool-aware exposure sweep, executed in the camera owner thread."""
+import math
+import cv2
+import numpy as np
+
+
+class ExposureScanError(ValueError):
+    def __init__(self, message, rows):
+        super().__init__(message)
+        self.rows = rows
+
+
+def _prongs(mask):
+    """Approximate teeth by separated distal silhouette segments.
+
+    TridentResult.prong_tips are sampled profiles, not a tooth count. Count
+    contiguous dark segments on distal rows instead; the maximum over several
+    rows allows teeth of unequal lengths. This is an image-space approximation.
+    """
+    if mask is None or not np.any(mask):
+        return 0
+    ys = np.flatnonzero(np.any(mask, axis=1))
+    end = int(ys[-1]); start = max(int(ys[0]), end - 100)
+    counts = []
+    for row in mask[start:end + 1]:
+        indices = np.flatnonzero(row)
+        if not len(indices):
+            continue
+        groups = np.split(indices, np.flatnonzero(np.diff(indices) > 1) + 1)
+        counts.append(sum(len(group) >= 2 for group in groups))
+    # Ignore single-row fragments at a cut or a threshold transition.
+    return max((min(counts[i:i + 5]) for i in range(len(counts) - 4)), default=0)
+
+
+def _frame_metrics(frame, detector):
+    gray = np.asarray(frame)
+    if gray.ndim != 2 or gray.dtype != np.uint8:
+        raise ValueError('曝光扫描需要 uint8 灰度图')
+    det = detector.detect(gray)
+    raw_mask = getattr(det, 'tool_mask', None)
+    mask = np.asarray(raw_mask, dtype=bool) if raw_mask is not None else np.zeros(gray.shape, dtype=bool)
+    if mask.shape != gray.shape:
+        raise ValueError('检测器工具区域尺寸不匹配')
+    h, w = gray.shape
+    # Exclude the outer fifth on each side (frequent black support bars), and
+    # a margin around the detected tool; retain the brighter half of the ROI.
+    roi = np.zeros(gray.shape, dtype=bool)
+    roi[:, w // 5:w - w // 5] = True
+    excluded = cv2.dilate(mask.astype('uint8'), np.ones((11, 11), np.uint8)).astype(bool)
+    background = gray[roi & ~excluded]
+    if background.size:
+        background = background[background >= np.percentile(background, 50)]
+    # Fill holes inside the detected silhouette so washed-out pixels within
+    # the tool are measured instead of being discarded by segmentation.
+    contours, _ = cv2.findContours(mask.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filled = np.zeros(gray.shape, dtype='uint8')
+    if contours:
+        cv2.drawContours(filled, contours, -1, 1, cv2.FILLED)
+    tool = gray[filled.astype(bool)]
+    sharp = (getattr(det, 'sharpness', None) or {}).get('band_gradient_p995')
+    contrast = getattr(det, 'tip_contrast', None)
+    return {'recognized': getattr(det, 'status', '') == '精定位' and '畸变' not in (getattr(det, 'diagnostic', '') or ''),
+            'diagnostic': getattr(det, 'diagnostic', '') or '', 'prongs': _prongs(mask),
+            'contrast': float(contrast) if contrast is not None and math.isfinite(float(contrast)) else 0.,
+            'sharpness': float(sharp) if sharp is not None and math.isfinite(float(sharp)) else 0.,
+            'background': float(np.median(background)) if background.size else 0.,
+            'p99': float(np.percentile(background, 99)) if background.size else 0.,
+            'background_saturation': float(np.mean(background >= 250)) if background.size else 0.,
+            'tool_whiteness': float(np.mean(tool >= 230)) if tool.size else 1.}
+
+
+def scan_exposure(camera, detector, expected_prongs, *, levels, frames_per_level=3,
+                  discard_per_level=1, contrast_min, sharpness_ratio=0.9,
+                  saturation_max, progress=None):
+    initial = camera.get_exposure()
+    limits = camera.exposure_limits()
+    values = list(range(1, levels + 1)) if isinstance(levels, int) else list(levels)
+    if limits:
+        values = [v for v in values if limits['min'] <= v <= limits['max'] and (v-limits['min']) % limits['step'] == 0]
+    if not values or frames_per_level < 1 or discard_per_level < 0:
+        raise ValueError('曝光扫描范围或帧数无效')
+    rows = []
+    try:
+        for k, exposure in enumerate(values, 1):
+            camera.set_exposure(exposure)
+            for _ in range(discard_per_level):
+                camera.capture()
+            if camera.get_exposure() != exposure:
+                raise ValueError(f'曝光回读不一致：期望 {exposure}')
+            frames = [_frame_metrics(camera.capture(), detector) for _ in range(frames_per_level)]
+            row = {'exposure': exposure, 'frames': frames,
+                   'recognized': all(f['recognized'] for f in frames),
+                   'prongs': min(f['prongs'] for f in frames),
+                   'contrast': min(f['contrast'] for f in frames),
+                   'sharpness': float(np.median([f['sharpness'] for f in frames])),
+                   'background': float(np.median([f['background'] for f in frames])),
+                   'p99': float(np.median([f['p99'] for f in frames])),
+                   'saturated_fraction': float(np.median([f['background_saturation'] for f in frames])),
+                   'tool_whiteness': max(f['tool_whiteness'] for f in frames)}
+            rows.append(row)
+            if progress: progress(k, len(values), row)
+        peak = max((r['sharpness'] for r in rows if r['recognized']), default=0.)
+        for row in rows:
+            reasons = []
+            if not row['recognized']: reasons.append('未全部精定位或畸变')
+            if row['prongs'] < expected_prongs: reasons.append(f'齿数不足（{row["prongs"]}/{expected_prongs}）')
+            if row['contrast'] < contrast_min: reasons.append('对比度不足')
+            if not peak or row['sharpness'] < peak * sharpness_ratio: reasons.append('清晰度不足')
+            if row['tool_whiteness'] > saturation_max: reasons.append('工具发白')
+            row.update(sharpness_percent=100 * row['sharpness'] / peak if peak else 0., reasons=reasons, qualified=not reasons, selected=False)
+        eligible = [r for r in rows if r['qualified']]
+        if not eligible:
+            raise ExposureScanError('没有合格曝光档：' + '；'.join(f'{r["exposure"]/10:g} ms：' + '、'.join(r['reasons']) for r in rows), rows)
+        best = max(eligible, key=lambda r: (r['background'], -r['exposure']))
+        camera.set_exposure(best['exposure'])
+        if camera.get_exposure() != best['exposure']:
+            raise ValueError('选中曝光回读不一致')
+        best['selected'] = True
+        return {'exposure': best['exposure'], 'rows': rows, 'reason': '合格档中背景最亮，同亮度取较短曝光',
+                'p99': best['p99'], 'saturated_fraction': best['saturated_fraction'], 'contrast': best['contrast']}
+    except Exception:
+        camera.set_exposure(initial)
+        raise

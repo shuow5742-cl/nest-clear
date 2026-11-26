@@ -110,6 +110,7 @@ class ToolCalibrationConfig:
     max_total_mm: float = 2.0
     camera_controls: dict[str, Any] = field(default_factory=dict)
     auto_exposure: dict[str, Any] = field(default_factory=dict)
+    exposure_scan: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -581,11 +582,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         scan = replace(scan, fov_mm=tuple(vision.hair_detector.expected_um_per_px * n / 1000 for n in (4024, 3036)))
     tc_data = root["tool_calibration"]
     if isinstance(tc_data, dict):
-        tc_data = {"enabled": True, "quality_hard_fail": True, "unreliable_action": "fail", "click_timeout_s": 120.0, "probe_step_mm": .2, "max_step_mm": .5, "max_total_mm": 2., "camera_controls": {}, "auto_exposure": {}, "usb_vendor_id": "05a3", "usb_product_id": "9230", **tc_data}
+        tc_data = {"enabled": True, "quality_hard_fail": True, "unreliable_action": "fail", "click_timeout_s": 120.0, "probe_step_mm": .2, "max_step_mm": .5, "max_total_mm": 2., "camera_controls": {}, "auto_exposure": {}, "exposure_scan": {}, "usb_vendor_id": "05a3", "usb_product_id": "9230", **tc_data}
     tc = _mapping(tc_data, "tool_calibration", [
         "directory", "cameras", "detection", "position_tolerance_mm", "tip_tolerance_mm",
         "consistency_tolerance_mm", "max_iterations", "max_residual_mm", "max_condition",
-        "z_disagreement_mm", "enabled", "quality_hard_fail", "unreliable_action", "click_timeout_s", "probe_step_mm", "max_step_mm", "max_total_mm", "camera_controls", "auto_exposure", "usb_vendor_id", "usb_product_id",
+        "z_disagreement_mm", "enabled", "quality_hard_fail", "unreliable_action", "click_timeout_s", "probe_step_mm", "max_step_mm", "max_total_mm", "camera_controls", "auto_exposure", "exposure_scan", "usb_vendor_id", "usb_product_id",
     ])
     if type(tc["enabled"]) is not bool or type(tc["quality_hard_fail"]) is not bool:
         _fail("tool_calibration.enabled", "应为布尔值")
@@ -612,6 +613,16 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     if not (0 <= ae['target_low'] < ae['target_high'] < 250 and 0 <= ae['settle_frames'] <= 100 and 1 <= ae['max_iterations'] <= 100 and 1 <= ae['min_exposure'] < ae['max_exposure'] <= 5000): _fail('tool_calibration.auto_exposure', '范围无效')
     for k in ('roi_fraction', 'max_saturated_fraction'):
         if not 0 < _number(ae[k], 'tool_calibration.auto_exposure.' + k) <= 1: _fail('tool_calibration.auto_exposure.' + k, '须在 0 到 1 之间')
+    # Default maximum is 10 units (1 ms); each unit is 100 µs.
+    exposure_scan_defaults = dict(method='quality_scan', max_exposure=10, contrast_min=40., sharpness_ratio=.9, saturation_max=.05)
+    exposure_scan = tc['exposure_scan']
+    if not isinstance(exposure_scan, dict) or set(exposure_scan) - set(exposure_scan_defaults): _fail('tool_calibration.exposure_scan', '字段无效')
+    exposure_scan = {**exposure_scan_defaults, **exposure_scan}
+    if exposure_scan['method'] not in ('quality_scan', 'brightness'): _fail('tool_calibration.exposure_scan.method', '应为 quality_scan 或 brightness')
+    if type(exposure_scan['max_exposure']) is not int or not 1 <= exposure_scan['max_exposure'] <= 5000: _fail('tool_calibration.exposure_scan.max_exposure', '须为 1 到 5000 的整数')
+    if not 0 <= _number(exposure_scan['contrast_min'], 'tool_calibration.exposure_scan.contrast_min') <= 255: _fail('tool_calibration.exposure_scan.contrast_min', '须在 0 到 255 之间')
+    for key in ('sharpness_ratio', 'saturation_max'):
+        if not 0 < _number(exposure_scan[key], 'tool_calibration.exposure_scan.' + key) <= 1: _fail('tool_calibration.exposure_scan.' + key, '须在 0 到 1 之间')
     import re
     for key in ('usb_vendor_id', 'usb_product_id'):
         if not isinstance(tc[key], str) or not re.fullmatch(r'[0-9a-fA-F]{4}', tc[key]):
@@ -679,7 +690,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _number(tc["probe_step_mm"], "tool_calibration.probe_step_mm", True),
         _number(tc["max_step_mm"], "tool_calibration.max_step_mm", True),
         _number(tc["max_total_mm"], "tool_calibration.max_total_mm", True),
-        common_controls, ae,
+        common_controls, ae, exposure_scan,
     )
     ensure_calibration_files(directory)
     tools_path = Path(directory) / "tools.yaml"

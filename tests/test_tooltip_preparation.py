@@ -48,7 +48,8 @@ def test_independent_preview_and_exposure(tmp_path, monkeypatch):
         measurements.append(1)
         return {'exposure':100, 'p99':210, 'saturated_fraction':0, 'contrast':100}
     monkeypatch.setattr('nest_clear.baseline.preparation.auto_exposure', measure)
-    prep=Preparation(events, worker)
+    legacy_config = SimpleNamespace(tool_calibration=SimpleNamespace(exposure_scan={'method': 'brightness'}, auto_exposure={}, detection={'front': {}, 'side': {}}))
+    prep=Preparation(events, worker, legacy_config)
     prep.command('tooltip_preview', {'camera':'front', 'on':True})
     prep.command('tooltip_preview', {'camera':'side', 'on':True})
     deadline=time.monotonic()+3
@@ -56,6 +57,7 @@ def test_independent_preview_and_exposure(tmp_path, monkeypatch):
     assert (tmp_path/'live/baseline_front.jpg').exists()
     assert 'USB 带宽不足' in prep.state['side']['error']
     assert load_settings(tmp_path/'cameras.yaml')['cameras']['front']['measured']
+    with prep.lock: prep.state['front']['detection_status'] = '精定位'
     prep.command('tooltip_exposure_retest', {'camera':'front'})
     deadline=time.monotonic()+3
     while len(measurements)<2 and time.monotonic()<deadline: time.sleep(.01)

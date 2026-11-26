@@ -726,7 +726,7 @@ class App:
             actions = tk.Frame(body, bg=WHITE); actions.grid(row=1, column=0, sticky='w')
             toggle = tk.Button(actions, text=title+'预览：关', command=lambda n=name:self.baseline_toggle(n))
             toggle.grid(row=0, column=0)
-            exposure = ttk.Button(actions, style='TooltipAction.TButton', text='重新测曝光', command=lambda n=name:self.baseline_command('tooltip_exposure_retest', {'camera':n})); exposure.grid(row=0, column=2)
+            exposure = ttk.Button(actions, style='TooltipAction.TButton', text='重新测曝光', command=lambda n=name:self.baseline_retest_exposure(n)); exposure.grid(row=0, column=2)
             reset = ttk.Button(actions, style='TooltipAction.TButton', text='清晰度峰值清零', command=lambda n=name:self.baseline_command('tooltip_peak_reset', {'camera':n})); reset.grid(row=0, column=3)
             reason = self.label(actions, '', fg=MUTED); reason.grid(row=1, column=0, columnspan=4, sticky='w')
             manual = tk.Frame(actions, bg=WHITE); manual.grid(row=2, column=0, columnspan=4, sticky='w')
@@ -739,13 +739,15 @@ class App:
             result = self.label(manual, ''); result.grid(row=1, column=0, columnspan=6, sticky='w')
             saved = self.label(manual, '已存曝光：无'); saved.grid(row=2, column=0, columnspan=6, sticky='w')
             save_reason = self.label(manual, ''); save_reason.grid(row=3, column=0, columnspan=6, sticky='w')
+            scan_status = self.label(actions, '', fg=MUTED); scan_status.grid(row=3, column=0, columnspan=4, sticky='w')
+            scan_table = self.label(actions, '', justify='left'); scan_table.grid(row=4, column=0, columnspan=4, sticky='w')
             pic = self.picture(body, 'baseline_'+name); pic.grid_configure(row=2)
             info = tk.Label(body, text='预览关闭', bg=WHITE, fg=MUTED, font=self.theme.large, anchor='w', justify='left'); info.grid(row=3, column=0, sticky='ew')
             hint = self.label(body, '', fg=COLORS['red']); hint.grid(row=4, column=0, sticky='ew')
             detail = self.label(body, '', justify='left'); detail.grid(row=5, column=0, sticky='ew')
             graph = tk.Canvas(body, height=24, bg=WHITE, highlightthickness=0); graph.grid(row=6, column=0, sticky='ew')
             body.bind('<Configure>', lambda event, info=info, hint=hint, detail=detail: (info.config(wraplength=max(100, event.width-12)), hint.config(wraplength=max(100, event.width-12)), detail.config(wraplength=max(100, event.width-12))))
-            self.baseline_views[name] = dict(path=path, toggle=toggle, exposure=exposure, reset=reset, reason=reason, info=info, hint=hint, detail=detail, graph=graph, picture=pic, exposure_entry=entry, exposure_set=set_exposure, exposure_restore=restore, exposure_save=save, exposure_saved=saved, exposure_save_reason=save_reason, exposure_limits=limits, exposure_result=result)
+            self.baseline_views[name] = dict(path=path, toggle=toggle, exposure=exposure, reset=reset, reason=reason, info=info, hint=hint, detail=detail, graph=graph, picture=pic, exposure_entry=entry, exposure_set=set_exposure, exposure_restore=restore, exposure_save=save, exposure_saved=saved, exposure_save_reason=save_reason, exposure_limits=limits, exposure_result=result, scan_status=scan_status, scan_table=scan_table)
         results = self.card(self.baseline, '本次结果', 2, 0)
         self.baseline_results_card = results.master
         self.baseline_result = tk.Label(results, text='等待测量', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.table, width=1, wraplength=600)
@@ -805,6 +807,12 @@ class App:
         if seq:
             self.baseline_exposure_pending[name] = (seq, time.monotonic())
             self.baseline_views[name]['exposure_result'].config(text='设置中…', fg=INK)
+
+    def baseline_retest_exposure(self, name):
+        seq = self.baseline_command('tooltip_exposure_retest', {'camera': name})
+        if seq:
+            self.baseline_exposure_pending[name] = (seq, time.monotonic())
+            self.baseline_views[name]['exposure_result'].config(text='等待扫描…', fg=INK)
 
     def baseline_save_exposure(self, name):
         view = self.baseline_views[name]
@@ -928,7 +936,17 @@ class App:
             if may_prepare: widgets['reason'].grid_remove()
             else: widgets['reason'].grid()
             widgets['toggle'].config(text=button_text, fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
-            enable(widgets['exposure'], on and may_prepare and not item.get('exposure_busy')); enable(widgets['reset'], on and may_prepare)
+            scan_reason = ('请打开相机预览' if not on else '正在测曝光' if item.get('exposure_busy') else '请先精定位工具' if not live or live.get('detection_status') != '精定位' else '当前不可操作' if not may_prepare else '')
+            enable(widgets['exposure'], not scan_reason and name not in self.baseline_exposure_pending); enable(widgets['reset'], on and may_prepare)
+            widgets['scan_status'].config(text=item.get('exposure_progress') or scan_reason)
+            scan_rows = item.get('exposure_scan_rows') or []
+            if scan_rows:
+                lines = ['曝光 ms　识别　齿数　对比度　清晰度%　背景　背景饱和/工具发白　合格']
+                for row in scan_rows:
+                    lines.append(f"{row.get('exposure', 0)/10:g}　{'是' if row.get('recognized') else '否'}　{row.get('prongs', 0)}　{row.get('contrast', 0):.1f}　{row.get('sharpness_percent', 0):.0f}%　{row.get('background', 0):.0f}　{row.get('saturated_fraction', 0):.1%}/{row.get('tool_whiteness', 0):.1%}　{'是' if row.get('qualified') else '否'}{' ★' if row.get('selected') else ''}　{'、'.join(row.get('reasons') or [])}")
+                widgets['scan_table'].config(text='\n'.join(lines))
+            else:
+                widgets['scan_table'].config(text='')
             limits = item.get('exposure_limits') or {}
             valid_limits = all(type(limits.get(key)) is int for key in ('min', 'max', 'step')) and limits.get('step', 0) > 0
             if valid_limits:
@@ -941,9 +959,13 @@ class App:
             if pending and result.get('seq') == pending[0] and result.get('state') in ('done', 'error'):
                 self.baseline_exposure_pending.pop(name, None)
                 widgets['exposure_result'].config(text=result.get('message', ''), fg=COLORS['red'] if result['state'] == 'error' else INK)
+                widgets['last_exposure_reply'] = result.get('seq')
             elif pending and time.monotonic() - pending[1] >= 5:
                 self.baseline_exposure_pending.pop(name, None)
                 widgets['exposure_result'].config(text='曝光操作未完成或未确认，请检查预览', fg=COLORS['red'])
+            elif not pending and result.get('seq') is not None and result.get('seq') != widgets.get('last_exposure_reply') and result.get('state') in ('done', 'error'):
+                widgets['last_exposure_reply'] = result['seq']
+                widgets['exposure_result'].config(text=result.get('message', ''), fg=COLORS['red'] if result['state'] == 'error' else INK)
             pending = name in self.baseline_exposure_pending
             for key in ('exposure_entry', 'exposure_set', 'exposure_restore'):
                 enable(widgets[key], on and may_prepare and valid_limits and not pending and not item.get('exposure_busy'))

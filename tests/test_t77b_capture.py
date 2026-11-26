@@ -119,6 +119,7 @@ def test_capture_after_returns_k_new_frames_and_timeout(tmp_path, monkeypatch):
 
 def test_retest_is_serial_and_reads_after_set(tmp_path, monkeypatch):
     prep, camera = make_preparation(tmp_path, monkeypatch, .01)
+    prep.config = SimpleNamespace(tool_calibration=SimpleNamespace(exposure_scan={'method': 'brightness'}, auto_exposure={}, detection={'front': {}, 'side': {}}))
     def retest(proxy, **kwargs):
         proxy.set_exposure(30)
         for _ in range(4):
@@ -130,6 +131,7 @@ def test_retest_is_serial_and_reads_after_set(tmp_path, monkeypatch):
     try:
         prep.command('tooltip_preview', {'camera': 'front', 'on': True})
         wait_for(lambda: camera.count > 0)
+        with prep.lock: prep.state['front']['detection_status'] = '精定位'
         prep.command('tooltip_exposure_retest', {'camera': 'front'})
         wait_for(lambda: camera.exposure == 30 and len([op for op in camera.operations if op[0] == 'read']) >= 5)
         wait_for(lambda: prep.state['front'].get('exposure_source', '').startswith('已存'))
