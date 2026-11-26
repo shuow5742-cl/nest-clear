@@ -73,7 +73,7 @@ class Prepare(Instant):
             self.ctx.events.emit("camcal_start", task_id=bb.read("task_id"), start_xyz=target)
             if move:
                 bb.write("camcal_goto_start", True, self.name)
-                bb.write("reply_coordinates", {"camcal_xyz": target}, self.name)
+                bb.write("reply_coordinates", {"scan_xyz": target}, self.name)
                 bb.write("reply_func", 80, self.name)
                 bb.write("reply_tool", None, self.name)
                 self.ctx.events.emit("camcal_goto_start", task_id=bb.read("task_id"), actual=actual, target=target)
@@ -175,7 +175,7 @@ class Process(Instant):
             if len(target) != 3 or any(not math.isfinite(v) for v in target) or any(abs(target[i]-session["start"][i]) > (cfg.xy_limit_mm if i < 2 else cfg.z_limit_mm) for i in range(3)):
                 raise ValueError(f"相机标定目标超出起始位置相对行程：{format_pose(target)}")
             session["target"] = target
-            bb.write("reply_coordinates", {"camcal_xyz": target}, self.name)
+            bb.write("reply_coordinates", {"scan_xyz": target}, self.name)
             reply = 80
         else:
             raise ValueError(f"未知相机标定步骤 {step.kind!r}")
@@ -194,7 +194,7 @@ class CheckTarget(Instant):
         bb = self._blackboard
         if bb.read("reply_func") == 80:
             try:
-                guard_position(bb.read("reply_coordinates")["camcal_xyz"], self.ctx.config.travel, "相机标定")
+                guard_position(bb.read("reply_coordinates")["scan_xyz"], self.ctx.config.travel, "相机标定")
             except GuardError as exc:
                 finish(self.ctx, bb, "failed", code=exc.code, reason=exc.what)
                 raise

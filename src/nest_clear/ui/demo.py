@@ -60,7 +60,7 @@ def pickacc_demo(state, stamp):
         pending=(); current=12
     else:
         pending=first; current=None
-    phases={'select':('select','请选择工具并开始'), 'wait_tool':('wait_tool','请等待工具前往'),
+    phases={'select':('select','请按【开始】'), 'wait_tool':('wait_tool','请等待工具前往'),
             'tool_in_place':('tool_in_place','工具已到位，调整好后按【计算补偿】'),
             'table':('wait150','等待下一相机位置'), 'confirm':('confirm','等待确认覆盖')}
     phase,message=phases[state]
@@ -75,7 +75,7 @@ def pickacc_demo(state, stamp):
         candidate={'type':'table','nodes':nodes}
     elif state=='confirm':
         candidate={'type':'constant','constant_xy':[.081,-.048], 'verification':[s for s in samples if s['verification']]}
-    return {'phase':phase, 'tool':None if state=='select' else tool, 'message':message,
+    return {'phase':phase, 'tool':tool, 'plc_tool_id':tool, 'message':message,
             'target':f'T{current:02d}' if current is not None else None,
             'predicted':{f'T{i:02d}':position(i) for i in set(table) | set(simple)},
             'queue':[{'target':f'T{i:02d}','stage':'simple' if tool==2 else 'A'} for i in pending],
@@ -113,7 +113,7 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
                            for i, (task, request, reply) in enumerate(((107, 1, 1), (106, 60, 60), (105, 3, 3), (104, 20, 9), (103, 80, 82)))],
         'camcal':{'event': 'camcal_step' if preview_state == 'blocked' else 'camcal_done', 'sequence':sequence,'plan':points,'start_xyz':[0,0,0],'kind':'move','detail':{
             'detected_corners':35,'predicted_corners':40,'saturated_fraction':0.01,'bbox':[510,120,560,170]}},
-        'tooltip':{'tool':1,'iterations':2,'event':'tooltip_aligned','history':history,'new':[0.02,-0.01,0.01]},
+        'tooltip':{'tool':1,'plc_tool_id':2,'iterations':2,'event':'tooltip_aligned','history':history,'new':[0.02,-0.01,0.01]},
         'command_seq':0, 'tooloffset':{'phase':'tool', 'tool':1, 'mode':'center', 'target':'T12',
             'message':'请手动移动工具1到 T12 中心，到位后按【工具到位】',
             'existing':{'tool1':{'time':stamp,'offset_xy_mm':[1.2,-0.3],'n':5,'se':[.01,.01], 'current_tools_xy':[1.2,-0.3], 'baseline_stale':True}, 'tool2':{}},
@@ -204,6 +204,8 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
             subprocess.run([str(project/'.venv/bin/python'), '-m', 'nest_clear.tools.tooltip_demo_image', str(root), tooltip_state], cwd=project, env=env, check=True, timeout=30)
         path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
         data['tooltip'] = json.loads((root/'tooltip_demo.json').read_text(encoding='utf-8'))
+        if data['tooltip'].get('tool'):
+            data['tooltip']['plc_tool_id'] = 2
         data['mode'] = '空闲' if tooltip_state in ('idle', 'done', 'fail') else '对刀中(工具1)'
         atomic(path, data)
     names = ('latest', 'camcal_latest', 'preview_latest', 'calib_front_latest', 'calib_side_latest')

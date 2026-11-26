@@ -23,7 +23,7 @@ class MemoryPLC(AsyncRequestWorker):
     def __init__(self) -> None:
         """创建空请求及应答表。"""
         super().__init__()
-        self.request = (0, 0)
+        self.request = (0, 0, None)
         self.actual = (0.0, 0.0, 0.0)
         self.replies: dict[int, tuple[int, dict[str, Any]]] = {}
 
@@ -76,7 +76,7 @@ def test_rejected_request_then_valid_arrival(tmp_path: Any) -> None:
 
     def request(task: int, func: int) -> tuple[int, dict[str, Any]]:
         """持续推进真实时钟，直到对应编号得到应答。"""
-        plc.request = (task, func)
+        plc.request = (task, func, 2 if func in (100, 110) else None)
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             clock.tick_once()

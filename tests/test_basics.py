@@ -22,7 +22,8 @@ def test_cdab():
 def test_contract():
     contract = load_contract(ROOT / 'config/plc_contract.yaml')
     assert contract['task_id'].address == 40903
-    assert (contract['pick_tool'].address, contract['pick_tool'].type, contract['pick_tool'].direction) == (40935, 'UINT16', 'PC→PLC')
+    assert (contract['plc_tool_id'].address, contract['plc_tool_id'].type, contract['plc_tool_id'].direction) == (40905, 'UINT16', 'PLC→PC')
+    assert (contract['pc_tool_id'].address, contract['pc_tool_id'].type, contract['pc_tool_id'].direction) == (40935, 'UINT16', 'PC→PLC')
     assert contract['calibration2_z'].type == 'REAL32'
     assert contract['result_id'].direction == 'PC→PLC'
     with pytest.raises(GuardError): contract['missing']

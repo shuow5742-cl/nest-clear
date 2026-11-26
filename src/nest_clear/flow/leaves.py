@@ -163,7 +163,7 @@ class WaitRequest(CallWorker):
             self.events.plc("plc_restored", failures=self.failures, duration_s=self.clock() - self.failure_since)
             self.failure_since = None
             self.failures = 0
-        task, func = self._blackboard.read("poll_result")
+        task, func, tool_id = self._blackboard.read("poll_result")
         previous = self.tracker.observed
         self.tracker.observed = task
         if task == 0 or task == previous or task == self.tracker.processed:
@@ -174,6 +174,7 @@ class WaitRequest(CallWorker):
         self.tracker.processed = task
         self._blackboard.write("task_id", task, self.name)
         self._blackboard.write("request_func", func, self.name)
+        self._blackboard.write("plc_tool_id", tool_id, self.name)
         self._blackboard.write("raw_path", None, self.name)
         self._blackboard.write("fine_render_data", None, self.name)
         self._blackboard.write("capture_id", None, self.name)
@@ -184,8 +185,8 @@ class WaitRequest(CallWorker):
         self._blackboard.write("error_diagnostic", None, self.name)
         self._blackboard.write("reply_diagnostic", None, self.name)
         self.events.begin_request(task, func)
-        self.events.plc("request", task_id=task, request_func=func)
-        self.events.emit("request", task_id=task, func=func, name=REQUEST_NAMES.get(func, "未知功能码"))
+        self.events.plc("request", task_id=task, request_func=func, plc_tool_id=tool_id)
+        self.events.emit("request", task_id=task, func=func, plc_tool_id=tool_id, name=REQUEST_NAMES.get(func, "未知功能码"))
         return Status.SUCCESS
 
 
@@ -395,7 +396,7 @@ class PrepareError(Instant):
             scan_index=bb.read("next_index"),
             raw_path=bb.read("raw_path"),
         )
-        details = bb.read("error_diagnostic", None) or diagnostic(reason, code="WORK-PROTOCOL" if self.unknown or error_type == ProtocolViolation.__name__ else "FLOW-ERROR", where="请求处理", hint="检查 PLC 功能码、当前状态和设备运行情况。")
+        details = (None if self.unknown else bb.read("error_diagnostic", None)) or diagnostic(reason, code="WORK-PROTOCOL" if self.unknown or error_type == ProtocolViolation.__name__ else "FLOW-ERROR", where="请求处理", hint="检查 PLC 功能码、当前状态和设备运行情况。")
         bb.write("reply_diagnostic", details, self.name)
         bb.write("reply_func", 999, self.name)
         bb.write("reply_coordinates", {}, self.name)

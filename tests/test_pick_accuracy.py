@@ -63,10 +63,10 @@ def test_repeat_fail_and_simple(tmp_path):
 def test_wrong_order(rig):
     assert rig.request(1,155)[0]==999
     assert rig.request(2,156)[0]==999
-    rig.plc.request=(3,150)
+    rig.plc.request=(3,150,1)
     rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
     from nest_clear.tooloffset.commands import send
-    send(rig.root,'pickacc_start',{'tool':1})
+    send(rig.root,'pickacc_start')
     rig.until(lambda:3 in rig.plc.replies)
     assert rig.plc.replies[3][0]==150
     assert rig.request(4,156)[0]==999
@@ -75,21 +75,21 @@ def test_wrong_order(rig):
 @pytest.mark.parametrize('accept', [True, False])
 def test_plc_normal_cycle(rig, accept):
     from nest_clear.tooloffset.commands import send
-    rig.plc.request=(1,150); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
-    send(rig.root,'pickacc_start',{'tool':1}); rig.until(lambda:1 in rig.plc.replies)
+    rig.plc.request=(1,150,1); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
+    send(rig.root,'pickacc_start'); rig.until(lambda:1 in rig.plc.replies)
     task=1; assert rig.plc.replies[task][0]==150
-    assert 'scan_xyz' in rig.plc.replies[task][1] and 'camcal_xyz' not in rig.plc.replies[task][1]
+    assert 'scan_xyz' in rig.plc.replies[task][1] and rig.plc.replies[task][1]['pc_tool_id'] == 1
     for _ in range(80):
-        task+=1; rig.plc.request=(task,155); rig.until(lambda:task in rig.plc.replies, timeout=35)
+        task+=1; rig.plc.request=(task,155,1); rig.until(lambda:task in rig.plc.replies, timeout=35)
         code,coords=rig.plc.replies[task]
         if code==150:
             rig.plc.actual=coords['scan_xyz']; continue
         assert code==155, (code,rig.events.status.data['pickacc'])
-        assert list(coords)==['pick1_xyz', 'pick_tool'] and coords['pick_tool']==1 and coords['pick1_xyz'][2]==-10
-        xyz=coords['pick1_xyz']; rig.plc.actual=(xyz[0]+.08,xyz[1]-.05,xyz[2])
+        assert list(coords)==['calibration1_xyz', 'pc_tool_id'] and coords['pc_tool_id']==1 and coords['calibration1_xyz'][2]==-10
+        xyz=coords['calibration1_xyz']; rig.plc.actual=(xyz[0]+.08,xyz[1]-.05,xyz[2])
         e=rig.batch.blackboard.read('pickaccuracy_session')['engine']
         if e.plan[0]=='verify': rig.plc.actual=xyz
-        task+=1; rig.plc.request=(task,156)
+        task+=1; rig.plc.request=(task,156,1)
         rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='tool_in_place')
         assert task not in rig.plc.replies
         send(rig.root,'pickacc_calculate')
@@ -102,6 +102,7 @@ def test_plc_normal_cycle(rig, accept):
         task+=1; code,coords=rig.request(task,150); assert code==150; rig.plc.actual=coords['scan_xyz']
     else: pytest.fail('会话未结束')
     assert code==(151 if accept else 152)
+    assert all(coords['pc_tool_id'] == 1 for _, coords in rig.plc.replies.values())
     assert list(rig.events.run_directory.glob('pickacc/*/*_raw.png'))
     if accept: assert read(rig.root/'calibration'/'pick_compensation.yaml')['tool1']['type']=='constant'
     else: assert not (rig.root/'calibration'/'pick_compensation.yaml').exists()
@@ -130,19 +131,19 @@ def test_center_retry(tmp_path):
 
 def test_discard_and_abort(rig):
     from nest_clear.tooloffset.commands import send
-    rig.plc.request=(1,150); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
+    rig.plc.request=(1,150,1); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
     send(rig.root,'abort'); rig.until(lambda:1 in rig.plc.replies)
     assert rig.plc.replies[1][0]==152
-    rig.plc.request=(2,150); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
-    send(rig.root,'pickacc_start',{'tool':2}); rig.until(lambda:2 in rig.plc.replies)
-    code,coords=rig.request(3,155); assert code==150
+    rig.plc.request=(2,150,2); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
+    send(rig.root,'pickacc_start'); rig.until(lambda:2 in rig.plc.replies)
+    code,coords=rig.request(3,155,2); assert code==150
     rig.plc.actual=coords['scan_xyz']
-    code,coords=rig.request(4,155); assert code==155 and list(coords)==['pick2_xyz', 'pick_tool'] and coords['pick_tool']==2 and coords['pick2_xyz'][2]==-10
-    rig.plc.request=(5,156); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='tool_in_place')
+    code,coords=rig.request(4,155,2); assert code==155 and list(coords)==['calibration2_xyz', 'pc_tool_id'] and coords['pc_tool_id']==2 and coords['calibration2_xyz'][2]==-10
+    rig.plc.request=(5,156,2); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='tool_in_place')
     send(rig.root,'pickacc_discard'); rig.until(lambda:5 in rig.plc.replies)
     assert rig.plc.replies[5][0]==156
     e=rig.batch.blackboard.read('pickaccuracy_session')['engine']; assert e.samples[-1]['discarded']
-    assert rig.request(6,150)[0]==150
+    assert rig.request(6,150,2)[0]==150
     send(rig.root,'abort'); rig.until(lambda:rig.batch.blackboard.read('pickaccuracy_session') is None)
 
 
@@ -176,17 +177,24 @@ def test_production_compensation_hot_load(tmp_path):
 def test_selected_register_writes():
     from nest_clear.comm import Handshake, load_contract
     class IO:
-        def __init__(self): self.words={}
-        def write_u16(self,a,v): self.words[a]=v
+        def __init__(self):
+            self.words = {}
+            self.writes = []
+        def write_u16(self,a,v):
+            self.writes.append(a)
+            self.words[a] = v
         def write_real32_block(self,a,v):
+            self.writes.append(a)
             from nest_clear.comm.codec import encode_real32
             for i, word in enumerate(sum((encode_real32(x) for x in v), [])): self.words[a+i]=word
     io=IO(); h=Handshake(io,load_contract('config/plc_contract.yaml'),write_readback=False)
-    for tool,address in ((1,40960),(2,40966)):
-        io.words.clear(); h.write_reply(1,155,{f'pick{tool}_xyz':(100,30,-10), 'pick_tool':tool})
-        assert io.words[40935] == tool
+    for tool,address in ((1,40948),(2,40954)):
+        io.words.clear(); io.writes.clear(); h.write_reply(1,155,{f'calibration{tool}_xyz':(100,30,-10), 'pc_tool_id':tool})
+        assert io.writes == [address, 40935, 40934, 40933]
+        assert io.words[40935] == tool and io.words[40934] == 155 and io.words[40933] == 1
         assert all(a in io.words for a in range(address, address+6))
-        other = 40966 if tool == 1 else 40960
+        other = 40954 if tool == 1 else 40948
+        assert not any(a in io.words for a in range(40960, 40972))
         assert all(a not in io.words for a in range(other, other+6))
 
 
@@ -215,28 +223,28 @@ def test_plc_table_simple_and_constant(rig, scenario):
             xy=np.array([130.,70.])+matrix@nominal_targets()[i]; dx,dy=gradient(*xy)
             nodes.append(dict(target=f'T{i:02d}',x=float(xy[0]),y=float(xy[1]),dx=float(dx),dy=float(dy),n=1))
         save(rig.root/'calibration'/'pick_compensation.yaml',1,{'type':'table','nodes':nodes,'camera_calibration_sha256':hashlib.sha256(b'test').hexdigest(),'tool_offset_xy':list(rig.cfg.tools[0][:2]),'tool_offset_result_sha256':offset_digest(SimpleNamespace(config=rig.cfg),1)})
-    rig.plc.request=(1,150); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
-    send(rig.root,'pickacc_start',{'tool':tool}); rig.until(lambda:1 in rig.plc.replies)
+    rig.plc.request=(1,150,tool); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
+    send(rig.root,'pickacc_start'); rig.until(lambda:1 in rig.plc.replies)
     task=1
     for _ in range(100):
-        task+=1; rig.plc.request=(task,155); rig.until(lambda:task in rig.plc.replies,timeout=35)
+        task+=1; rig.plc.request=(task,155,tool); rig.until(lambda:task in rig.plc.replies,timeout=35)
         code,coords=rig.plc.replies[task]
         if code==150: rig.plc.actual=coords['scan_xyz']; continue
         assert code==155, (code,rig.events.status.data['pickacc'])
-        assert list(coords)==[f'pick{tool}_xyz', 'pick_tool'] and coords['pick_tool']==tool
-        e=rig.batch.blackboard.read('pickaccuracy_session')['engine']; target=e.measured[e.current]; xyz=coords[f'pick{tool}_xyz']
+        assert list(coords)==[f'calibration{tool}_xyz', 'pc_tool_id'] and coords['pc_tool_id']==tool
+        e=rig.batch.blackboard.read('pickaccuracy_session')['engine']; target=e.measured[e.current]; xyz=coords[f'calibration{tool}_xyz']
         error=np.array((.08,-.05) if scenario=='constant' else gradient(*target))
         if scenario=='simple': error+=np.array([.02,-.01])
         applied=np.asarray(xyz[:2])-target-np.asarray(rig.cfg.tools[tool-1][:2])
         actual=np.asarray(xyz[:2])+error-applied; rig.plc.actual=(*actual,-10.)
-        task+=1; rig.plc.request=(task,156); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='tool_in_place')
+        task+=1; rig.plc.request=(task,156,tool); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='tool_in_place')
         send(rig.root,'pickacc_calculate'); rig.until(lambda:task in rig.plc.replies or rig.events.status.data['pickacc'].get('phase')=='confirm',timeout=35)
         if task not in rig.plc.replies:
             send(rig.root,'pickacc_confirm',{'accept':True}); rig.until(lambda:task in rig.plc.replies)
         code=rig.plc.replies[task][0]
         if code==151: break
         assert code==156, (code,rig.events.status.data['pickacc'])
-        task+=1; code,coords=rig.request(task,150); assert code==150; rig.plc.actual=coords['scan_xyz']
+        task+=1; code,coords=rig.request(task,150,tool); assert code==150; rig.plc.actual=coords['scan_xyz']
     else: pytest.fail('会话未结束')
     result=read(rig.root/'calibration'/'pick_compensation.yaml')[f'tool{tool}']
     assert result['type']==('constant' if scenario=='constant' else 'table')
@@ -245,8 +253,8 @@ def test_plc_table_simple_and_constant(rig, scenario):
 
 def test_arrival_outside_and_motion_unstable(rig):
     from nest_clear.tooloffset.commands import send
-    rig.plc.request=(1,150); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
-    send(rig.root,'pickacc_start',{'tool':1}); rig.until(lambda:1 in rig.plc.replies)
+    rig.plc.request=(1,150,1); rig.until(lambda:rig.events.status.data['pickacc'].get('phase')=='select')
+    send(rig.root,'pickacc_start'); rig.until(lambda:1 in rig.plc.replies)
     rig.plc.actual=(140,70,-5)
     assert rig.request(2,155)[0]==999
     assert rig.batch.blackboard.read('pickaccuracy_session') is None
@@ -340,3 +348,29 @@ def test_table_rejects_collinear_nodes():
                 'residual_xy_mm':[0.,0.]} for i in e.b_nodes]
     with pytest.raises(ValueError, match='共线'):
         e._table()
+
+
+@pytest.mark.parametrize("code", [90, 95, 100, 110, 130, 150, 155, 156])
+def test_invalid_plc_tool_id_gets_999_with_raw_echo(rig, code):
+    rows = []
+    rig.events.listener = rows.append
+    assert rig.request(1, code, 65535) == (999, {"pc_tool_id": 65535})
+    assert any(row.get("event") == "error" and "40905=65535 非法" in row.get("reason", "") for row in rows)
+
+
+def test_request_tool_is_snapshotted_and_session_tool_is_locked(rig):
+    from nest_clear.tooloffset.commands import send
+
+    rig.plc.request = (1, 150, 1)
+    rig.until(lambda: rig.events.status.data["pickacc"].get("phase") == "select")
+    assert rig.events.status.data["pickacc"]["tool"] == 1
+    rig.plc.request = (1, 150, 2)
+    # A stale UI's old parameter cannot override the PLC's request snapshot.
+    send(rig.root, "pickacc_start", {"tool": 2})
+    rig.until(lambda: 1 in rig.plc.replies)
+    assert rig.plc.replies[1] == (150, {"scan_xyz": (130., 70., -5.), "pc_tool_id": 1})
+    assert rig.request(2, 155, 2) == (999, {"pc_tool_id": 2})
+    state = rig.events.status.data["pickacc"]
+    assert state["tool"] == 1 and state["plc_tool_id"] == 2
+    assert "40905 从 1 变为 2" in state["message"]
+    assert rig.request(3, 155, 1)[1]["pc_tool_id"] == 1

@@ -10,7 +10,7 @@ def test_exchange_and_wrap():
         plc.set_status(3)
         assert client.read('status') == 3
         assert plc.request(1) == 1
-        assert hand.read_request() == (1, 1)
+        assert hand.read_request() == (1, 1, None)
         plc.writes.clear()
         hand.write_reply(1, 1, {'scan_xyz': [1, -2, 3]})
         assert plc.wait_reply(1)['scan_xyz'] == [1, -2, 3]
@@ -32,7 +32,7 @@ def test_tray():
             last = 0
             try:
                 while not stop.is_set():
-                    task, func = hand.read_request()
+                    task, func, _ = hand.read_request()
                     if not task or task == last:
                         stop.wait(0.005)
                         continue

@@ -35,7 +35,7 @@ class MemoryPLC(AsyncRequestWorker):
     name = 'plc'
     def __init__(self):
         super().__init__()
-        self.request = (1, 100)
+        self.request = (1, 100, 2)
         self.replies = {}
         self.heartbeats = []
     def execute(self, payload):

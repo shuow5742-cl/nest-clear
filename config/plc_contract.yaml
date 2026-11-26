@@ -14,6 +14,11 @@ registers:
   type: UINT16
   direction: PLC→PC
   description: 请求功能码
+- name: plc_tool_id
+  address: 40905
+  type: UINT16
+  direction: PLC→PC
+  description: 90–131 中 1 为工具偏移标定、2 为换针对刀。150–156 中为工具号 1 或 2
 - name: actual_x
   address: 40911
   type: REAL32
@@ -33,32 +38,32 @@ registers:
   address: 40917
   type: REAL32
   direction: PLC→PC
-  description: 一号工具标定反馈（暂不使用）X
+  description: 一号工具标定完成时 PLC 写入的最终坐标X
 - name: calibration1_feedback_y
   address: 40919
   type: REAL32
   direction: PLC→PC
-  description: 一号工具标定反馈（暂不使用）Y
+  description: 一号工具标定完成时 PLC 写入的最终坐标Y
 - name: calibration1_feedback_z
   address: 40921
   type: REAL32
   direction: PLC→PC
-  description: 一号工具标定反馈（暂不使用）Z
+  description: 一号工具标定完成时 PLC 写入的最终坐标Z
 - name: calibration2_feedback_x
   address: 40923
   type: REAL32
   direction: PLC→PC
-  description: 二号工具标定反馈（暂不使用）X
+  description: 二号工具标定完成时 PLC 写入的最终坐标X
 - name: calibration2_feedback_y
   address: 40925
   type: REAL32
   direction: PLC→PC
-  description: 二号工具标定反馈（暂不使用）Y
+  description: 二号工具标定完成时 PLC 写入的最终坐标Y
 - name: calibration2_feedback_z
   address: 40927
   type: REAL32
   direction: PLC→PC
-  description: 二号工具标定反馈（暂不使用）Z
+  description: 二号工具标定完成时 PLC 写入的最终坐标Z
 - name: heartbeat
   address: 40931
   type: UINT16
@@ -79,11 +84,11 @@ registers:
   type: UINT16
   direction: PC→PLC
   description: 应答功能码
-- name: pick_tool
+- name: pc_tool_id
   address: 40935
   type: UINT16
   direction: PC→PLC
-  description: 挑取精度标定下发挑取坐标时的工具号（1/2）
+  description: 原样回显本次工具相关请求的 40905，包括失败应答
 - name: removable_count
   address: 40941
   type: UINT16
@@ -93,90 +98,74 @@ registers:
   address: 40942
   type: REAL32
   direction: PC→PLC
-  description: 扫描坐标X
+  description: 扫描及标定时的相机移动目标坐标X
 - name: scan_y
   address: 40944
   type: REAL32
   direction: PC→PLC
-  description: 扫描坐标Y
+  description: 扫描及标定时的相机移动目标坐标Y
 - name: scan_z
   address: 40946
   type: REAL32
   direction: PC→PLC
-  description: 扫描坐标Z
+  description: 扫描及标定时的相机移动目标坐标Z
 - name: calibration1_x
   address: 40948
   type: REAL32
   direction: PC→PLC
-  description: 一号工具标定坐标（暂不使用）X
+  description: 一号工具标定移动目标坐标X
 - name: calibration1_y
   address: 40950
   type: REAL32
   direction: PC→PLC
-  description: 一号工具标定坐标（暂不使用）Y
+  description: 一号工具标定移动目标坐标Y
 - name: calibration1_z
   address: 40952
   type: REAL32
   direction: PC→PLC
-  description: 一号工具标定坐标（暂不使用）Z
+  description: 一号工具标定移动目标坐标Z
 - name: calibration2_x
   address: 40954
   type: REAL32
   direction: PC→PLC
-  description: 二号工具标定坐标（暂不使用）X
+  description: 二号工具标定移动目标坐标X
 - name: calibration2_y
   address: 40956
   type: REAL32
   direction: PC→PLC
-  description: 二号工具标定坐标（暂不使用）Y
+  description: 二号工具标定移动目标坐标Y
 - name: calibration2_z
   address: 40958
   type: REAL32
   direction: PC→PLC
-  description: 二号工具标定坐标（暂不使用）Z
+  description: 二号工具标定移动目标坐标Z
 - name: pick1_x
   address: 40960
   type: REAL32
   direction: PC→PLC
-  description: 一号工具挑取坐标X
+  description: 一号工具生产挑取坐标X
 - name: pick1_y
   address: 40962
   type: REAL32
   direction: PC→PLC
-  description: 一号工具挑取坐标Y
+  description: 一号工具生产挑取坐标Y
 - name: pick1_z
   address: 40964
   type: REAL32
   direction: PC→PLC
-  description: 一号工具挑取坐标Z
+  description: 一号工具生产挑取坐标Z
 - name: pick2_x
   address: 40966
   type: REAL32
   direction: PC→PLC
-  description: 二号工具挑取坐标X
+  description: 二号工具生产挑取坐标X
 - name: pick2_y
   address: 40968
   type: REAL32
   direction: PC→PLC
-  description: 二号工具挑取坐标Y
+  description: 二号工具生产挑取坐标Y
 - name: pick2_z
   address: 40970
   type: REAL32
   direction: PC→PLC
-  description: 二号工具挑取坐标Z
-
-- name: camcal_x
-  address: 40972
-  type: REAL32
-  direction: PC→PLC
-  description: 相机标定坐标X
-- name: camcal_y
-  address: 40974
-  type: REAL32
-  direction: PC→PLC
-  description: 相机标定坐标Y
-- name: camcal_z
-  address: 40976
-  type: REAL32
-  direction: PC→PLC
-  description: 相机标定坐标Z
+  description: 二号工具生产挑取坐标Z

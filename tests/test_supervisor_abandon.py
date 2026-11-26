@@ -139,3 +139,26 @@ def test_startup_unanswered_request_gets_error_reply(setup):
     plc.values.update(task_id=11, result_id=7, reply_func=1, status=0)
     assert PlcWorker(Handshake(plc, plc.contract, events=sup.events)).initialize() == 11
     assert plc.writes == [('reply_func', 999), ('result_id', 11)]
+
+
+def test_supervisor_error_echo_uses_child_request_snapshot(setup):
+    from nest_clear.ui.status import MainStatus
+    import os
+
+    plc, sup, _ = setup
+    sup._last_child_pid = os.getpid()
+    status = MainStatus(sup.config.record_directory)
+    status.observe({"event": "request", "task_id": 11, "func": 100, "plc_tool_id": 2})
+    plc.values.update(request_func=100, plc_tool_id=1)
+    plc.fail_reply = True
+    sup._reply_after_failure("子进程异常")
+    plc.fail_reply = False
+    sup._reply_after_failure("重试")
+    assert plc.writes[-3:] == [("pc_tool_id", 2), ("reply_func", 999), ("result_id", 11)]
+
+
+def test_startup_error_echoes_orphan_request(setup):
+    plc, sup, _ = setup
+    plc.values.update(request_func=155, plc_tool_id=65535)
+    assert PlcWorker(Handshake(plc, plc.contract, events=sup.events)).initialize() == 11
+    assert plc.writes == [("pc_tool_id", 65535), ("reply_func", 999), ("result_id", 11)]

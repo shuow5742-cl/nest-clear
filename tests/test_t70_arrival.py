@@ -43,7 +43,7 @@ def run_arrival_flow(tmp_path, values, timeout, warning, stable, film_mode):
     from nest_clear.supervisor.runner import Supervisor
     supervisor = Supervisor(config, plc)
     def request(task, func):
-        plc.request = (task, func); deadline = time.monotonic() + 3
+        plc.request = (task, func, None); deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             start = time.monotonic(); clock.tick_once(); assert time.monotonic() - start < .3
             supervisor._next_heartbeat = 0; supervisor.tick()
@@ -156,7 +156,7 @@ def test_invalid_actual_still_fails(tmp_path):
     clock.submit(build_batch(board, config, [(0., 0., 0.)], RequestTracker(0), events, calibration=Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 1)))
     try:
         for task, func in [(1, 1), (2, 20)]:
-            plc.request = task, func
+            plc.request = task, func, None
             deadline = time.monotonic() + 3
             while task not in plc.replies and time.monotonic() < deadline:
                 clock.tick_once(); time.sleep(.001)

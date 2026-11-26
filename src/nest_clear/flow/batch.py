@@ -29,16 +29,23 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -
                 ctx.events.emit("error", task_id=self._blackboard.read("task_id"), operation="reply", reason=f"应答写入失败，将持续重试：{self._blackboard.read('error')}")
                 return self.on_start()
             return status
-    reply = ReplyWorker(
-        ctx.board,
-        "plc",
-        lambda bb: {
+    def reply_payload(bb):
+        coordinates = dict(bb.read("reply_coordinates"))
+        tool_id = bb.read("plc_tool_id")
+        if tool_id is not None:
+            coordinates["pc_tool_id"] = tool_id
+        return {
             "operation": "reply",
             "task_id": bb.read("task_id"),
             "func": bb.read("reply_func"),
-            "coordinates": bb.read("reply_coordinates"),
+            "coordinates": coordinates,
             "diagnostic": bb.read("reply_diagnostic", None),
-        },
+        }
+
+    reply = ReplyWorker(
+        ctx.board,
+        "plc",
+        reply_payload,
         result_key="committed_func",
         name="写入应答",
     )

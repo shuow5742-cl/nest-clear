@@ -6,11 +6,11 @@ from typing import Any
 
 from .codec import encode_real32, encode_u16
 from .contract import Contract
-from .function_codes import REPLY_FUNCTION_NAMES
+from .function_codes import REPLY_FUNCTION_NAMES, uses_tool_id
 from ..guard import GuardError, diagnostic
 
 logger = logging.getLogger("nest_clear.comm")
-SCALAR_NAMES = frozenset(("removable_count", "pick_tool"))
+SCALAR_NAMES = frozenset(("removable_count", "pc_tool_id"))
 
 
 class Handshake:
@@ -26,15 +26,16 @@ class Handshake:
         self._readback_error_task = None
         self._readback_error_diagnostic = None
 
-    def read_request(self) -> tuple[int, int]:
-        """读取任务编号及功能码；变化检测和日志由调用方负责。"""
+    def read_request(self) -> tuple[int, int, int | None]:
+        """读取任务编号、功能码及该请求的工具 ID；变化检测和日志由调用方负责。"""
         while True:
             task_id = self.io.read_u16(self.contract["task_id"].address)
             func_code = self.io.read_u16(self.contract["request_func"].address)
+            tool_id = self.io.read_u16(self.contract["plc_tool_id"].address) if uses_tool_id(func_code) else None
             second = self.io.read_u16(self.contract["task_id"].address)
             if task_id == second:
                 self.inconsistent_reads = 0
-                return task_id, func_code
+                return task_id, func_code, tool_id
             self.inconsistent_reads += 1
             if self.events and hasattr(self.events, "plc"):
                 self.events.plc("task_id_inconsistent", task_id=task_id, first=task_id, second=second,
@@ -54,7 +55,7 @@ class Handshake:
         if self._readback_error_task == task_id:
             func_code = 999
             failure = self._readback_error_diagnostic
-            payload = {name: (0 if name in SCALAR_NAMES else [0, 0, 0]) for name in (payload or {})}
+            payload = {name: (value if name == "pc_tool_id" else 0 if name in SCALAR_NAMES else [0, 0, 0]) for name, value in (payload or {}).items()}
         context = f"Task_ID={task_id!r}，功能码={func_code!r}"
         try:
             encode_u16(task_id)
@@ -76,7 +77,7 @@ class Handshake:
                     raise GuardError("HANDSHAKE-INVALID", f"UINT16 标量 {name} 无效：{values!r}", where, "检查标量是否为 UINT16。") from exc
                 scalar_blocks.append((self.contract[name].address, values))
                 continue
-            if name not in ("scan_xyz", "pick1_xyz", "pick2_xyz", "calibration1_xyz", "calibration2_xyz", "camcal_xyz"):
+            if name not in ("scan_xyz", "pick1_xyz", "pick2_xyz", "calibration1_xyz", "calibration2_xyz"):
                 raise GuardError("HANDSHAKE-INVALID", f"未知坐标名，实际值 {values!r}", where, "检查坐标名是否与契约一致。")
             if not isinstance(values, (tuple, list)) or len(values) != 3:
                 raise GuardError("HANDSHAKE-INVALID", f"坐标应包含三个轴，实际 {values!r}", where, "按 X、Y、Z 顺序提供三个有限数字。")
@@ -111,8 +112,9 @@ class Handshake:
                     self._readback_error_diagnostic = failure
                     for block_address, values in blocks:
                         self.io.write_real32_block(block_address, [0.0] * len(values))
-                    for block_address, _ in scalar_blocks:
-                        self.io.write_u16(block_address, 0)
+                    for block_address, value in scalar_blocks:
+                        echo_address = self.contract["pc_tool_id"].address
+                        self.io.write_u16(block_address, value if block_address == echo_address else 0)
                     func_code = 999
                     self.io.write_u16(self.contract["reply_func"].address, func_code)
                     actual_error = self.io.read_u16(self.contract["reply_func"].address)
@@ -139,7 +141,7 @@ class Handshake:
             self.events.emit("reply_error", task_id=task_id, reply_func=func_code, **details)
         if self.events and hasattr(self.events, "plc"):
             self.events.plc("reply", task_id=task_id, func=func_code, coordinates=dict(payload),
-                            removable_count=payload.get("removable_count"), pick_tool=payload.get("pick_tool"), readback=readback_result,
+                            removable_count=payload.get("removable_count"), pc_tool_id=payload.get("pc_tool_id"), readback=readback_result,
                             elapsed_ms=round((time.monotonic() - started) * 1000, 3),
                             **(details if func_code in (999, 131, 82, 92) else {}))
         logger.info("应答完成：Task_ID=%s，功能码=%s（%s），坐标=%s", task_id, func_code, REPLY_FUNCTION_NAMES.get(func_code, "未知功能码"), dict(payload))

@@ -180,9 +180,11 @@ def test_mode_rejection_preserves_picking_state(prepared: tuple, caplog: pytest.
     scan = plc.wait_reply(task, 5)["scan_xyz"]
     cycle = app.handle.batch.blackboard.read("work_cycle")
     before = cycle.state
-    task = plc.request(100)
-    drive_until(app, lambda: plc.io.read("result_id") == task)
-    assert plc.io.read("reply_func") == 999
+    for code in (100, 110):
+        task = plc.request(code, tool_id=2)
+        drive_until(app, lambda: plc.io.read("result_id") == task)
+        assert plc.io.read("reply_func") == 999
+        assert plc.io.read("pc_tool_id") == 2
     assert cycle.state == before
     plc.set_actual_xyz(scan)
     task = plc.request(20)
@@ -196,11 +198,19 @@ def test_mode_rejection_preserves_picking_state(prepared: tuple, caplog: pytest.
     assert app.tracker.processed == task
 
 
-@pytest.mark.parametrize("code", [110, 120, 130])
+@pytest.mark.parametrize("code", [101, 120, 130])
 def test_idle_rejects_calibration_continuation(prepared: tuple, code: int) -> None:
     """无对刀会话时拒绝后续功能码。"""
     plc, app = prepared
-    task = plc.request(code)
+    task = plc.request(code, tool_id=2)
     drive_until(app, lambda: plc.io.read("result_id") == task)
     assert plc.io.read("reply_func") == 999
     assert app.handle.batch.blackboard.read("mode") == Mode.IDLE
+
+@pytest.mark.parametrize("code", [101, 120])
+def test_removed_code_diagnostic(prepared, code):
+    plc, app = prepared
+    task = plc.request(code, tool_id=2)
+    drive_until(app, lambda: plc.io.read("result_id") == task)
+    assert plc.io.read("reply_func") == 999
+    assert app.events.reply_diagnostics[task]["what"] == f"未知功能码 {code}"

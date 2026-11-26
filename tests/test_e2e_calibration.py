@@ -107,18 +107,21 @@ def test_offset_and_wrong_tool(rig, tool):
     plc, app, _ = rig
     offset(app, (0.5, 0.3, 0.2))
     plc.set_actual_xyz(P0)
-    task = plc.request(100 if tool == 1 else 101)
+    task = plc.request(100 if tool == 1 else 110, tool_id=2)
     first = plc.wait_reply(task, 5)
-    assert first["func_code"] == (100 if tool == 1 else 101)
+    assert first["func_code"] == (100 if tool == 1 else 110)
     xyz = first[f"calibration{tool}_xyz"]
     assert xyz == pytest.approx([10.5, 20.3, 30.2], abs=0.03)
     assert plc.contract[f"calibration{tool}_x"].address in [a for a, _ in plc.writes]
-    task = plc.request(120 if tool == 1 else 110)
+    task = plc.request(110 if tool == 1 else 100, tool_id=2)
     assert plc.wait_reply(task, 5)["func_code"] == 999
     task = plc.request(1)
     assert plc.wait_reply(task, 5)["func_code"] == 999
     plc.set_actual_xyz(xyz)
-    task = plc.request(110 if tool == 1 else 120)
+    mismatch = plc.wait_reply(plc.request(100 if tool == 1 else 110, tool_id=1), 5)
+    assert (mismatch["func_code"], mismatch["pc_tool_id"]) == (999, 1)
+    assert "40905 从 2 变为 1" in app.events.status.data["tooltip"]["message"]
+    task = plc.request(100 if tool == 1 else 110, tool_id=2)
     assert plc.wait_reply(task, 5)["func_code"] == (111 if tool == 1 else 121)
 
 
@@ -129,7 +132,7 @@ def test_multiple_offsets(rig):
     offset(app, (0.5, 0.3, 0.2))
     records = plc.start_tool_calibration(1, P0, timeout_s=5, position_error=(0.04, 0, 0))
     assert records[0]["func_code"] == 100
-    assert all(r["func_code"] == 110 for r in records[1:-1])
+    assert all(r["func_code"] == 100 for r in records[1:-1])
     assert len(records) >= 3 and records[-1]["func_code"] == 111
 
 
@@ -156,6 +159,7 @@ def test_failures_recover_to_idle(rig, case):
         object.__setattr__(app.config.tool_calibration, "enabled", False)
     records = plc.start_tool_calibration(1, actual, timeout_s=5, position_error=error)
     assert records[-1]["func_code"] == 131
+    assert records[-1]["pc_tool_id"] == 2
     task = plc.request(1)
     assert plc.wait_reply(task, 5)["func_code"] == 1
     events = [json.loads(line) for line in next((path / "runs").glob("*/*/events.jsonl")).read_text().splitlines()]
@@ -167,8 +171,15 @@ def test_finish_saves_compensation(rig, tool, monkeypatch):
     plc, app, path = rig
     offset(app, (0.5, 0.3, 0.2))
     before = load_tools(path / "tools.yaml")
+    plc.writes.clear()
     records = plc.start_tool_calibration(tool, P0, timeout_s=5, finish=True)
-    assert records[-1]["func_code"] == 130
+    func, aligned, target = (100, 111, 40948) if tool == 1 else (110, 121, 40954)
+    assert [r["request_func"] for r in records] == [func, func, 130]
+    assert [r["func_code"] for r in records] == [func, aligned, 130]
+    writes = [(addr, words) for addr, words in plc.writes if addr != 40932]
+    assert [addr for addr, _ in writes] == [target, 40935, 40934, 40933, 40935, 40934, 40933, 40935, 40934, 40933]
+    assert [words for addr, words in writes if addr == 40933] == [[r["task_id"]] for r in records]
+    assert all(r["pc_tool_id"] == 2 for r in records)
     final = records[0][f"calibration{tool}_xyz"]
     base = (1, 2, 3) if tool == 1 else (0, 0, 0)
     expected = [b + x - p for b, x, p in zip(base, final, P0)]
@@ -211,8 +222,8 @@ def test_finish_inconsistent_and_unfinished(rig):
     assert records[-1]["func_code"] == 131
     assert (path / "tools.yaml").read_bytes() == before and app.config.tools == old
     plc.set_actual_xyz(P0)
-    assert plc.wait_reply(plc.request(100), 5)["func_code"] == 100
-    assert plc.wait_reply(plc.request(130), 5)["func_code"] == 131
+    assert plc.wait_reply(plc.request(100, tool_id=2), 5)["func_code"] == 100
+    assert plc.wait_reply(plc.request(130, tool_id=2), 5)["func_code"] == 131
 
 
 def test_finish_without_offset_and_realtime_check(rig):
@@ -220,10 +231,10 @@ def test_finish_without_offset_and_realtime_check(rig):
     records = plc.start_tool_calibration(1, P0, timeout_s=5, finish=True, final_error=(0.02, 0, 0))
     assert records[-1]["func_code"] == 130
     plc.set_actual_xyz(P0)
-    assert plc.wait_reply(plc.request(100), 5)["func_code"] == 111
+    assert plc.wait_reply(plc.request(100, tool_id=2), 5)["func_code"] == 111
     plc.set_calibration_final(1, P0)
     plc.set_actual_xyz((11, 20, 30))
-    assert plc.wait_reply(plc.request(130), 5)["func_code"] == 131
+    assert plc.wait_reply(plc.request(130, tool_id=2), 5)["func_code"] == 131
 
 
 def test_finish_save_failure(rig, monkeypatch):
@@ -251,7 +262,7 @@ def test_calibration_record_and_report(rig):
     app.calib_camera.cameras["front"].config["undetectable"] = True
     failure = plc.start_tool_calibration(1, P0, timeout_s=5)
     assert failure[-1]["func_code"] == 131
-    assert plc.wait_reply(plc.request(130), 5)["func_code"] == 999
+    assert plc.wait_reply(plc.request(130, tool_id=2), 5)["func_code"] == 999
     app.archive.close()
     directory = app.events.run_directory
     rows = [json.loads(line) for line in (directory / "tooltip_summary.jsonl").read_text().splitlines()]
@@ -317,7 +328,7 @@ def test_calibration_capture_failure_returns_131(rig, monkeypatch):
         raise RuntimeError('Failed to capture image')
     monkeypatch.setattr(app.calib_camera.cameras['front'], 'capture', broken)
     plc.set_actual_xyz(P0)
-    task = plc.request(100)
+    task = plc.request(100, tool_id=2)
     assert plc.wait_reply(task, 5)['func_code'] == 131
     rows = [json.loads(line) for line in next((path / 'runs').glob('*/*/events.jsonl')).read_text().splitlines()]
     assert any(r['event'] == 'tooltip_failed' and r['task_id'] == task and '取图超时' in r['reason'] for r in rows)
@@ -343,7 +354,7 @@ def test_calibration_quality_limits(rig, monkeypatch, kind, hard):
     monkeypatch.setattr(module, 'solve_correction', altered)
     monkeypatch.setattr(module, 'check_quality', lambda *args: SimpleNamespace(ok=kind == 'z', residuals_mm={'front': residual}, condition_number=condition))
     plc.set_actual_xyz(P0)
-    task = plc.request(100)
+    task = plc.request(100, tool_id=2)
     reply = plc.wait_reply(task, 5)
     assert reply['func_code'] == (131 if hard else 111)
     rows = [json.loads(line) for line in next((path / 'runs').glob('*/*/events.jsonl')).read_text().splitlines()]

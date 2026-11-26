@@ -23,7 +23,7 @@ from nest_clear.baseline.runout import FRAME_COUNT, FRAME_QUALITY_PASSED, measur
 from nest_clear.tooltip.store import load_baseline, save_tools
 from nest_clear.tooltip.click import confirm_tip, _DISPLAY_ERROR
 from .context import FlowContext
-from .leaves import CallWorker, Instant
+from .leaves import CallWorker, Instant, Predicate
 from .modes import Mode, transition
 from nest_clear.preview.control import close_for_mode
 
@@ -118,7 +118,7 @@ class SaveCompensation(Instant):
         self.ctx.events.emit("tooltip_compensation", task_id=bb.read("task_id"), tool=tool,
                              old=old, new=new, delta=delta)
         session.update(delta=delta, old_compensation=list(old), new_compensation=list(new))
-        self.ctx.events.emit('tooltip_state', phase='done', message='完成', tool=tool,
+        self.ctx.events.emit('tooltip_state', phase='done', message='完成', tool=tool, plc_tool_id=bb.read('plc_tool_id'),
                              old_compensation=list(old), new_compensation=list(new), compensation_difference=[n-o for n, o in zip(new, old)], rounds=session.get('rounds', []))
         save_session_record(self.ctx, session, '成功')
         write_tooltip_summary(self.ctx.events, session, "成功")
@@ -154,7 +154,8 @@ class StartCalibration(Instant):
         bb = self._blackboard
         tool = 1 if bb.read("request_func") == 100 else 2
         self.ctx.events.emit("tooltip_start", task_id=bb.read("task_id"), start_task_id=bb.read("task_id"),
-                             start_token=self.ctx.events.clock().isoformat(), tool=tool, phase='starting', message='检查基准和到位')
+                             start_token=self.ctx.events.clock().isoformat(), tool=tool, plc_tool_id=bb.read('plc_tool_id'),
+                             phase='starting', message='检查基准和到位')
         session = {"tool": tool, "iterations": 0, "offset": False, "last_position": None,
                    "ended": False, "start_time": self.ctx.events.clock().isoformat(),
                    "task_ids": [bb.read("task_id")], "images": [], "delta": None,
@@ -550,7 +551,7 @@ class PrepareCalibrationReply(Instant):
                 fail(f"对刀偏移超过最大次数 {session['iterations']}")
             xyz = tuple(float(a + d) for a, d in zip(bb.read("actual"), result.delta_xyz))
             guard_position(xyz, self.ctx.config.travel, f"对刀 Task_ID={bb.read('task_id')} 工具 {tool}")
-            func = (110 if tool == 1 else 120) if session["offset"] else (100 if tool == 1 else 101)
+            func = 100 if tool == 1 else 110
             coordinates = {f"calibration{tool}_xyz": xyz}
             session.update(iterations=session["iterations"] + 1, offset=True, last_position=xyz)
             self.ctx.events.emit("tooltip_offset", task_id=bb.read("task_id"), tool=tool,
@@ -579,7 +580,7 @@ class CalibrationFailed(Instant):
                              request_func=bb.read("request_func"), reason=reason)
         if session:
             warning = session.get('baseline_warning')
-            self.ctx.events.emit('tooltip_state', phase='fail', message=str(reason), tool=session['tool'],
+            self.ctx.events.emit('tooltip_state', phase='fail', message=str(reason), tool=session['tool'], plc_tool_id=bb.read('plc_tool_id'),
                                  rounds=session.get('rounds', []),
                                  camera_settings_warning=f'{warning}　{diagnostic(reason)["what"]}' if warning else None)
             save_session_record(self.ctx, session, '失败', str(reason))
@@ -621,7 +622,7 @@ class ConfirmCalibration(TreeNode):
         bb = self._blackboard
         session = bb.read('tooltip_session')
         warning = session.get('baseline_warning')
-        self.ctx.events.emit('tooltip_state', phase=phase, message=message, tool=session['tool'],
+        self.ctx.events.emit('tooltip_state', phase=phase, message=message, tool=session['tool'], plc_tool_id=bb.read('plc_tool_id'),
                              camera_settings_warning=f'{warning}　{message}' if warning else None,
                              command_seq=reader(self.ctx).last_seq, rounds=session['rounds'],
                              jacobian_status=session.get('jacobian_status', '未测' if session['probing'] else '已存'),
@@ -791,7 +792,7 @@ class ConfirmCalibration(TreeNode):
             else:
                 if session['probing']: session['probe_samples'].append(self.sample)
                 else: session['iterations'] += 1
-                func = (110 if session['tool'] == 1 else 120) if session['offset'] else (100 if session['tool'] == 1 else 101)
+                func = 100 if session['tool'] == 1 else 110
                 target = tuple(float(v) for v in self.target)
                 session.update(offset=True, last_position=target)
                 coords = {f"calibration{session['tool']}_xyz": target}
@@ -825,11 +826,11 @@ def calibration_branch(ctx: FlowContext, start: bool) -> TreeNode:
     return Fallback([Sequence(steps, name="对刀迭代"), CalibrationFailed(ctx)], name="对刀业务或 131")
 
 
-def start_branch(ctx: FlowContext) -> TreeNode:
-    """构造 100/101 开始分支。"""
-    return calibration_branch(ctx, True)
 
-
-def continue_branch(ctx: FlowContext) -> TreeNode:
-    """构造 110/120 继续分支。"""
-    return calibration_branch(ctx, False)
+def change_tool_branch(ctx: FlowContext) -> TreeNode:
+    """同一功能码在空闲时开始，进入对应工具会话后继续。"""
+    return Fallback([
+        Sequence([Predicate("空闲时开始对刀", lambda bb: bb.read("mode") == Mode.IDLE),
+                  calibration_branch(ctx, True)], name="开始对刀"),
+        calibration_branch(ctx, False),
+    ], name="启动或继续对刀")

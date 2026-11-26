@@ -1,5 +1,7 @@
 已并入 design.md §2/§3/§9-7，仅作历史
 
+> 历史任务记录。现行换针对刀和标定寄存器以 [design.md §9](design.md#9-工具标定与换针对刀v40-v232026-11-26) 为准。
+
 # 任务 T16：nest-clear 工作模式改为「粗定位 + 精定位」两段流程（协议 V2.0）
 
 仓库 ~/nest-clear（当前 main @ 886d058，299 测试全绿）。先 `git checkout -b t16-two-stage`，全部改动在这个分支上提交（可多次提交），**不要 push、不要合并 main、不要改 ~/Auto_Weaver**。

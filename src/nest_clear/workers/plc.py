@@ -1,4 +1,5 @@
 """以握手原语执行 PLC 请求、实时坐标读取和应答。"""
+from collections.abc import Mapping
 import logging
 import time
 from typing import Any
@@ -39,7 +40,11 @@ class PlcWorker(AsyncRequestWorker):
                 self.handshake.events.emit("request_abandoned", task_id=baseline, request_func=func, reason="PLC 急停或初始化")
         else:
             logger.error("启动时发现未应答 Task_ID=%s，提交 999", baseline)
-            self.handshake.write_reply(baseline, 999, failure=diagnostic("启动时发现尚未应答的请求", code="PLC-ORPHAN-REQUEST", where="主程序启动", hint="检查 PLC 请求状态后重新初始化。"))
+            baseline, _, tool_id = self.handshake.read_request()
+            if not baseline or baseline == io.read_u16(contract["result_id"].address):
+                return baseline
+            echo = {"pc_tool_id": tool_id} if tool_id is not None else {}
+            self.handshake.write_reply(baseline, 999, echo, failure=diagnostic("启动时发现尚未应答的请求", code="PLC-ORPHAN-REQUEST", where="主程序启动", hint="检查 PLC 请求状态后重新初始化。"))
         return baseline
 
     def execute(self, payload: dict[str, Any]) -> Any:
@@ -71,6 +76,10 @@ class PlcWorker(AsyncRequestWorker):
                 logger.error("应答数据无效，改回 999：%s", exc)
                 if self.handshake.events:
                     self.handshake.events.emit("error", task_id=payload["task_id"], operation="reply_validation", reason=str(exc))
-                self.handshake.write_reply(payload["task_id"], 999, failure=diagnostic(exc))
+                coordinates = payload.get("coordinates") or {}
+                echo = {}
+                if isinstance(coordinates, Mapping) and "pc_tool_id" in coordinates:
+                    echo["pc_tool_id"] = coordinates["pc_tool_id"]
+                self.handshake.write_reply(payload["task_id"], 999, echo, failure=diagnostic(exc))
             return self.handshake.last_reply_func
         raise GuardError("PLC-OPERATION", f"未知操作 {operation!r}", "PLC Worker", "检查行为树命令。")

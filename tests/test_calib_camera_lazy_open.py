@@ -58,7 +58,7 @@ def test_plc_request_fails_then_retries(rig, monkeypatch):
     original = front.open
     monkeypatch.setattr(front, "open", lambda: (_ for _ in ()).throw(OSError("未连接")))
     plc.set_actual_xyz(P0)
-    task = plc.request(100)
+    task = plc.request(100, tool_id=2)
     assert plc.wait_reply(task, 5)["func_code"] == 131
     rows = [json.loads(line) for line in next((path / "runs").glob("*/*/events.jsonl")).read_text().splitlines()]
     assert any("对刀相机" in str(row) and "未连接" in str(row) for row in rows)
@@ -103,7 +103,7 @@ def test_supervisor_owned_camera_returns_131_and_retries_after_release(rig):
     owner.open()
     try:
         plc.set_actual_xyz(P0)
-        task = plc.request(100)
+        task = plc.request(100, tool_id=2)
         assert plc.wait_reply(task, 5)['func_code'] == 131
         rows = [json.loads(line) for line in next((path / 'runs').glob('*/*/events.jsonl')).read_text().splitlines()]
         assert any('仍被父程序预览占用' in str(row) for row in rows)
@@ -122,7 +122,7 @@ def test_one_auto_camera_causes_plc_reply_131(rig, monkeypatch):
         raise ValueError('只检测到 1 台对刀相机（usb-0:6），需两台都接上才能区分正/侧')
     monkeypatch.setattr('nest_clear.workers.calib_camera.resolve_tooltip_roles', missing)
     plc.set_actual_xyz(P0)
-    task = plc.request(100)
+    task = plc.request(100, tool_id=2)
     assert plc.wait_reply(task, 5)['func_code'] == 131
     import json
     rows = [json.loads(line) for line in next((path / 'runs').glob('*/*/events.jsonl')).read_text().splitlines()]

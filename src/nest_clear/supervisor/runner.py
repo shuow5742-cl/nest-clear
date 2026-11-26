@@ -22,10 +22,11 @@ from datetime import datetime
 import time
 from typing import Any
 
+from ..comm.function_codes import uses_tool_id
 from ..comm.handshake import Handshake
 from ..config import Config
 from ..guard import diagnostic
-from ..paths import main_alive_file, supervisor_state_file, ui_command_file
+from ..paths import main_alive_file, main_status_file, supervisor_state_file, ui_command_file
 from ..record.events import EventRecorder
 from .device_state import (
     ACTION_ESTOP,
@@ -69,6 +70,7 @@ class Supervisor:
         self._started_at: float | None = None
         self._wall_start = datetime.now().astimezone().isoformat()
         self._child_start_wall = None
+        self._last_child_pid = None
         self._last_exit = None
         self._plc_last_read = None
         self._heartbeat_last_write = None
@@ -111,6 +113,19 @@ class Supervisor:
         logger.info("放弃代答：Task_ID=%s，功能码=%s，原因=%s", task_id, func, reason)
         self._pending_reply = None
 
+    def _tool_id_for_failed_child(self, task_id: int, func: int) -> int:
+        """优先使用主程序接收请求时发布的原值，启动预检阶段直接读 PLC。"""
+        try:
+            state = json.loads(main_status_file(self.config.record_directory).read_text(encoding="utf-8"))
+            tool_id = state.get("plc_tool_id")
+            if (self._last_child_pid is not None and state.get("pid") == self._last_child_pid
+                    and state.get("task_id") == task_id and state.get("request_func") == func
+                    and type(tool_id) is int and 0 <= tool_id <= 65535):
+                return tool_id
+        except (OSError, ValueError, AttributeError):
+            pass
+        return self.plc.read("plc_tool_id")
+
     def _reply_after_failure(self, reason: str, *, retry: bool = True) -> None:
         """仅在 PLC 仍等待同一请求时代答；异常退出可在后续循环重试。"""
         pending = self._pending_reply if retry else None
@@ -135,14 +150,21 @@ class Supervisor:
                 return
             task_id = current
             pending["task_id"] = task_id
-            if task_id and pending["func"] is None:
-                pending["func"] = self.plc.read("request_func")
             result_id = self.plc.read("result_id")
             if task_id == 0 or task_id == result_id:
                 if retry:
                     self._pending_reply = None
                 return
-            Handshake(self.plc, self.plc.contract, self.config.plc.write_readback, self.events).write_reply(task_id, 999, failure=diagnostic(reason, code="SUPERVISOR-CHILD", where="父程序代答", hint="检查主程序退出原因、看门狗和设备状态后重新初始化。"))
+            if pending["func"] is None:
+                func = self.plc.read("request_func")
+                tool_id = self._tool_id_for_failed_child(task_id, func) if uses_tool_id(func) else None
+                confirmed = self.plc.read("task_id")
+                if confirmed != task_id:
+                    self._abandon_reply(f"Task_ID 已变化为 {confirmed}", task_id, func)
+                    return
+                pending.update(func=func, tool_id=tool_id)
+            echo = {"pc_tool_id": pending["tool_id"]} if pending["tool_id"] is not None else {}
+            Handshake(self.plc, self.plc.contract, self.config.plc.write_readback, self.events).write_reply(task_id, 999, echo, failure=diagnostic(reason, code="SUPERVISOR-CHILD", where="父程序代答", hint="检查主程序退出原因、看门狗和设备状态后重新初始化。"))
             if retry:
                 self._pending_reply = None
             self.events.emit("supervisor_reply_999", task_id=task_id, request_func=pending.get("func"), reply_func=999, reason=reason, **diagnostic(reason, code="SUPERVISOR-CHILD", where="父程序代答", hint="检查主程序退出原因、看门狗和设备状态后重新初始化。"))
@@ -397,6 +419,7 @@ class Supervisor:
             atomic_write(handoff, json.dumps({'pid': os.getpid(), 'seq': self.preview_seq}).encode())
             self._alive.unlink(missing_ok=True)
             self.child = subprocess.Popen(self.config.supervisor.child_command)
+            self._last_child_pid = self.child.pid
             self._started_at = time.monotonic()
             self._child_start_wall = datetime.now().astimezone().isoformat()
             logger.info("主程序已启动，PID %s，命令 %s", self.child.pid, self.config.supervisor.child_command)

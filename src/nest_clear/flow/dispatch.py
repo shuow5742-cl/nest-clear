@@ -10,13 +10,13 @@ from autoweaver.motion_policy.nodes.node import TreeNode
 from .camera_calibration import camera_branch, finish
 from .tool_offset import ToolOffset, finish as finish_tooloffset
 from .pick_accuracy import PickAccuracy, finish as finish_pickaccuracy
-from .calibration import finish_branch, start_branch, continue_branch
+from .calibration import finish_branch, change_tool_branch
 from .context import FlowContext
 from .leaves import Instant, Predicate, PrepareError
 from .modes import Mode
 from .picking import next_branch, scan_branch
 from .work_cycle import ProtocolViolation
-from nest_clear.guard import diagnostic
+from nest_clear.guard import GuardError, diagnostic
 from nest_clear.preview.control import REQUEST_CAMERAS, close_previews_for
 
 logger = logging.getLogger("nest_clear.flow.dispatch")
@@ -29,10 +29,8 @@ BRANCHES: dict[int, Branch] = {
     80: (frozenset((Mode.IDLE, Mode.CAMERA_CALIBRATING)), camera_branch),
     90: (frozenset((Mode.IDLE, Mode.TOOL_OFFSET)), ToolOffset),
     95: (frozenset((Mode.IDLE, Mode.TOOL_OFFSET)), ToolOffset),
-    100: (frozenset((Mode.IDLE,)), start_branch),
-    101: (frozenset((Mode.IDLE,)), start_branch),
-    110: (frozenset((Mode.CALIBRATING_1,)), continue_branch),
-    120: (frozenset((Mode.CALIBRATING_2,)), continue_branch),
+    100: (frozenset((Mode.IDLE, Mode.CALIBRATING_1, Mode.TOOL_OFFSET)), change_tool_branch),
+    110: (frozenset((Mode.IDLE, Mode.CALIBRATING_2, Mode.TOOL_OFFSET)), change_tool_branch),
     130: (frozenset((Mode.CALIBRATING_1, Mode.CALIBRATING_2)), finish_branch),
     150: (frozenset((Mode.IDLE, Mode.PICK_ACCURACY)), PickAccuracy),
     155: (frozenset((Mode.IDLE, Mode.PICK_ACCURACY)), PickAccuracy),
@@ -83,7 +81,7 @@ class RejectMode(Instant):
                 reason = str(exc)
                 bb.write("error_type", type(exc).__name__, self.name)
                 bb.write("error_diagnostic", diagnostic(exc), self.name)
-        elif mode == Mode.PICKING and func in (100, 101):
+        elif mode == Mode.PICKING and func in (100, 110):
             reason = "挑毛进行中收到对刀指令，须先停止挑毛并由 PLC 重新初始化"
         else:
             reason = f"当前模式 {mode.value} 不允许功能码 {func}"
@@ -94,20 +92,85 @@ class RejectMode(Instant):
         self.events.emit("mode_rejected", mode=mode.value, scan_index=bb.read("next_index"), request_func=func, task_id=bb.read("task_id"), reason=reason)
 
 
+
+class CheckToolID(Instant):
+    def __init__(self, ctx: FlowContext) -> None:
+        super().__init__(name="校验 PLC 工具 ID")
+        self.events = ctx.events
+
+    def perform(self) -> None:
+        bb = self._blackboard
+        func, tool_id, mode = (bb.read(key) for key in ("request_func", "plc_tool_id", "mode"))
+        if func in (150, 155, 156):
+            session = bb.read("pickaccuracy_session", None)
+            expected = session["tool"] if session else None
+            page = "pickacc_state"
+            tool = expected if expected is not None else tool_id
+        else:
+            session = bb.read("tooltip_session", None)
+            expected = {Mode.TOOL_OFFSET: 1, Mode.CALIBRATING_1: 2, Mode.CALIBRATING_2: 2}.get(mode)
+            page = "tooloffset_state" if func in (90, 95) or mode == Mode.TOOL_OFFSET else "tooltip_state"
+            tool = session["tool"] if session else {100: 1, 110: 2}.get(func)
+        if tool_id not in (1, 2):
+            reason = f"40905={tool_id} 非法，必须为 1 或 2"
+        elif expected is not None and tool_id != expected:
+            reason = f"流程中 40905 从 {expected} 变为 {tool_id}"
+        elif func in (90, 95) and tool_id != 1:
+            reason = f"工具偏移标定要求 40905=1，实际为 {tool_id}"
+        elif func in (100, 110) and tool_id == 1 and not bb.read("tooloffset_session", None):
+            reason = "未收到 90 却收到工具偏移标定请求"
+        else:
+            return
+        fields = {"phase": "protocol_error" if page == "pickacc_state" and session else
+                           "fail" if page == "tooltip_state" else "failed",
+                  "message": reason, "plc_tool_id": tool_id}
+        if page != "tooloffset_state":
+            fields["tool"] = tool if tool in (1, 2) else None
+        self.events.emit(page, **fields)
+        raise GuardError("PLC-TOOL-ID", reason, "PLC 地址 40905", "检查工具 ID 及当前标定会话。")
+
+
+class PendingToolOffset(Instant):
+    def __init__(self, ctx: FlowContext) -> None:
+        super().__init__(name="工具偏移标定新流程")
+        self.events = ctx.events
+
+    def perform(self) -> None:
+        bb = self._blackboard
+        reason = "工具偏移标定新流程尚未实现"
+        self.events.emit("tooloffset_state", message=reason)
+        bb.write("reply_func", 131, self.name)
+        bb.write("reply_coordinates", {}, self.name)
+        bb.write("reply_tool", None, self.name)
+        bb.write("reply_diagnostic", diagnostic(reason, code="TOOLOFFSET-PENDING", where=self.name), self.name)
+
+
 def build_dispatch(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -> TreeNode:
     """每项先匹配功能码，再统一检查模式并执行对应工厂。"""
     entries = BRANCHES if branches is None else branches
     nodes = []
     for code, (allowed, factory) in entries.items():
         match = Predicate(f"功能码 == {code}", lambda bb, code=code: bb.read("request_func") == code)
-        business = Fallback([factory(ctx), PrepareError(ctx.events)], name=f"功能码 {code} 业务或 999")
+        steps = [CloseRequestPreviews(ctx), factory(ctx)]
+        if code in (100, 110) and factory is change_tool_branch:
+            steps = [Fallback([
+                Sequence([Predicate("工具偏移标定", lambda bb: bb.read("plc_tool_id") == 1),
+                          PendingToolOffset(ctx)], name="暂回工具偏移标定失败"),
+                Sequence(steps, name="执行换针对刀"),
+            ], name="按工具 ID 分流")]
+        business = Fallback([Sequence(steps, name="执行请求"), PrepareError(ctx.events)], name=f"功能码 {code} 业务或 999")
         checked = Fallback(
             [
-                Sequence([Predicate("模式允许", lambda bb, allowed=allowed: bb.read("mode") != Mode.BASELINE and bb.read("mode") in allowed), CloseRequestPreviews(ctx), business], name="模式允许后执行"),
+                Sequence([Predicate("模式允许", lambda bb, allowed=allowed: bb.read("mode") != Mode.BASELINE and bb.read("mode") in allowed), business], name="模式允许后执行"),
                 Sequence([RejectMode(ctx), PrepareError(ctx.events)], name="模式拒绝并应答 999"),
             ],
             name="模式检查",
         )
+        if code in (90, 95, 100, 110, 130, 150, 155, 156):
+            checked = Fallback([
+                Sequence([CheckToolID(ctx), checked], name="工具 ID 有效后检查模式"),
+                PrepareError(ctx.events),
+            ], name="工具 ID 检查")
         nodes.append(Sequence([match, checked], name=f"功能码 {code}"))
-    nodes.append(Sequence([RejectMode(ctx), PrepareError(ctx.events)], name="拒绝未知功能码"))
+    nodes.append(Sequence([RejectMode(ctx), PrepareError(ctx.events, unknown=True)], name="拒绝未知功能码"))
     return Fallback(nodes, name="模式检查+功能码分发")

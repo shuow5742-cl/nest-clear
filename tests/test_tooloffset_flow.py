@@ -25,7 +25,7 @@ from nest_clear.workers.tooloffset import ToolOffsetWorker
 class PLC(AsyncRequestWorker):
     name = 'plc'
     def __init__(self):
-        super().__init__(); self.request = (0,0); self.actual = (130.,70.,-5.); self.replies = {}; self.jitter = 0.; self.reads = 0
+        super().__init__(); self.request = (0,0,None); self.actual = (130.,70.,-5.); self.replies = {}; self.jitter = 0.; self.reads = 0
     def execute(self, payload):
         if payload['operation'] == 'request': return self.request
         if payload['operation'] == 'actual':
@@ -93,14 +93,14 @@ def test_normal_real_tree(tmp_path):
             time.sleep(.001)
         raise AssertionError('等待超时')
     try:
-        plc.request=(1,90)
+        plc.request=(1,90,1)
         until(lambda: batch.blackboard.read('tooloffset_session',None) is not None)
         send(tmp_path,'select_tool_and_start',{'tool':1,'mode':'center'})
         until(lambda: 1 in plc.replies)
-        assert plc.replies[1] == (90, {'camcal_xyz':(130.,70.,-5.)})
+        assert plc.replies[1] == (90, {'scan_xyz':(130.,70.,-5.), 'pc_tool_id':1})
         task = 1
         while True:
-            task += 1; plc.request=(task,95)
+            task += 1; plc.request=(task,95,1)
             until(lambda: task in plc.replies or (events.status and events.status.data['tooloffset'].get('phase') in ('tool','confirm')))
             if task not in plc.replies:
                 state = events.status.data['tooloffset']; engine = batch.blackboard.read('tooloffset_session')['engine']
@@ -115,13 +115,14 @@ def test_normal_real_tree(tmp_path):
                 if task not in plc.replies:
                     send(tmp_path,'confirm_overwrite',{'accept':True})
                     until(lambda: task in plc.replies)
-            code = plc.replies[task][0]
+            code, coords = plc.replies[task]
+            assert coords["pc_tool_id"] == 1
             assert code in (91,95), events.status.data['tooloffset']
             if code == 91: break
-            task += 1; plc.request=(task,90)
+            task += 1; plc.request=(task,90,1)
             until(lambda: task in plc.replies)
             assert plc.replies[task][0] == 90
-            plc.actual = plc.replies[task][1]['camcal_xyz']
+            plc.actual = plc.replies[task][1]['scan_xyz']
         assert list(events.run_directory.glob('tooloffset/*/*_raw.png'))
         result = load_tools(directory / 'tools.yaml')['tools']['tool1']['offset_xyz']
         assert result[:2] == pytest.approx([2.2,-1.3], abs=.01)
@@ -159,10 +160,10 @@ def rig(tmp_path):
             if predicate(): return
             time.sleep(.001)
         raise AssertionError('等待超时')
-    def request(task, code):
-        plc.request = (task,code); until(lambda: task in plc.replies); return plc.replies[task]
+    def request(task, code, tool_id=1):
+        plc.request = (task,code,tool_id); until(lambda: task in plc.replies); return plc.replies[task]
     def begin(task=1):
-        plc.request=(task,90)
+        plc.request=(task,90,1)
         until(lambda: events.status.data['tooloffset'].get('phase') == 'select')
         send(tmp_path,'select_tool_and_start',{'tool':1,'mode':'center'})
         until(lambda: task in plc.replies)
@@ -183,11 +184,11 @@ def test_arrival_failure_and_abort(rig):
     rig.plc.actual = (140.,70.,-5.)
     assert rig.request(2,95)[0] == 999
     rig.plc.actual = (130.,70.,-5.)
-    rig.plc.request = (3,90)
+    rig.plc.request = (3,90,1)
     rig.until(lambda: rig.events.status.data['tooloffset'].get('phase') == 'select')
     send(rig.root,'abort')
     rig.until(lambda: 3 in rig.plc.replies)
-    assert rig.plc.replies[3][0] == 92
+    assert rig.plc.replies[3] == (92, {"pc_tool_id": 1})
 
 
 def test_no_start_and_picking(rig):
@@ -205,8 +206,8 @@ def test_jitter_stable_and_unstable_tool_wait(rig):
     assert rig.request(2,95)[0] == 95
     code, coords = rig.request(3,90)
     assert code == 90
-    rig.plc.actual = coords['camcal_xyz']
-    rig.plc.request=(4,95)
+    rig.plc.actual = coords['scan_xyz']
+    rig.plc.request=(4,95,1)
     rig.until(lambda: rig.events.status.data['tooloffset'].get('phase') == 'tool')
     engine = rig.batch.blackboard.read('tooloffset_session')['engine']
     target = engine.measured[engine.current]
@@ -233,13 +234,13 @@ def test_business_fail_overview(rig, bad):
 
 def test_center_edge_and_refuse_save(rig):
     object.__setattr__(rig.cfg, 'travel', ((-500,500),(-500,500),(-15,0)))
-    rig.plc.request=(1,90)
+    rig.plc.request=(1,90,1)
     rig.until(lambda: rig.events.status.data['tooloffset'].get('phase') == 'select')
     send(rig.root,'select_tool_and_start',{'tool':1,'mode':'center_edge'})
     rig.until(lambda: 1 in rig.plc.replies)
     task, presses, edge_photos = 1, 0, 0
     while True:
-        task += 1; rig.plc.request=(task,95)
+        task += 1; rig.plc.request=(task,95,1)
         rig.until(lambda: task in rig.plc.replies or rig.events.status.data['tooloffset'].get('phase') in ('tool','confirm'))
         if task not in rig.plc.replies:
             state = rig.events.status.data['tooloffset']; engine = rig.batch.blackboard.read('tooloffset_session')['engine']
@@ -262,12 +263,12 @@ def test_center_edge_and_refuse_save(rig):
         task += 1
         code, coords = rig.request(task,90)
         assert code == 90
-        rig.plc.actual = coords['camcal_xyz']
+        rig.plc.actual = coords['scan_xyz']
     assert presses == 5 and edge_photos == 4
 
 
 def test_ignored_command_acknowledged_and_no_reply(rig):
-    rig.plc.request = (1,90)
+    rig.plc.request = (1,90,1)
     rig.until(lambda: rig.events.status.data['tooloffset'].get('phase') == 'select')
     seq = send(rig.root, 'tool_in_place')
     rig.until(lambda: rig.events.status.data['command_seq'] == seq)
@@ -288,3 +289,14 @@ def test_missing_camera_calibration_and_abort_between_requests(rig):
     send(rig.root, 'abort')
     rig.until(lambda: rig.batch.blackboard.read('tooloffset_session',None) is None)
     assert 4 not in rig.plc.replies
+
+
+@pytest.mark.parametrize("code", [100, 110])
+def test_new_offset_flow_placeholder(rig, code):
+    assert rig.request(1, code, 1) == (999, {"pc_tool_id": 1})
+    assert "未收到 90 却收到工具偏移标定请求" in rig.events.status.data["tooltip"]["message"]
+    assert rig.begin(2) == (90, {"scan_xyz": (130., 70., -5.), "pc_tool_id": 1})
+    assert rig.request(3, code, 1) == (131, {"pc_tool_id": 1})
+    assert rig.events.status.data["tooloffset"]["message"] == "工具偏移标定新流程尚未实现"
+    assert rig.request(4, 95, 2) == (999, {"pc_tool_id": 2})
+    assert "40905 从 1 变为 2" in rig.events.status.data["tooloffset"]["message"]

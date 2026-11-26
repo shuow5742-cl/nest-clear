@@ -140,7 +140,7 @@ class ToolOffset(TreeNode):
                     return self.fail('工具偏移会话中收到错序 90', False)
                 s['phase'] = 'wait95'
                 self.publish('moving', '边缘验证中，不需要移动工具' if s['engine'].phase == 'edge' else '相机移动中')
-                return self.set_reply(90, {'camcal_xyz': tuple(s['engine'].target_pose)})
+                return self.set_reply(90, {'scan_xyz': tuple(s['engine'].target_pose)})
             if func != 95 or s['phase'] != 'wait95':
                 return self.fail('工具偏移会话收到错序功能码', False)
             self.stage = 'settle_arrival'
@@ -242,7 +242,7 @@ class ToolOffset(TreeNode):
                     prior = None
                 s.update(tool=tool, mode=mode, engine=Session(ctx.calibration, s['start'], s['travel'], ctx.config.tool_offset, mode, tool, board_thickness_mm=ctx.config.camera_calibration['board_thickness_mm'], prior_offset=prior), phase='wait95')
                 self.publish('moving', '相机移动至起始位置')
-                return self.set_reply(90, {'camcal_xyz':s['start']})
+                return self.set_reply(90, {'scan_xyz':s['start']})
             if self.stage.startswith('settle_'):
                 actual = self.settle()
                 if actual is None: return Status.RUNNING

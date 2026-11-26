@@ -145,7 +145,7 @@ def test_preview_does_not_reopen_calibration_worker_device(tmp_path, pending):
         assert any('应答后重试' in data.get('message', '') for _, data in rows)
 
 
-@pytest.mark.parametrize('func,mode,closes', [(110, Mode.CALIBRATING_1, True), (1, Mode.IDLE, False)])
+@pytest.mark.parametrize('func,mode,closes', [(100, Mode.CALIBRATING_1, True), (1, Mode.IDLE, False)])
 def test_request_closes_only_used_cameras_and_still_replies(tmp_path, func, mode, closes):
     events = EventRecorder(tmp_path, 'main')
     prep = PreparationStub()
@@ -171,7 +171,7 @@ def test_request_closes_only_used_cameras_and_still_replies(tmp_path, func, mode
                         branches={func: (frozenset({mode}), lambda ctx: Reply())})
     handle = clock.submit(batch)
     batch.blackboard.write('mode', mode, '测试')
-    plc.request = (1, func)
+    plc.request = (1, func, 2 if func == 100 else None)
     try:
         deadline = time.monotonic() + 5
         while 1 not in plc.replies and time.monotonic() < deadline:

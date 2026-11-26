@@ -136,7 +136,7 @@ def test_request_one_closes_preview_and_restores_settings_before_reply(rig, monk
     board = WorldBoard(); clock = BTClock(board); plc = MemoryPLC(); clock.attach_worker(plc)
     batch = build_batch(board, rig.cfg, [], RequestTracker(0), rig.events,
                         branches={1: (frozenset({Mode.IDLE}), lambda ctx: Reply())})
-    handle = clock.submit(batch); plc.request = (1, 1)
+    handle = clock.submit(batch); plc.request = (1, 1, None)
     try:
         deadline = time.monotonic() + 8
         while 1 not in plc.replies and time.monotonic() < deadline:

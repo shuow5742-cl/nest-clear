@@ -67,7 +67,7 @@ def test_pause_during_final_worker_still_replies(rig, monkeypatch):
     assert rig.request(1, 80)[0] == 80
     reply_row(rig, 1)
     rig.plc.actual = (1., 0., 0.)
-    rig.plc.request = (2, 80)
+    rig.plc.request = (2, 80, None)
     app = Application.__new__(Application)
     app.clock, app.events = rig.clock, rig.events
     app.handle = type('Handle', (), {'result': None})()

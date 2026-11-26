@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 class MainStatus:
     def __init__(self, root):
         self.path = main_status_file(root); self.lock = threading.Lock(); self.last = 0; self.timer = None
-        self.data = {'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'recent_replies':[], 'picking':{}, 'camcal':{}, 'tooltip':{}, 'tooloffset':{}, 'pickacc':{}, 'baseline':{}, 'command_seq':0}
+        self.data = {'pid':os.getpid(), 'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'recent_replies':[], 'picking':{}, 'camcal':{}, 'tooltip':{}, 'tooloffset':{}, 'pickacc':{}, 'baseline':{}, 'command_seq':0}
         self.write()
     def write(self):
         try:
@@ -28,7 +28,7 @@ class MainStatus:
             if e == 'film_mode_tray': d['film_mode'] = bool(row.get('enabled'))
             if e == 'mode_change': d['mode'] = row.get('mode','空闲')
             if e == 'request':
-                d.update(task_id=row.get('task_id'), request_func=row.get('func'))
+                d.update(task_id=row.get('task_id'), request_func=row.get('func'), plc_tool_id=row.get('plc_tool_id'))
                 if row.get('func') == 80 and d['camcal'].get('event') not in ('camcal_start', 'camcal_goto_start', 'camcal_step', 'camcal_glare_warning'):
                     d['camcal'] = {'event': 'camcal_starting'}
             if e == 'reply':
@@ -60,7 +60,7 @@ class MainStatus:
                 d['tooltip'].update(row)
                 if e in ('tooltip_detect','tooltip_offset','tooltip_reliability'): d['tooltip'].setdefault('history', []).append(dict(row))
             now = time.monotonic()
-            if now - self.last >= .2:
+            if now - self.last >= .2 or (e == 'request' and row.get('plc_tool_id') is not None):
                 self.write(); self.last = now
             elif self.timer is None:
                 self.timer = threading.Timer(.2 - (now - self.last), self.flush)

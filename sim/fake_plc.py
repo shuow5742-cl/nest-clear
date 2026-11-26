@@ -10,6 +10,7 @@ from pymodbus.server import ModbusTcpServer
 
 from nest_clear.comm import PLCClient, load_contract
 from nest_clear.comm.codec import encode_real32, encode_u16
+from nest_clear.comm.function_codes import uses_tool_id
 
 
 class FakePLC:
@@ -129,8 +130,10 @@ class FakePLC:
         words = [word for value in xyz for word in encode_real32(value)]
         self._set_registers(self.contract[f"calibration{tool}_feedback_x"].address, words)
 
-    def request(self, func: int) -> int:
-        """先写功能码再递增任务编号，让编号变化成为请求信号。"""
+    def request(self, func: int, tool_id: int | None = None) -> int:
+        """先写工具 ID 和功能码再递增任务编号，让编号变化成为请求信号。"""
+        if tool_id is not None:
+            self._set_registers(self.contract["plc_tool_id"].address, [encode_u16(tool_id)])
         self.task_id = self.task_id % self.wrap + 1
         self._set_registers(self.contract["request_func"].address, [encode_u16(func)])
         self._set_registers(self.contract["task_id"].address, [encode_u16(self.task_id)])
@@ -142,7 +145,9 @@ class FakePLC:
         while time.monotonic() < deadline:
             if self.io.read("result_id") == task_id:
                 result: dict[str, Any] = {"task_id": task_id, "func_code": self.io.read("reply_func")}
-                for name in ("scan", "pick1", "pick2", "calibration1", "calibration2", "camcal"):
+                if uses_tool_id(self.io.read("request_func")):
+                    result["pc_tool_id"] = self.io.read("pc_tool_id")
+                for name in ("scan", "pick1", "pick2", "calibration1", "calibration2"):
                     result[name + "_xyz"] = self.io.read_real32_block(self.contract[name + "_x"].address, 3)
                 return result
             time.sleep(0.01)
@@ -157,26 +162,25 @@ class FakePLC:
         if tool not in (1, 2) or len(position_error) != 3:
             raise ValueError("工具号或定位误差无效")
         self.set_actual_xyz(actual_xyz)
-        request_func = 100 if tool == 1 else 101
+        request_func = 100 if tool == 1 else 110
         records = []
         final_xyz = actual_xyz
         while True:
-            task_id = self.request(request_func)
+            task_id = self.request(request_func, tool_id=2)
             reply = self.wait_reply(task_id, timeout_s)
             records.append({"request_func": request_func, **reply})
             if reply["func_code"] in (111, 121) and finish:
                 self.set_calibration_final(tool, [a + b for a, b in zip(final_xyz, final_error)])
-                task_id = self.request(130)
+                task_id = self.request(130, tool_id=2)
                 records.append({"request_func": 130, **self.wait_reply(task_id, timeout_s)})
                 return records
             if reply["func_code"] in (111, 121, 131, 999):
                 return records
-            if reply["func_code"] not in ((100, 110) if tool == 1 else (101, 120)):
+            if reply["func_code"] != request_func:
                 raise ValueError(f"对刀收到未处理的功能码 {reply['func_code']}")
             xyz = reply[f"calibration{tool}_xyz"]
             final_xyz = xyz
             self.set_actual_xyz([a + b for a, b in zip(xyz, position_error)])
-            request_func = 110 if tool == 1 else 120
 
     def start_camera_calibration(self, actual_xyz: Sequence[float], timeout_s: float = 3,
                                  position_error: Sequence[float] = (0, 0, 0), *,
@@ -196,7 +200,7 @@ class FakePLC:
                 return records
             if reply["func_code"] != 80:
                 raise ValueError(f"相机标定收到未处理的功能码 {reply['func_code']}")
-            target = reply["camcal_xyz"]
+            target = reply["scan_xyz"]
             error = position_error if error_step is None or len(records) == error_step else (0, 0, 0)
             physical = [a + b for a, b in zip(target, error)]
             physical[0] = actual_xyz[0] + (target[0] - actual_xyz[0]) * (1 + x_scale_error) + error[0]

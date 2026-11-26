@@ -654,7 +654,7 @@ class App:
         header = self.card(self.offset, '工具偏移标定', 0, 0, columnspan=2)
         header.columnconfigure(0, weight=1)
         heading = tk.Frame(header, bg=WHITE); heading.grid(row=0, column=0, sticky='ew')
-        self.offset_heading = tk.Label(heading, text='当前：未选择', bg='#667085', fg=WHITE, font=(self.theme.title[0], 28, 'bold'), anchor='center', padx=18)
+        self.offset_heading = tk.Label(heading, text='当前：等待 PLC 指定', bg='#667085', fg=WHITE, font=(self.theme.title[0], 28, 'bold'), anchor='center', padx=18)
         self.offset_heading.grid(row=0, column=0, sticky='w', padx=(0,15))
         self.offset_mode_text = tk.Label(heading, text='模式：仅中心', bg=WHITE, fg=INK, font=self.theme.title)
         self.offset_mode_text.grid(row=0, column=1, sticky='w')
@@ -1299,20 +1299,19 @@ class App:
             top.geometry(f'+{x}+{y}')
 
     def build_pickacc(self):
-        self.pickacc_tool = None; self.pickacc_pending = 0; self.pickacc_dialog = None; self.pickacc_last_phase = None
+        self.pickacc_pending = 0; self.pickacc_dialog = None
         self.pickacc.columnconfigure(0, weight=1); self.pickacc.columnconfigure(1, weight=1)
         self.pickacc.rowconfigure(1, weight=3, uniform='pickacc'); self.pickacc.rowconfigure(2, weight=2, uniform='pickacc')
         head = self.card(self.pickacc, '挑取精度标定', 0, 0, columnspan=2)
         bar = tk.Frame(head, bg=WHITE); bar.grid(row=0, column=0, sticky='ew'); bar.columnconfigure(2, weight=1)
-        self.pickacc_heading = tk.Label(bar, text='当前：未选择', bg='#667085', fg=WHITE, font=(self.theme.title[0],20,'bold'), padx=12)
+        self.pickacc_heading = tk.Label(bar, text='当前：等待 PLC 指定', bg='#667085', fg=WHITE, font=(self.theme.title[0],20,'bold'), padx=12)
         self.pickacc_heading.grid(row=0,column=0,padx=4)
         self.pickacc_message = tk.Label(bar, text='等待 PLC 请求', bg=WHITE, fg=INK, font=(self.theme.title[0],16), anchor='w')
-        self.pickacc_message.grid(row=0,column=1,columnspan=2,sticky='ew',padx=8)
+        self.pickacc_plc_id = tk.Label(bar, text='40905=—', bg=WHITE, fg=INK, font=self.theme.body)
+        self.pickacc_plc_id.grid(row=0, column=1, padx=8)
+        self.pickacc_message.grid(row=0,column=2,sticky='ew',padx=8)
         controls=tk.Frame(head,bg=WHITE); controls.grid(row=1,column=0,sticky='ew'); controls.columnconfigure(4,weight=1)
-        self.pickacc_buttons=[]
-        for n in (1,2):
-            b=ttk.Button(controls,text=f'工具{n}',command=lambda n=n:self.choose_pickacc_tool(n)); b.grid(row=0,column=n-1,padx=3); self.pickacc_buttons.append(b)
-        self.pickacc_start=ttk.Button(controls,text='开始',command=lambda:self.pickacc_command('pickacc_start',{'tool':self.pickacc_tool})); self.pickacc_start.grid(row=0,column=2,padx=4)
+        self.pickacc_start=ttk.Button(controls,text='开始',command=lambda:self.pickacc_command('pickacc_start')); self.pickacc_start.grid(row=0,column=0,padx=4)
         self.pickacc_calculate=ttk.Button(controls,text='计算补偿',style='OffsetPlace.TButton',command=lambda:self.pickacc_command('pickacc_calculate')); self.pickacc_calculate.grid(row=0,column=5,padx=4)
         self.pickacc_discard=ttk.Button(controls,text='本点作废重测',command=lambda:self.pickacc_command('pickacc_discard')); self.pickacc_discard.grid(row=0,column=6,padx=4)
         self.pickacc_abort=ttk.Button(controls,text='放弃本次标定',command=lambda:self.pickacc_command('abort')); self.pickacc_abort.grid(row=0,column=7,padx=4)
@@ -1329,22 +1328,17 @@ class App:
         scroll=ttk.Scrollbar(table,orient='vertical',command=self.pickacc_table.yview); scroll.grid(row=0,column=1,sticky='ns'); self.pickacc_table.configure(yscrollcommand=scroll.set,style='Offset.Treeview')
         self.pickacc_stats=tk.Label(table,text='',bg=WHITE,fg=INK,font=self.theme.body,anchor='w'); self.pickacc_stats.grid(row=1,column=0,sticky='ew')
 
-    def choose_pickacc_tool(self, tool):
-        self.pickacc_tool=tool
-
     def pickacc_command(self, name, params=None):
         self._send_page_command('pickacc', name, params)
 
     def update_pickacc(self,main):
         data=main.get('pickacc') or {}; phase=data.get('phase'); self.pickacc_ack=main.get('command_seq',0)
-        if phase=='select' and self.pickacc_last_phase!='select': self.pickacc_tool=None
-        self.pickacc_last_phase=phase
         self._check_page_command('pickacc', self.pickacc_ack)
-        tool=data.get('tool') or self.pickacc_tool
-        self.pickacc_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择',bg='#2563eb' if tool==1 else '#d56713' if tool==2 else '#667085')
+        tool=data.get('tool')
+        self.pickacc_plc_id.config(text=f"40905={data.get('plc_tool_id', '—')}")
+        self.pickacc_heading.config(text=f'当前：工具{tool}（PLC 指定）' if tool in (1, 2) else '当前：等待 PLC 指定',bg='#2563eb' if tool==1 else '#d56713' if tool==2 else '#667085')
         self.pickacc_message.config(text=getattr(self, 'pickacc_command_message', '') or ('上一条命令处理中' if self.pickacc_pending else data.get('message')) or '等待 PLC 请求', fg=COLORS['red'] if getattr(self, 'pickacc_command_message', '') else INK)
-        for i,b in enumerate(self.pickacc_buttons,1): b.config(state='normal' if phase=='select' and not self.pickacc_pending else 'disabled',style='OffsetSelected.TButton' if i==tool else 'TButton')
-        self.pickacc_start.config(state='normal' if phase=='select' and self.pickacc_tool and not self.pickacc_pending else 'disabled')
+        self.pickacc_start.config(state='normal' if phase=='select' and tool in (1, 2) and not self.pickacc_pending else 'disabled')
         for b in (self.pickacc_calculate,self.pickacc_discard): b.config(state='normal' if phase=='tool_in_place' and not self.pickacc_pending else 'disabled')
         self.pickacc_abort.config(state='normal' if phase not in (None,'idle','done','failed') and not self.pickacc_pending else 'disabled')
         summaries=[]
@@ -1542,10 +1536,12 @@ class App:
         self.tip.columnconfigure(0, weight=1, uniform='tipcols'); self.tip.columnconfigure(1, weight=1, uniform='tipcols')
         self.tip.rowconfigure(1, weight=6); self.tip.rowconfigure(2, weight=3)
         head = tk.Frame(self.tip, bg=WHITE); head.grid(row=0, column=0, columnspan=2, sticky='ew')
-        self.tip_heading = tk.Label(head, text='等待 PLC 100/101', bg=COLORS['gray'], fg=WHITE, font=self.theme.large, padx=12)
+        self.tip_heading = tk.Label(head, text='等待 PLC 100/110', bg=COLORS['gray'], fg=WHITE, font=self.theme.large, padx=12)
         self.tip_heading.grid(row=0, column=0, padx=4, pady=4)
-        self.tip_message = tk.Label(head, text='等待 PLC 100/101', bg=WHITE, fg=INK, font=self.theme.large, wraplength=850, justify='left')
-        self.tip_message.grid(row=0, column=1, columnspan=4, padx=8, sticky='w')
+        self.tip_message = tk.Label(head, text='等待 PLC 100/110', bg=WHITE, fg=INK, font=self.theme.large, wraplength=850, justify='left')
+        self.tip_plc_id = tk.Label(head, text='40905=—', bg=WHITE, fg=INK, font=self.theme.body)
+        self.tip_plc_id.grid(row=0, column=1, padx=8)
+        self.tip_message.grid(row=0, column=2, columnspan=3, padx=8, sticky='w')
         self.tip_buttons = {}
         for column, (text, name) in enumerate((('确认移动','tooltip_confirm_move'), ('确认对刀结果','tooltip_confirm_result'), ('识别不准，手动点击','tooltip_click'), ('放弃对刀','tooltip_abort'))):
             button = ttk.Button(head, text=text, style='OffsetPlace.TButton' if name in ('tooltip_confirm_move','tooltip_confirm_result') else 'TButton', command=lambda n=name:self.tip_command(n))
@@ -2110,9 +2106,10 @@ class App:
         for row in data.get('rounds', []):
             self.tiptable.insert('', 'end', values=(row.get('iteration') or '—', row.get('stage') or '—', tooltip_pixels(row.get('pixels')), tooltip_deviation(row.get('deviation_mm'), compact=True), tooltip_vector(row.get('delta'), signed=True, compact=True), tooltip_vector(row.get('target'), compact=True), '是' if row.get('click') else '否', tooltip_time(row.get('confirmed_at'))))
         phase = data.get('phase', 'idle'); tool = data.get('tool')
-        self.tip_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else COLORS['gray'])
+        self.tip_plc_id.config(text=f"40905={data.get('plc_tool_id', '—')}")
+        self.tip_heading.config(text=f'当前：工具{tool}（PLC 功能码指定）' if tool else '当前：等待 PLC 指定', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else COLORS['gray'])
         warning = data.get('camera_settings_warning')
-        self.tip_message.config(text=getattr(self, 'tip_command_message', '') or ('上一条命令处理中' if self.tip_pending else warning or data.get('message')) or '等待 PLC 100/101', fg=COLORS['red'] if getattr(self, 'tip_command_message', '') else COLORS['yellow'] if warning else COLORS['red'] if phase in ('limit','fail') else COLORS['green'] if phase == 'done' else INK)
+        self.tip_message.config(text=getattr(self, 'tip_command_message', '') or ('上一条命令处理中' if self.tip_pending else warning or data.get('message')) or '等待 PLC 100/110', fg=COLORS['red'] if getattr(self, 'tip_command_message', '') else COLORS['yellow'] if warning else COLORS['red'] if phase in ('limit','fail') else COLORS['green'] if phase == 'done' else INK)
         for name, button in self.tip_buttons.items():
             enabled = (name == 'tooltip_confirm_move' and phase in ('probe','confirm_move') or name == 'tooltip_confirm_result' and phase == 'in_range' or name in ('tooltip_click','tooltip_abort') and phase in ('probe','confirm_move','in_range','limit','click_failed'))
             button.config(state='normal' if enabled and not self.tip_pending else 'disabled')

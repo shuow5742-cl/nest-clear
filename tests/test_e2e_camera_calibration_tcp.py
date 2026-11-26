@@ -63,10 +63,11 @@ def test_camcal_tcp(tmp_path):
         try:
             replies = plc.start_camera_calibration((0., 0., 0.), timeout_s=5)
             assert [r['func_code'] for r in replies] == [80, 80, 81]
-            assert replies[0]['camcal_xyz'] == [2., 0., 0.]
-            assert replies[1]['camcal_xyz'] == [1., 0., 0.]
+            assert replies[0]['scan_xyz'] == [2., 0., 0.]
+            assert replies[1]['scan_xyz'] == [1., 0., 0.]
             assert path.exists() and updated == ['new']
-            assert 40972 in [address for address, _ in plc.writes]
+            assert 40942 in [address for address, _ in plc.writes]
+            assert not any(40972 <= address <= 40977 or address == 40935 for address, _ in plc.writes)
         finally:
             stop.set()
             thread.join(3)

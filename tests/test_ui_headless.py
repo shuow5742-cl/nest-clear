@@ -231,8 +231,14 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert all(b.options['state'] == 'disabled' for b in ui.offset_tool_buttons + ui.offset_mode_buttons)
         assert ui.offset_edges.rows['0']['values'][1] == '左下'
         ui.update_pickacc({'pickacc':{'phase':'select'},'command_seq':0})
-        ui.choose_pickacc_tool(2)
-        ui.update_pickacc({'pickacc':{'phase':'select'},'command_seq':0})
+        assert ui.pickacc_start.options['state'] == 'disabled'
+        assert not hasattr(ui, 'pickacc_buttons')
+        ui.update_pickacc({'pickacc':{'phase':'select','tool':2,'plc_tool_id':2},'command_seq':0})
+        assert ui.pickacc_heading.options['text'] == '当前：工具2（PLC 指定）'
+        assert ui.pickacc_plc_id.options['text'] == '40905=2'
+        ui.update_tip({'phase':'confirm_move','tool':1,'plc_tool_id':2})
+        assert ui.tip_heading.options['text'] == '当前：工具1（PLC 功能码指定）'
+        assert ui.tip_plc_id.options['text'] == '40905=2'
         assert ui.pickacc_start.options['state'] == 'normal'
         ui.update_pickacc({'pickacc':{'phase':'tool_in_place','tool':2,'target':'T12','predicted':{'T12':[100,50]},'samples':[{'target':'T12','target_xy_mm':[100,50],'residual_xy_mm':[.02,.01]}]},'command_seq':0})
         assert ui.pickacc_calculate.options['state'] == 'normal'

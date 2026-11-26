@@ -45,14 +45,14 @@ def test_readback_mismatch_commits_error():
     assert io.words[contract['reply_func'].address] == 999
     assert io.words[contract['result_id'].address] == 4
 
-def test_pick_tool_readback_mismatch_clears_scalar():
+def test_pc_tool_id_readback_mismatch_preserves_echo():
     contract = load_contract('config/plc_contract.yaml')
     class BadToolRead(Registers):
         def read_u16(self, address):
-            return super().read_u16(address) + (address == contract['pick_tool'].address)
+            return super().read_u16(address) + (address == contract['pc_tool_id'].address)
     io = BadToolRead()
-    Handshake(io, contract).write_reply(4, 155, {'pick_tool': 2})
-    assert io.words[contract['pick_tool'].address] == 0
+    Handshake(io, contract).write_reply(4, 155, {'pc_tool_id': 2})
+    assert io.words[contract['pc_tool_id'].address] == 2
     assert io.words[contract['reply_func'].address] == 999
     assert io.words[contract['result_id'].address] == 4
 
@@ -62,7 +62,7 @@ def test_task_double_read_retries():
     class IO:
         values = iter([1, 20, 2, 2, 60, 2])
         def read_u16(self, address): return next(self.values)
-    assert Handshake(IO(), contract).read_request() == (2, 60)
+    assert Handshake(IO(), contract).read_request() == (2, 60, None)
 
 def test_exposure_readback_mismatch():
     class BadCamera(Camera):

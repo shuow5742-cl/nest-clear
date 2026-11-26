@@ -23,7 +23,7 @@ class PLC(AsyncRequestWorker):
     name = 'plc'
     def __init__(self):
         super().__init__()
-        self.request = (0, 0)
+        self.request = (0, 0, None)
         self.actual = (0., 0., 0.)
         self.replies = {}
     def execute(self, payload):
@@ -81,7 +81,7 @@ def rig(tmp_path, request):
                         calibration_updated=updated.append)
     handle = clock.submit(batch)
     def request(task, func):
-        plc.request = (task, func)
+        plc.request = (task, func, 2 if func in (100, 110) else None)
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             clock.tick_once()
@@ -100,7 +100,7 @@ def rows(rig):
 
 
 def test_complete(rig):
-    assert rig.request(1, 80) == (80, {'camcal_xyz': (1., 0., 0.)})
+    assert rig.request(1, 80) == (80, {'scan_xyz': (1., 0., 0.)})
     rig.plc.actual = (1., 0., 0.)
     assert rig.request(2, 80)[0] == 81
     assert rig.path.exists() and rig.updated == ['new-calibration']
@@ -334,7 +334,7 @@ def test_rendered_real_session(tmp_path):
                                      calibration=calibration, calibration_path=path))
     try:
         for task in range(1, 55):
-            plc.request = (task, 80)
+            plc.request = (task, 80, None)
             deadline = time.monotonic() + 120
             while task not in plc.replies and time.monotonic() < deadline:
                 clock.tick_once()
@@ -344,7 +344,7 @@ def test_rendered_real_session(tmp_path):
             code, coords = plc.replies[task]
             if code == 81: break
             assert code == 80, (code, rows(SimpleNamespace(events=events))[-10:])
-            plc.actual = coords['camcal_xyz']
+            plc.actual = coords['scan_xyz']
         assert code == 81 and task == 53
         assert len(list(events.run_directory.glob('camcal/*/*_raw.png'))) == 53
         assert list(events.run_directory.glob('camcal/*/session_record.json'))
@@ -368,7 +368,7 @@ def test_start_unset(rig):
 def test_goto_start_then_capture(rig):
     rig.cfg.camera_calibration['start_xyz'] = [92.651, 88.445, -11.904]
     rig.plc.actual = (-19.59, 88.445, -11.904)
-    assert rig.request(1, 80) == (80, {'camcal_xyz': (92.651, 88.445, -11.904)})
+    assert rig.request(1, 80) == (80, {'scan_xyz': (92.651, 88.445, -11.904)})
     assert not [r for r in rows(rig) if r['event'] == 'capture']
     event = next(r for r in rows(rig) if r['event'] == 'camcal_goto_start')
     assert event['actual'][0] == -19.59 and event['target'] == [92.651, 88.445, -11.904]
@@ -394,10 +394,10 @@ def test_goto_start_outside_actual_travel(rig):
     rig.cfg.camera_calibration['start_xyz'] = [92.651, 88.445, -11.904]
     rig.plc.actual = (-19.59, 88.445, -11.904)
     target = (92.651, 88.445, -11.904)
-    assert rig.request(1, 80) == (80, {'camcal_xyz': target})
+    assert rig.request(1, 80) == (80, {'scan_xyz': target})
     assert rig.request(2, 80)[0] == 999
     assert rig.batch.blackboard.read('mode') == Mode.IDLE
-    assert rig.request(3, 80) == (80, {'camcal_xyz': target})
+    assert rig.request(3, 80) == (80, {'scan_xyz': target})
     rig.plc.actual = target
     FakeSession.target = target
     assert rig.request(4, 80)[0] == 80

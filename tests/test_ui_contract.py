@@ -225,7 +225,7 @@ def test_ui_system_python_imports():
     if not python.exists(): pytest.skip('/usr/bin/python3 不存在')
     env = os.environ.copy()
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1] / 'src')
-    result = subprocess.run([str(python), '-c', "import nest_clear.ui.app, nest_clear.ui.model, nest_clear.ui.demo, nest_clear.ui.status; import sys; assert not any(m in sys.modules for m in ('numpy','cv2','autoweaver'))"], env=env, capture_output=True, text=True)
+    result = subprocess.run([str(python), '-c', "import sys; sys.modules.update(dict.fromkeys(('cv2','numpy','yaml'))); import nest_clear.ui.app, nest_clear.ui.model, nest_clear.ui.demo, nest_clear.ui.status; assert 'autoweaver' not in sys.modules"], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 def test_supervisor_ui_python_and_source_path(tmp_path, monkeypatch):
