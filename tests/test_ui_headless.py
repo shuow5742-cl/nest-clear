@@ -34,6 +34,7 @@ class Widget:
     def tkraise(self): pass
     def grid_configure(self, **kwargs): self.options.update(kwargs)
     def grid_propagate(self, *args): pass
+    def place(self, **kwargs): self.options.update(kwargs)
     def bind(self, event, callback, *args, **kwargs): self.bindings[event] = callback
     def option_add(self, *args): pass
     def title(self, *args): pass
@@ -44,6 +45,7 @@ class Widget:
     def after(self, *args): pass
     def configure(self, **kwargs): self.options.update(kwargs)
     config = configure
+    def cget(self, key): return self.options[key]
     def update_idletasks(self): pass
     def destroy(self): self.destroyed = True
     def add(self, item, **kwargs): self.children.append(item)
@@ -107,11 +109,11 @@ def test_demo_images_use_camera_aspect_ratio(tmp_path):
 
 
 def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
-    from nest_clear.ui import app
-    write_demo(tmp_path, initial=True)
     import sys
     for module in ('cv2', 'numpy', 'yaml'):
         monkeypatch.setitem(sys.modules, module, None)
+    from nest_clear.ui import app
+    write_demo(tmp_path, initial=True)
     for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
         monkeypatch.setattr(app.tk, name, Widget)
     for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox', 'Spinbox'):
@@ -122,7 +124,9 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         def __init__(self, parent, title, theme):
             super().__init__(parent); self.body = Widget(self); self.title_label = Widget(self)
     class FakePicture(Widget):
-        def __init__(self, parent, path, theme): super().__init__(parent)
+        def __init__(self, parent, path, theme):
+            super().__init__(parent)
+            self.image = None
         def poll(self): pass
     class FakeKeyValueGrid(Widget):
         def __init__(self, parent, keys, theme): super().__init__(parent); self.values_data = {}
@@ -246,7 +250,7 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         ui.update_baseline({'baseline':{'phase':'success','tool':1,'candidate':{'p0':[1,2,3], 'pixels':{'front':[1,2], 'side':[3,4]}}},'command_seq':0})
         assert ui.baseline_save.options['state'] == 'normal'
         assert ui.baseline_tools[0].options['state'] == 'disabled'
-        assert ui.baseline_tools[0].options['style'] == 'OffsetSelected.TButton'
+        assert ui.baseline_tools[0].options['style'] == 'Selected.Baseline.TButton'
         ui.update_baseline({'mode':'对刀基准建立中', 'command_seq':0, 'baseline':{
             'phase':'prepare', 'preview':{'front':{'on':True,'device':'/dev/v4l/by-path/pci-usb-0:4:1.0-video-index0','percent':98,'tenengrad':1.0,'peak':1.1,'source':'tip'},
                                            'side':{'on':True,'error':'USB 带宽不足'}},
@@ -257,8 +261,19 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert ui.baseline_views['side']['toggle'].options['text'] == '辅助对刀相机（侧面）预览：开'
         assert '集线器' in ui.baseline_views['side']['hint'].options['text']
         assert '对比度 —' in ui.baseline_views['side']['detail'].options['text']
-        assert ui.baseline_views['side']['path'].parent.row_options[0]['weight'] == 0
-        assert ui.baseline_views['side']['path'].parent.row_options[2]['weight'] == 1
+        for view in ui.baseline_views.values():
+            picture = view['picture']
+            viewport = picture.master
+            viewport.winfo_width = lambda: 940
+            viewport.winfo_height = lambda: 560
+            picture.image = SimpleNamespace(size=(1920, 1080))
+            for _ in range(5):
+                viewport.bindings['<Configure>'](None)
+                assert (picture.options['width'], picture.options['height']) == (940, 529)
+            viewport.winfo_width = lambda: 670
+            viewport.winfo_height = lambda: 350
+            viewport.bindings['<Configure>'](None)
+            assert (picture.options['width'], picture.options['height']) == (622, 350)
         # Eligibility controls every action independently of whether preview is on.
         from nest_clear.paths import supervisor_state_file
         import json
@@ -327,8 +342,20 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         low_main['baseline']['preview']['front']['exposure_scan_rows'] = [dict(exposure=3, recognized=True, prongs=2, prong_ref=2, contrast=70., sharpness_percent=100., background=230., saturated_fraction=.1, tool_whiteness=.01, qualified=True, selected=True, reasons=[])]
         ui.update_baseline(low_main)
         assert '第2/4档' in view['scan_status'].options['text']
-        assert '0.3' in view['scan_table'].options['text'] and '★' in view['scan_table'].options['text']
-        assert '齿数（参考 2）' in view['scan_table'].options['text']
+        assert '选 0.3 ms ★' in view['scan_status'].options['text']
+        ui.show_baseline_scan('front')
+        popup = ui.baseline_scan_dialogs['front']
+        assert '0.3' in popup['table'].cget('text') and '★' in popup['table'].cget('text')
+        assert '齿数（参考 2）' in popup['table'].cget('text')
+        low_main['baseline']['preview']['front']['exposure_progress'] = '正在测曝光 第3/4档'
+        ui.update_baseline(low_main)
+        assert '第3/4档' in popup['status'].cget('text')
+        front = low_main['baseline']['preview']['front']
+        front.pop('exposure_progress')
+        front['exposure_scan_rows'][0].update(qualified=False, selected=False, reasons=['清晰度不足'])
+        ui.update_baseline(low_main)
+        assert '无合格档：清晰度不足' in view['scan_status'].cget('text')
+        assert '清晰度不足' in popup['table'].cget('text')
         assert '3.0 ms' in view['exposure_saved'].options['text']
         assert view['exposure_save'].options['state'] == 'normal'
         with monkeypatch.context() as scoped:

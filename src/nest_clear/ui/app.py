@@ -40,6 +40,46 @@ def modal_window(top, parent):
     top.focus_force()
 
 
+def bind_text_tooltip(widget, source):
+    """Expose the full status text when its row has limited space."""
+    timer = tip = None
+
+    def show():
+        nonlocal timer, tip
+        timer = None
+        text = source.cget('text')
+        if not text:
+            return
+        tip = tk.Toplevel(widget)
+        tip.overrideredirect(True)
+        tk.Label(tip, text=text, bg=WHITE, fg=INK, font=source.cget('font'),
+                 relief='solid', borderwidth=1, padx=6, pady=4, wraplength=480,
+                 justify='left').pack()
+        tip.update_idletasks()
+        x = min(widget.winfo_rootx(), widget.winfo_screenwidth() - tip.winfo_reqwidth())
+        y = widget.winfo_rooty() + widget.winfo_height() + 3
+        if y + tip.winfo_reqheight() > widget.winfo_screenheight():
+            y = widget.winfo_rooty() - tip.winfo_reqheight() - 3
+        tip.geometry(f'+{max(0, x)}+{max(0, y)}')
+
+    def enter(_event):
+        nonlocal timer
+        timer = widget.after(450, show)
+
+    def leave(_event):
+        nonlocal timer, tip
+        if timer is not None:
+            widget.after_cancel(timer)
+            timer = None
+        if tip is not None:
+            tip.destroy()
+            tip = None
+
+    widget.bind('<Enter>', enter)
+    widget.bind('<Leave>', leave)
+    widget.bind('<Destroy>', leave)
+
+
 def select_font():
     """从 fontconfig 的实际字体族和字重中选择，避免合成粗体。"""
     try:
@@ -671,93 +711,234 @@ class App:
         scrollbar.grid(row=0, column=1, sticky='ns'); self.offset_edges.configure(yscrollcommand=scrollbar.set)
 
     def build_baseline(self):
-        self.baseline_pending = 0; self.baseline_dialog = None
-        self.baseline.columnconfigure(0, weight=1, uniform='baseline'); self.baseline.columnconfigure(1, weight=1, uniform='baseline')
+        self.baseline_pending = 0
+        self.baseline_dialog = None
+        self.baseline_scan_dialogs = {}
+        small = (self.theme.body[0], 10)
+        style = ttk.Style(self.root)
+        style.configure('Baseline.TButton', font=small, padding=(5, 2))
+        style.configure('Selected.Baseline.TButton', foreground=WHITE, background='#2563eb')
+        style.map('Selected.Baseline.TButton', background=[('disabled', '#a9c9f8')], foreground=[('disabled', '#405575')])
+        style.configure('Measure.Baseline.TButton', font=(small[0], 11, 'bold'), foreground=WHITE, background='#168448')
+        style.map('Action.Baseline.TButton', foreground=[('disabled', '#9ca3af'), ('!disabled', INK)],
+                  background=[('disabled', '#e5e7eb')])
+
+        def label(parent, text='', **options):
+            options.setdefault('font', small)
+            options.setdefault('height', 1)
+            return self.label(parent, text, **options)
+
+        def button(parent, text, command, style='Baseline.TButton'):
+            return ttk.Button(parent, text=text, command=command, style=style, width=0)
+
+        for column in (0, 1):
+            self.baseline.columnconfigure(column, weight=1, uniform='baseline')
         self.baseline.rowconfigure(1, weight=1)
-        head = self.card(self.baseline, '对刀基准建立', 0, 0, columnspan=2)
-        bar = tk.Frame(head, bg=WHITE); bar.grid(row=0, column=0, sticky='ew'); bar.columnconfigure(1, weight=1)
-        self.baseline_heading = tk.Label(bar, text='当前：未选择', bg='#667085', fg=WHITE, font=(self.theme.title[0], 19, 'bold'), padx=10)
-        self.baseline_heading.grid(row=0, column=0, padx=3)
-        self.baseline_message = tk.Label(bar, text='请开始对刀基准建立', bg=WHITE, fg=INK, font=(self.theme.title[0], 16), anchor='w', justify='left', wraplength=900)
-        self.baseline_message.grid(row=0, column=1, sticky='ew', padx=8)
-        bar.bind('<Configure>', lambda event: self.baseline_message.config(wraplength=max(240, event.width - self.baseline_heading.winfo_reqwidth() - 32)))
-        controls = tk.Frame(head, bg=WHITE); controls.grid(row=1, column=0, sticky='w', pady=4)
-        self.baseline_start = ttk.Button(controls, text='开始对刀基准建立', command=lambda:self.baseline_command('baseline_start'))
-        self.baseline_start.grid(row=0, column=0, padx=2)
-        self.baseline_tools = []
-        for i in (1, 2):
-            b = ttk.Button(controls, text=f'工具{i}', command=lambda i=i:self.baseline_command('baseline_select', {'tool':i}))
-            b.grid(row=0, column=i, padx=2); self.baseline_tools.append(b)
-        tk.Label(controls, text='｜', bg=WHITE, fg=MUTED).grid(row=0, column=3, padx=2)
-        self.baseline_measure = ttk.Button(controls, text='对刀基准', style='OffsetPlace.TButton', command=lambda:self.baseline_command('baseline_measure'))
-        self.baseline_measure.grid(row=0, column=4, padx=5)
-        self.baseline_manual = ttk.Button(controls, text='识别不准，手动确认', command=lambda:self.baseline_command('baseline_manual')); self.baseline_manual.grid(row=0, column=5, padx=2)
-        self.baseline_aux = ttk.Button(controls, text='辅助相机手动重设', command=lambda:self.baseline_command('baseline_aux')); self.baseline_aux.grid(row=0, column=6, padx=2)
-        self.baseline_save = ttk.Button(controls, text='保存基准', command=lambda:self.baseline_command('baseline_save')); self.baseline_save.grid(row=0, column=7, padx=2)
-        self.baseline_end = ttk.Button(controls, text='结束/放弃', command=lambda:self.baseline_command('baseline_end')); self.baseline_end.grid(row=0, column=8, padx=2)
-        runout = tk.Frame(head, bg=WHITE, padx=6, pady=3)
-        runout.grid(row=4, column=0, sticky='ew')
-        tk.Label(runout, text='离心测试', bg=WHITE, fg=INK).grid(row=0, column=0, sticky='w', padx=4)
-        runout_controls = tk.Frame(runout, bg=WHITE)
-        runout_controls.grid(row=1, column=0, sticky='w')
-        self.runout_start = ttk.Button(runout_controls, text='开始离心测试', command=lambda:self.baseline_command('tooltip_runout_start'))
-        self.runout_start.grid(row=0, column=0, padx=3)
-        self.runout_press = ttk.Button(runout_controls, text='记录并计算', command=lambda:self.baseline_command('tooltip_runout_press'))
-        self.runout_press.grid(row=0, column=1, padx=3)
-        self.runout_end = ttk.Button(runout_controls, text='结束', command=lambda:self.baseline_command('tooltip_runout_end'))
-        self.runout_end.grid(row=0, column=2, padx=3)
-        self.runout_max = tk.Label(runout_controls, text='最大离心量 — µm', bg=WHITE, fg=INK, font=(self.theme.title[0], 20, 'bold'))
-        self.runout_max.grid(row=0, column=3, padx=12)
-        self.runout_detail = tk.Label(runout, text='请打开两路预览并精定位', bg=WHITE, fg=MUTED, anchor='w', justify='left')
-        self.runout_detail.grid(row=2, column=0, sticky='ew')
-        self.baseline_live = tk.Label(head, text='实时辅助：等待针尖', bg=WHITE, fg=MUTED, anchor='w', font=self.theme.body)
-        self.baseline_live.grid(row=2, column=0, sticky='ew')
-        self.baseline_notice = tk.Label(head, text='', bg=WHITE, fg=COLORS['yellow'], anchor='w', font=self.theme.body)
-        self.baseline_notice.grid(row=3, column=0, sticky='ew')
+        head = tk.Frame(self.baseline, bg=WHITE, highlightbackground=BORDER, highlightthickness=1, padx=5, pady=2)
+        head.grid(row=0, column=0, columnspan=2, sticky='ew', padx=3, pady=3)
+        head.columnconfigure(0, weight=1)
+        bar = tk.Frame(head, bg=WHITE)
+        bar.grid(row=0, column=0, sticky='ew')
+        bar.columnconfigure(1, weight=2)
+        bar.columnconfigure(3, weight=1)
+        self.baseline_heading = label(bar, '当前：未选择', bg=MUTED, fg=WHITE, font=(small[0], 12, 'bold'), padx=7)
+        self.baseline_heading.grid(row=0, column=0, sticky='w')
+        self.baseline_message = label(bar, '请开始对刀基准建立', width=1)
+        self.baseline_message.grid(row=0, column=1, sticky='ew', padx=6)
+        self.baseline_live = label(bar, '实时辅助：等待针尖', fg=MUTED)
+        self.baseline_live.grid(row=0, column=2, sticky='w')
+        self.baseline_notice = label(bar, fg=COLORS['yellow'], width=1)
+        self.baseline_notice.grid(row=0, column=3, sticky='ew', padx=6)
+        for status in (self.baseline_message, self.baseline_notice):
+            bind_text_tooltip(status, status)
+
+        controls = tk.Frame(head, bg=WHITE)
+        controls.grid(row=1, column=0, sticky='ew', pady=(2, 0))
+
+        def action(column, text, command, *, params=None, style='Baseline.TButton'):
+            widget = button(controls, text, lambda: self.baseline_command(command, params), style)
+            widget.grid(row=0, column=column, padx=(0, 3))
+            return widget
+
+        self.baseline_start = action(0, '开始对刀基准建立', 'baseline_start')
+        self.baseline_tools = [action(i, f'工具{i}', 'baseline_select', params={'tool': i}) for i in (1, 2)]
+        self.baseline_measure = action(3, '对刀基准', 'baseline_measure', style='Measure.Baseline.TButton')
+        self.baseline_manual = action(4, '识别不准，手动确认', 'baseline_manual')
+        self.baseline_aux = action(5, '辅助相机手动重设', 'baseline_aux')
+        self.baseline_save = action(6, '保存基准', 'baseline_save')
+        self.baseline_end = action(7, '结束/放弃', 'baseline_end')
+        label(controls, '│', fg=MUTED).grid(row=0, column=8, padx=(0, 3))
+        self.runout_start = action(9, '开始离心测试', 'tooltip_runout_start')
+        self.runout_press = action(10, '记录并计算', 'tooltip_runout_press')
+        self.runout_end = action(11, '结束', 'tooltip_runout_end')
+        self.runout_detail = label(controls, '请打开两路预览并精定位', fg=MUTED, width=1, height=1, anchor='nw', justify='left')
+        self.runout_detail.grid(row=0, column=13, sticky='ew')
+        controls.columnconfigure(13, weight=1)
+        self.runout_max = label(controls, '最大离心量 — µm')
+        self.runout_max.grid(row=0, column=12, padx=(4, 7))
+        bind_text_tooltip(self.runout_detail, self.runout_detail)
+
         self.baseline_views = {}
         self.baseline_exposure_pending = {}
-        style = ttk.Style(self.root)
-        style.map('TooltipAction.TButton', foreground=[('disabled', '#9ca3af'), ('!disabled', INK)],
-                  background=[('disabled', '#e5e7eb')])
-        for column, (name, title) in enumerate((('front','主对刀相机（正面）'), ('side','辅助对刀相机（侧面）'))):
-            body = self.card(self.baseline, title + ' · 点击放大', 1, column)
-            body.columnconfigure(0, weight=1); body.rowconfigure(0, weight=0); body.rowconfigure(1, weight=0); body.rowconfigure(2, weight=1)
-            path = self.label(body, '未分配', fg=MUTED); path.grid(row=0, column=0, sticky='w')
-            actions = tk.Frame(body, bg=WHITE); actions.grid(row=1, column=0, sticky='w')
-            toggle = tk.Button(actions, text=title+'预览：关', command=lambda n=name:self.baseline_toggle(n))
-            toggle.grid(row=0, column=0)
-            exposure = ttk.Button(actions, style='TooltipAction.TButton', text='重新测曝光', command=lambda n=name:self.baseline_retest_exposure(n)); exposure.grid(row=0, column=2)
-            reset = ttk.Button(actions, style='TooltipAction.TButton', text='清晰度峰值清零', command=lambda n=name:self.baseline_command('tooltip_peak_reset', {'camera':n})); reset.grid(row=0, column=3)
-            reason = self.label(actions, '', fg=MUTED); reason.grid(row=1, column=0, columnspan=4, sticky='w')
-            manual = tk.Frame(actions, bg=WHITE); manual.grid(row=2, column=0, columnspan=4, sticky='w')
-            self.label(manual, '曝光 ms').grid(row=0, column=0)
-            entry = ttk.Spinbox(manual, from_=0.1, to=500, increment=0.1, width=7); entry.grid(row=0, column=1)
-            set_exposure = ttk.Button(manual, text='设置曝光', command=lambda n=name: self.baseline_exposure(n, False)); set_exposure.grid(row=0, column=2)
-            restore = ttk.Button(manual, text='恢复曝光', command=lambda n=name: self.baseline_exposure(n, True)); restore.grid(row=0, column=3)
-            save = ttk.Button(manual, text='设为实际曝光', command=lambda n=name: self.baseline_save_exposure(n)); save.grid(row=0, column=4)
-            limits = self.label(manual, '范围 —'); limits.grid(row=0, column=5)
-            result = self.label(manual, ''); result.grid(row=1, column=0, columnspan=6, sticky='w')
-            saved = self.label(manual, '已存曝光：无'); saved.grid(row=2, column=0, columnspan=6, sticky='w')
-            save_reason = self.label(manual, ''); save_reason.grid(row=3, column=0, columnspan=6, sticky='w')
-            scan_status = self.label(actions, '', fg=MUTED); scan_status.grid(row=3, column=0, columnspan=4, sticky='w')
-            scan_table = self.label(actions, '', justify='left'); scan_table.grid(row=4, column=0, columnspan=4, sticky='w')
-            pic = self.picture(body, 'baseline_'+name); pic.grid_configure(row=2)
-            info = tk.Label(body, text='预览关闭', bg=WHITE, fg=MUTED, font=self.theme.large, anchor='w', justify='left'); info.grid(row=3, column=0, sticky='ew')
-            hint = self.label(body, '', fg=COLORS['red']); hint.grid(row=4, column=0, sticky='ew')
-            detail = self.label(body, '', justify='left'); detail.grid(row=5, column=0, sticky='ew')
-            graph = tk.Canvas(body, height=24, bg=WHITE, highlightthickness=0); graph.grid(row=6, column=0, sticky='ew')
-            body.bind('<Configure>', lambda event, info=info, hint=hint, detail=detail: (info.config(wraplength=max(100, event.width-12)), hint.config(wraplength=max(100, event.width-12)), detail.config(wraplength=max(100, event.width-12))))
-            self.baseline_views[name] = dict(path=path, toggle=toggle, exposure=exposure, reset=reset, reason=reason, info=info, hint=hint, detail=detail, graph=graph, picture=pic, exposure_entry=entry, exposure_set=set_exposure, exposure_restore=restore, exposure_save=save, exposure_saved=saved, exposure_save_reason=save_reason, exposure_limits=limits, exposure_result=result, scan_status=scan_status, scan_table=scan_table)
-        results = self.card(self.baseline, '本次结果', 2, 0)
-        self.baseline_results_card = results.master
-        self.baseline_result = tk.Label(results, text='等待测量', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.table, width=1, wraplength=600)
-        self.baseline_result.grid(row=0, column=0, sticky='nsew')
-        results.bind('<Configure>', lambda event: self.baseline_result.config(wraplength=max(200, event.width - 12)))
-        old = self.card(self.baseline, '现有基准与工具补偿', 2, 1)
-        self.baseline_existing_card = old.master
-        self.baseline_existing = tk.Label(old, text='—', bg=WHITE, fg=INK, anchor='nw', justify='left', font=self.theme.table, width=1, wraplength=600)
-        self.baseline_existing.grid(row=0, column=0, sticky='nsew')
-        old.bind('<Configure>', lambda event: self.baseline_existing.config(wraplength=max(200, event.width - 12)))
+        camera_cards = []
+        for column, (name, title) in enumerate((('front', '主对刀相机（正面）'), ('side', '辅助对刀相机（侧面）'))):
+            body = tk.Frame(self.baseline, bg=WHITE, highlightbackground=BORDER, highlightthickness=1, padx=4, pady=2)
+            camera_cards.append(body)
+            body.grid(row=1, column=column, sticky='nsew', padx=3, pady=(0, 3))
+            body.columnconfigure(0, weight=1)
+            body.rowconfigure(3, weight=1)
+            actions = tk.Frame(body, bg=WHITE)
+            actions.grid(row=0, column=0, sticky='ew')
+            actions.columnconfigure(3, weight=2)
+            toggle = tk.Button(actions, text=title+'预览：关', font=small, padx=4, pady=0,
+                               command=lambda n=name: self.baseline_toggle(n))
+            toggle.grid(row=0, column=0, padx=(0, 3))
+            exposure = button(actions, '重新测曝光', lambda n=name: self.baseline_retest_exposure(n), 'Action.Baseline.TButton')
+            exposure.grid(row=0, column=1, padx=(0, 3))
+            reset = button(actions, '清晰度峰值清零', lambda n=name: self.baseline_command('tooltip_peak_reset', {'camera': n}), 'Action.Baseline.TButton')
+            reset.grid(row=0, column=2, padx=(0, 3))
+            path = label(actions, '未分配', fg=MUTED, width=1)
+            path.grid(row=0, column=3, sticky='ew')
+            reason = label(actions, fg=MUTED, width=1)
+            reason.grid(row=0, column=4, sticky='ew')
+            actions.columnconfigure(4, weight=1)
+            bind_text_tooltip(path, path)
+            bind_text_tooltip(toggle, reason)
+
+            manual = tk.Frame(body, bg=WHITE)
+            manual.grid(row=1, column=0, sticky='ew', pady=(2, 0))
+            manual.columnconfigure(6, weight=1)
+            label(manual, '曝光 ms').grid(row=0, column=0)
+            entry = ttk.Spinbox(manual, from_=0.1, to=500, increment=0.1, width=6, font=small)
+            entry.grid(row=0, column=1, padx=(2, 3))
+            set_exposure = button(manual, '设置曝光', lambda n=name: self.baseline_exposure(n, False))
+            set_exposure.grid(row=0, column=2, padx=(0, 3))
+            restore = button(manual, '恢复曝光', lambda n=name: self.baseline_exposure(n, True))
+            restore.grid(row=0, column=3, padx=(0, 3))
+            save = button(manual, '设为实际曝光', lambda n=name: self.baseline_save_exposure(n))
+            save.grid(row=0, column=4, padx=(0, 3))
+            limits = label(manual, '范围 —')
+            limits.grid(row=0, column=5, padx=(0, 3))
+            saved = label(manual, '已存曝光：无', width=1)
+            saved.grid(row=0, column=6, sticky='ew')
+            save_reason = label(manual)
+            bind_text_tooltip(save, save_reason)
+            bind_text_tooltip(saved, saved)
+
+            scan = tk.Frame(body, bg=WHITE)
+            scan.grid(row=2, column=0, sticky='ew', pady=(2, 0))
+            scan.columnconfigure(1, weight=2)
+            scan.columnconfigure(2, weight=1)
+            scan_button = button(scan, '扫描详情', lambda n=name: self.show_baseline_scan(n))
+            scan_button.grid(row=0, column=0, padx=(0, 3))
+            scan_status = label(scan, '扫描：—', fg=MUTED, width=1)
+            scan_status.grid(row=0, column=1, sticky='ew')
+            result = label(scan, width=1)
+            result.grid(row=0, column=2, sticky='ew')
+            label(scan, '点击画面放大', fg=MUTED).grid(row=0, column=3, padx=(3, 0))
+            bind_text_tooltip(scan_status, scan_status)
+            bind_text_tooltip(result, result)
+
+            viewport = tk.Frame(body, bg='#eef1f5')
+            viewport.grid(row=3, column=0, sticky='nsew', pady=(2, 0))
+            # Place ignores the photo's requested size when sizing the viewport.
+            pic = Picture(viewport, live_image_file(self.directory, 'baseline_'+name), self.theme)
+            pic.min_mtime_ns = self.started_at_ns
+            pic.config(borderwidth=0, highlightthickness=0, padx=0, pady=0)
+            self.pictures.append(pic)
+
+            def fit_picture(_event=None, viewport=viewport, pic=pic):
+                source_width, source_height = pic.image.size if pic.image is not None else (16, 9)
+                width, height = viewport.winfo_width(), viewport.winfo_height()
+                fitted_width = min(width, round(height * source_width / source_height))
+                fitted_height = min(height, round(width * source_height / source_width))
+                pic.place(relx=.5, rely=.5, anchor='center', width=max(1, fitted_width), height=max(1, fitted_height))
+
+            viewport.bind('<Configure>', fit_picture)
+            pic.aspect_changed = fit_picture
+
+            readings = tk.Frame(body, bg=WHITE)
+            readings.grid(row=4, column=0, sticky='ew')
+            readings.columnconfigure(1, weight=1)
+            info = label(readings, '预览关闭', fg=MUTED, font=(self.theme.large[0], 13))
+            info.grid(row=0, column=0, sticky='w')
+            hint = label(readings, fg=COLORS['red'], width=1)
+            hint.grid(row=0, column=1, sticky='ew')
+            graph = tk.Canvas(readings, width=100, height=16, bg=WHITE, highlightthickness=0)
+            graph.grid(row=0, column=2, sticky='e', padx=(3, 0))
+            detail = label(readings, width=1, height=2, anchor='nw', justify='left')
+            detail.grid(row=1, column=0, columnspan=3, sticky='ew')
+            bind_text_tooltip(info, info)
+            bind_text_tooltip(hint, hint)
+            bind_text_tooltip(detail, detail)
+            self.baseline_views[name] = dict(
+                title=title, path=path, toggle=toggle, exposure=exposure, reset=reset, reason=reason,
+                info=info, hint=hint, detail=detail, graph=graph, picture=pic, exposure_entry=entry,
+                exposure_set=set_exposure, exposure_restore=restore, exposure_save=save, exposure_saved=saved,
+                exposure_save_reason=save_reason, exposure_limits=limits, exposure_result=result,
+                scan_button=scan_button, scan_status=scan_status, scan_table_text='')
+
+        footer = tk.Frame(self.baseline, bg=BG)
+        footer.grid(row=2, column=0, columnspan=2, sticky='ew')
+        footer.columnconfigure(0, weight=1)
+        canvas = tk.Canvas(footer, height=113, highlightthickness=0, bg=BG)
+        canvas.grid(row=0, column=0, sticky='ew')
+        scroll = ttk.Scrollbar(footer, orient='vertical', command=canvas.yview)
+        scroll.grid(row=0, column=1, sticky='ns')
+        canvas.configure(yscrollcommand=scroll.set)
+        cards = tk.Frame(canvas, bg=BG)
+        window = canvas.create_window(0, 0, window=cards, anchor='nw')
+        geometry = ScrollGeometry(canvas, window)
+
+        def fit_results(_event):
+            # Camera cards request only their controls and readings, since the pictures use place.
+            page_width = self.baseline.winfo_width()
+            if page_width <= 1:
+                return
+            camera_height = max(card.winfo_reqheight() for card in camera_cards)
+            picture_height = round((page_width // 2 - 16) * 9 / 16)
+            spare = self.baseline.winfo_height() - head.winfo_reqheight() - camera_height - picture_height - 9
+            height = min(cards.winfo_reqheight(), max(64, spare))
+            if height != canvas.winfo_reqheight():
+                canvas.configure(height=height)
+
+        self.baseline.bind('<Configure>', fit_results)
+        canvas.bind('<Configure>', geometry.viewport_changed)
+        cards.bind('<Configure>', geometry.content_changed)
+        cards.bind('<Configure>', fit_results, add='+')
+        for column in (0, 1):
+            cards.columnconfigure(column, weight=1, uniform='baseline_results')
+        for column, (title, key, initial) in enumerate((
+            ('本次结果', 'result', '等待测量'), ('现有基准与工具补偿', 'existing', '—')
+        )):
+            body = self.card(cards, title, 0, column)
+            card = body.master
+            card.title_label.config(font=(small[0], 11, 'bold'))
+            value = label(body, initial, anchor='nw', justify='left', width=1, height=0, wraplength=600)
+            value.grid(row=0, column=0, sticky='nsew')
+            body.bind('<Configure>', lambda event, value=value: value.config(wraplength=max(100, event.width - 8)))
+            for widget in (card, card.title_label, body, value):
+                widget.bind('<Button-4>', lambda _: canvas.yview_scroll(-1, 'units'))
+                widget.bind('<Button-5>', lambda _: canvas.yview_scroll(1, 'units'))
+            setattr(self, 'baseline_' + key, value)
+            setattr(self, 'baseline_' + ('results' if key == 'result' else key) + '_card', card)
+        self.baseline_footer = footer
+
+    def show_baseline_scan(self, name):
+        if name in self.baseline_scan_dialogs:
+            self.baseline_scan_dialogs[name]['window'].lift()
+            return
+        view = self.baseline_views[name]
+        top = tk.Toplevel(self.root)
+        top.title(view['title'] + ' · 扫描详情')
+        top.transient(self.root)
+        font = (self.theme.body[0], 11)
+        status = self.label(top, view['scan_status'].cget('text'), font=font, fg=MUTED)
+        status.pack(fill='x', padx=12, pady=(8, 0))
+        table = self.label(top, view['scan_table_text'], font=font, justify='left')
+        table.pack(fill='both', expand=True, padx=12, pady=(0, 8))
+        self.baseline_scan_dialogs[name] = dict(window=top, status=status, table=table)
+        top.bind('<Destroy>', lambda event: self.baseline_scan_dialogs.pop(name, None) if event.widget is top else None)
 
     def baseline_toggle(self, name):
         item = getattr(self, 'baseline_preview', {}).get(name) or {}
@@ -863,11 +1044,13 @@ class App:
             for n in ('front', 'side')
         )
         if preparing:
+            self.baseline_footer.grid_remove()
             self.baseline_results_card.grid_remove()
             self.baseline_existing_card.grid_remove()
             self.baseline_live.grid_remove()
             self.baseline_notice.grid_remove()
         else:
+            self.baseline_footer.grid()
             self.baseline_results_card.grid()
             self.baseline_existing_card.grid()
             self.baseline_live.grid()
@@ -938,16 +1121,30 @@ class App:
             widgets['toggle'].config(text=button_text, fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
             scan_reason = ('请打开相机预览' if not on else '正在测曝光' if item.get('exposure_busy') else '请先精定位工具' if not live or live.get('detection_status') != '精定位' else '当前不可操作' if not may_prepare else '')
             enable(widgets['exposure'], not scan_reason and name not in self.baseline_exposure_pending); enable(widgets['reset'], on and may_prepare)
-            widgets['scan_status'].config(text=item.get('exposure_progress') or scan_reason)
+            scan_status = item.get('exposure_progress') or scan_reason
             scan_rows = item.get('exposure_scan_rows') or []
+            lines = []
             if scan_rows:
                 ref = scan_rows[0].get('prong_ref', '—')
                 lines = [f'曝光 ms　识别　齿数（参考 {ref}）　对比度　清晰度%　背景　背景饱和/工具发白　合格']
                 for row in scan_rows:
                     lines.append(f"{row.get('exposure', 0)/10:g}　{'是' if row.get('recognized') else '否'}　{row.get('prongs', 0)}　{row.get('contrast', 0):.1f}　{row.get('sharpness_percent', 0):.0f}%　{row.get('background', 0):.0f}　{row.get('saturated_fraction', 0):.1%}/{row.get('tool_whiteness', 0):.1%}　{'是' if row.get('qualified') else '否'}{' ★' if row.get('selected') else ''}　{'、'.join(row.get('reasons') or [])}")
-                widgets['scan_table'].config(text='\n'.join(lines))
-            else:
-                widgets['scan_table'].config(text='')
+            selected = next((row for row in scan_rows if row.get('selected')), None)
+            summary = f"选 {selected.get('exposure', 0)/10:g} ms ★" if selected is not None else ''
+            if scan_rows and selected is None and not item.get('exposure_busy') and not any(row.get('qualified') for row in scan_rows):
+                reasons = dict.fromkeys(reason for row in scan_rows for reason in (row.get('reasons') or []))
+                summary = '无合格档'
+                if reasons:
+                    summary += '：' + '、'.join(reasons)
+            parts = (scan_status, summary) if item.get('exposure_progress') else (summary, scan_status)
+            status_text = '扫描：' + ('　'.join(text for text in parts if text) or '—')
+            table_text = '\n'.join(lines)
+            widgets['scan_status'].config(text=status_text)
+            widgets['scan_table_text'] = table_text
+            scan_dialog = self.baseline_scan_dialogs.get(name)
+            if scan_dialog is not None:
+                scan_dialog['status'].config(text=status_text)
+                scan_dialog['table'].config(text=table_text)
             limits = item.get('exposure_limits') or {}
             valid_limits = all(type(limits.get(key)) is int for key in ('min', 'max', 'step')) and limits.get('step', 0) > 0
             if valid_limits:
@@ -1047,7 +1244,7 @@ class App:
 
         def enable_main(widget, condition): enable(widget, condition and not no_main)
         for i, button in enumerate(self.baseline_tools, 1):
-            enable_main(button, phase == 'select'); button.config(style='OffsetSelected.TButton' if i == tool else 'TButton')
+            enable_main(button, phase == 'select'); button.config(style='Selected.Baseline.TButton' if i == tool else 'Baseline.TButton')
         for b in (self.baseline_measure, self.baseline_manual): enable_main(b, phase in ('live','fail','success','saved'))
         enable_main(self.baseline_aux, phase in ('success','saved') and bool(candidate.get('p0')))
         enable_main(self.baseline_save, phase == 'success')
