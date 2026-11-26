@@ -9,11 +9,12 @@ import pytest
 from autoweaver.motion_policy.nodes.node import Status
 from nest_clear.config import load_config
 from nest_clear.devices.calib_cameras import CalibCamera
-from nest_clear.flow.calibration import ConfirmCalibration, StartCalibration, SaveCompensation, CalibrationFailed
+from nest_clear.flow.calibration import ConfirmCalibration, DetectTips, StartCalibration, SaveCompensation, CalibrationFailed
 from nest_clear.flow.modes import Mode
 from nest_clear.tooltip import ToolTipBaseline, ViewCalib
 from nest_clear.tooltip.store import save_baseline, load_baseline, initialize_tools, load_tools
 from nest_clear.tooloffset.commands import send
+from nest_clear.workers.calib_camera import CaptureImages
 
 ROOT = Path(__file__).resolve().parents[1]
 P0 = (10., 20., 30.)
@@ -55,9 +56,21 @@ def setup(rig, tool=1, pending=False, offset=(0.,0.,0.)):
         c.open(); cameras[name] = c
     return bb, cameras
 
+def capture(ctx, bb, cameras):
+    images = CaptureImages()
+    for name, camera in cameras.items():
+        images.frames[name] = [camera.capture() for _ in range(5)]
+        images[name] = images.frames[name][0]
+    bb.write('tooltip_images', images, 'test')
+    bb.read('tooltip_session')['images'].append(
+        {'raw': {}, 'overlay': {}, 'iteration': len(bb.read('tooltip_session')['images']) + 1})
+    node = DetectTips(ctx)
+    node._blackboard = bb
+    return node.on_start()
+
+
 def frame(ctx, bb, cameras):
-    bb.write('tooltip_images', {n:c.capture() for n,c in cameras.items()}, 'test')
-    bb.read('tooltip_session')['images'].append({'raw':{}, 'overlay':{}, 'iteration':len(bb.read('tooltip_session')['images'])+1})
+    assert capture(ctx, bb, cameras) == Status.SUCCESS, bb.read('error')
     node = ConfirmCalibration(ctx); node._blackboard = bb
     assert node.on_start() == Status.RUNNING, bb.read('error')
     return node
@@ -142,8 +155,7 @@ def test_probe_bad_quality_and_detection_failure(rig):
         bb.write('actual',bb.read('reply_coordinates')['calibration1_xyz'],'test')
     # Return to P0 with a large image disagreement; centred regression detects the drift.
     cameras['front'].config['tip_offset'] = (3,0,0)
-    bb.write('tooltip_images', {n:c.capture() for n,c in cameras.items()}, 'test')
-    bb.read('tooltip_session')['images'].append({'raw':{},'overlay':{},'iteration':5})
+    assert capture(ctx, bb, cameras) == Status.SUCCESS
     node = ConfirmCalibration(ctx); node._blackboard=bb
     assert node.on_start() == Status.FAILURE
     assert '雅可比测量质量不合格' in bb.read('error')
@@ -152,10 +164,7 @@ def test_probe_bad_quality_and_detection_failure(rig):
 def test_probe_detection_failure(rig):
     ctx,_ = rig; bb,cameras = setup(rig, pending=True)
     cameras['front'].config['undetectable'] = True
-    bb.write('tooltip_images', {n:c.capture() for n,c in cameras.items()}, 'test')
-    bb.read('tooltip_session')['images'].append({'raw':{},'overlay':{},'iteration':1})
-    node = ConfirmCalibration(ctx); node._blackboard=bb
-    assert node.on_start() == Status.FAILURE
+    assert capture(ctx, bb, cameras) == Status.FAILURE
     assert '无法识别针尖' in bb.read('error')
 
 def test_two_corrections_and_position_validation(rig):

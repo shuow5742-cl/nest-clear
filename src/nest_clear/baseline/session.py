@@ -1,6 +1,8 @@
 """界面驱动的对刀基准会话；设备采图及操作均在独立线程执行。"""
 
+from dataclasses import replace
 from datetime import datetime
+import copy
 import hashlib
 import json
 import math
@@ -21,7 +23,8 @@ from nest_clear.guard import GuardError
 from nest_clear.paths import live_image_file
 from nest_clear.tooloffset.store import _read, save_mapping
 from nest_clear.tooltip import SilhouetteTipDetector, ToolTipBaseline, ViewCalib
-from nest_clear.tooltip.factory import make_tip_detector
+from nest_clear.tooltip.factory import baseline_detector_warning, make_tip_detector
+from nest_clear.baseline.runout import FRAME_COUNT, FRAME_QUALITY_PASSED, measure_frames
 from nest_clear.tooltip.trident import TridentResult
 from nest_clear.tooltip.click import ClickResult, confirm_tip
 from nest_clear.tooltip.schema import load_baseline
@@ -134,6 +137,7 @@ def baseline_mapping(baseline: ToolTipBaseline) -> dict[str, Any]:
         "timestamp": baseline.timestamp,
         "note": baseline.note,
         "jacobian_pending": True,
+        **({"detector": baseline.detector} if baseline.detector else {}),
         "views": views,
     }
 
@@ -162,12 +166,14 @@ def _is_newer(offset_time: Any, baseline_time: Any) -> bool:
     return False
 
 
-def summary(path: str | Path, stale: bool = False) -> dict[str, Any]:
+def summary(path: str | Path, stale: bool = False, detection=None) -> dict[str, Any]:
     """读取单把工具现有基准的简要信息，占位或缺失时标记 missing。"""
     try:
         b = load_baseline(path)
         return {
             "time": b.timestamp,
+            "detector": b.detector,
+            "detector_warning": baseline_detector_warning(b.detector, detection or {}),
             "p0": list(b.p0),
             "pixels": {v.name: list(v.target_uv) for v in b.views},
             "jacobian_pending": b.jacobian_pending or any(v.jacobian is None for v in b.views),
@@ -195,7 +201,8 @@ def existing_baselines(config: Any, calibration_path: str | Path) -> dict[str, d
     for n in (1, 2):
         key = f"tool{n}"
         entry = offsets.get(key) if isinstance(offsets.get(key), dict) else {}
-        item = summary(cal_dir / f"{key}_baseline.yaml", bool(entry.get("baseline_stale")))
+        item = summary(cal_dir / f"{key}_baseline.yaml", bool(entry.get("baseline_stale")),
+                       getattr(config.tool_calibration, 'detection', {}))
         try:
             from nest_clear.devices.tooltip_camera_store import baseline_differences
             raw = _read(cal_dir / f"{key}_baseline.yaml")
@@ -212,11 +219,28 @@ def existing_baselines(config: Any, calibration_path: str | Path) -> dict[str, d
     return result
 
 
+def warn_existing_detectors(events, existing):
+    """Publish the same legacy-baseline warning from either camera host."""
+    warnings = {name: item['detector_warning'] for name, item in existing.items()
+                if item.get('detector_warning')}
+    previous = getattr(events, 'baseline_detector_warnings', {})
+    for name, warning in warnings.items():
+        if previous.get(name) != warning:
+            events.emit('warning', tool=int(name[-1]), reason=warning)
+    events.baseline_detector_warnings = warnings
+
+
+def publish_existing_baselines(events, app_config, calibration_path, **state):
+    existing = existing_baselines(app_config, calibration_path)
+    warn_existing_detectors(events, existing)
+    events.emit('baseline_state', existing=existing, **state)
+
+
 def refresh_existing(ctx: Any) -> None:
     """其他标定更新 tool_offset 后刷新对刀基准页摘要，不影响原流程。"""
     try:
         cal_path = Path(getattr(ctx, "calibration_path", None) or ctx.config.vision.calibration)
-        ctx.events.emit("baseline_state", existing=existing_baselines(ctx.config, cal_path))
+        publish_existing_baselines(ctx.events, ctx.config, cal_path)
     except Exception as exc:
         ctx.events.emit("warning", reason=f"刷新对刀基准状态失败：{exc}")
 
@@ -266,7 +290,7 @@ class BaselineSession:
         self.notice = ""
         self.candidate: dict[str, Any] | None = None
         self.frames: dict[str, np.ndarray] | None = None
-        self.measure_frames: dict[str, np.ndarray] | None = None
+        self.measurement: dict[str, Any] | None = None
         self.detections: dict[str, Any] = {}
         self.closed = False
         self.stop = threading.Event()
@@ -297,6 +321,7 @@ class BaselineSession:
     def publish(self, **extra: Any) -> None:
         """发布最新基准会话状态到事件与界面状态文件。"""
         existing = self.existing()
+        warn_existing_detectors(self.events, existing)
         data: dict[str, Any] = {
             "phase": self.phase,
             "tool": self.tool,
@@ -337,7 +362,7 @@ class BaselineSession:
         return self.cameras.execute({"stage": stage})
 
     def _detect(self, images: dict[str, np.ndarray]) -> dict[str, Any]:
-        """对两路图像运行现有先粗后细剪影针尖检测。"""
+        """实时预览按两路配置各检测一帧。"""
         return {
             name: make_tip_detector(self.config.tool_calibration.detection[name], SilhouetteTipDetector).detect(images[name])
             for name in ("front", "side")
@@ -596,9 +621,10 @@ class BaselineSession:
             "outcome": outcome,
             "reason": reason,
             "candidate": self.candidate,
+            "measurement": self.measurement,
         }
-        self.measurements.append(entry)
-        self.events.emit("baseline_measure", tool=self.tool, mode=mode, outcome=outcome, reason=reason, candidate=self.candidate)
+        self.measurements.append({**entry, "candidate": copy.deepcopy(self.candidate)})
+        self.events.emit("baseline_measure", tool=self.tool, **entry)
 
     def _evaluate(self, images: dict[str, np.ndarray], ds: dict[str, Any], manual: dict[str, ClickResult] | None = None, aux_only: bool = False) -> None:
         """判定检测/点选、主相机容许圆、清晰度及 P0 稳定性并刷新标注图。"""
@@ -632,10 +658,13 @@ class BaselineSession:
             self.candidate["pixels"]["side"] = points["side"]
             self.candidate["click"]["side"] = clicked["side"]
             self.candidate["focus"]["side"] = focus["side"]
+            self.candidate["detector"]["side"] = self.measurement["views"]["side"]["detector"]
             self.candidate["passed"] = True
             self._annotate(images, ds)
             self.phase = "success"
             self.message = "辅助相机基准已重设，请保存"
+            if self.measurement["rejected"]:
+                self.message += "。自动识别未通过，已使用人工点选。" + self.measurement["reason"]
             self._record_measurement("aux_manual", "success")
             self.publish()
             return
@@ -655,6 +684,7 @@ class BaselineSession:
             "inside": inside,
             "passed": False,
             "focus": focus,
+            "detector": {name: view["detector"] for name, view in self.measurement["views"].items()},
             "click": clicked,
             "p0": None,
         }
@@ -680,6 +710,8 @@ class BaselineSession:
         self._annotate(images, ds)
         self.phase = "success"
         self.message = "基准建立成功（待保存）"
+        if self.measurement["rejected"]:
+            self.message += "。自动识别未通过，已使用人工点选。" + self.measurement["reason"]
         self._record_measurement(mode, "success")
         self.publish()
 
@@ -708,6 +740,7 @@ class BaselineSession:
             datetime.now().astimezone().isoformat(),
             "界面建立，雅可比待测",
             True,
+            detector=c["detector"],
         )
         path = directory / f"tool{self.tool}_baseline.yaml"
         offsets_path = self.calibration_path.parent / "tool_offset.yaml"
@@ -732,7 +765,7 @@ class BaselineSession:
                 os.replace(restore, path)
             raise
         self.saved_path = str(path)
-        self.events.emit("baseline_saved", tool=self.tool, path=str(path), p0=c["p0"], offset_xyz=list(offset))
+        self.events.emit("baseline_saved", tool=self.tool, path=str(path), p0=c["p0"], offset_xyz=list(offset), detector=baseline.detector)
         try:
             from nest_clear.flow.tool_offset import _existing
             digest = hashlib.sha256(self.calibration_path.read_bytes()).hexdigest()
@@ -757,17 +790,32 @@ class BaselineSession:
             self.events.emit("baseline_select", tool=tool, notice=self.notice)
             self.publish()
         elif name in ("baseline_measure", "baseline_manual", "baseline_aux") and self.phase in ("live", "fail", "success", "saved"):
-            if name == "baseline_aux":
-                if not self.candidate or not self.candidate.get("p0"):
-                    raise ValueError("请先建立基准")
-                images = self.measure_frames if self.measure_frames is not None else self._frame("baseline_measure")
-                self._archive(images)
-            else:
-                images = self._frame("baseline_measure")
-                self.frames = images
-                self.measure_frames = images
-                self._archive(images)
-            ds = self._detect(images)
+            self.measurement = None
+            if name == "baseline_aux" and (not self.candidate or not self.candidate.get("p0")):
+                raise ValueError("请先建立基准")
+            cfg = self.config.tool_calibration
+            images = self.cameras.execute({"stage": "baseline_measure", "frames_per_view": FRAME_COUNT,
+                                           "capture_after": time.monotonic()})
+            self.frames = images
+            self._archive(images)
+            try:
+                ds, self.measurement = measure_frames(
+                    images.frames, cfg.detection, cfg.frame_std_max_px, rms_max=2.0,
+                    capture_times=images.capture_times)
+            finally:
+                images.frames.clear()  # Keep the archived first frames for display and manual picks.
+            if self.measurement["rejected"]:
+                # The legacy silhouette mode permits operator-only point picks.
+                # An automatic result is used only after passing all five frames.
+                if name == "baseline_measure" or any(
+                    not view["accepted"] and view["detector"]["method"] != "silhouette"
+                    for view in self.measurement["views"].values()
+                ):
+                    raise ValueError(self.measurement["reason"])
+            for camera, view in self.measurement["views"].items():
+                if view["accepted"]:
+                    ds[camera] = replace(ds[camera], point_uv=tuple(view["median_uv"]),
+                                         diagnostic=FRAME_QUALITY_PASSED)
             manual: dict[str, ClickResult] = {}
             if name != "baseline_measure":
                 names: tuple[str, ...] = ("side",) if name == "baseline_aux" else ("front", "side")
@@ -781,6 +829,7 @@ class BaselineSession:
                     else:
                         self.phase = previous_phase if previous_phase in ("live", "success", "saved") else "live"
                         self.message = "已取消手动点选" if previous_phase in ("live", "fail") else previous_message
+                    self._record_measurement(name, "cancelled")
                     self.events.emit("baseline_manual_cancelled", tool=self.tool, command=name)
                     self.publish()
                     return
@@ -798,7 +847,7 @@ class BaselineSession:
                 self.phase = "live"
                 self.message = "未保存，请点动后重新建立基准"
                 self.candidate = None
-                self.measure_frames = None
+                self.measurement = None
                 self.publish()
         elif name == "baseline_end":
             self.end()
@@ -815,10 +864,14 @@ class BaselineSession:
                     try:
                         self._command(command, params)
                     except Exception as exc:
-                        self.phase = "select" if self.tool is None else "fail"
+                        if command == "baseline_aux" and self.candidate and self.candidate.get("p0"):
+                            self.phase = "success"
+                        else:
+                            self.phase = "select" if self.tool is None else "fail"
                         self.message = str(exc)
                         self.events.emit("baseline_error", reason=str(exc), tool=self.tool)
-                        self._record_measurement(command, "fail", str(exc))
+                        if command in ("baseline_measure", "baseline_manual", "baseline_aux"):
+                            self._record_measurement(command, "fail", str(exc))
                         self.publish()
                 except queue.Empty:
                     pass

@@ -128,6 +128,7 @@ def test_report_focus_width_format(tmp_path):
 def test_detect_records_actual_focus_threshold(configured):
     from types import SimpleNamespace
     from nest_clear.flow.calibration import DetectTips
+    from nest_clear.workers.calib_camera import CaptureImages
     from test_hair_integration import Board, Events
 
     config = load_config('config/nest_clear.yaml', require_tools=False)
@@ -140,7 +141,11 @@ def test_detect_records_actual_focus_threshold(configured):
             settings['max_edge_width_px'] = configured
     node = DetectTips(SimpleNamespace(config=config, events=Events()))
     views = [SimpleNamespace(name=name, target_uv=(0, 0)) for name in ('front', 'side')]
-    board = Board(tooltip_images={'front': needle(), 'side': needle()},
+    images = CaptureImages()
+    for view in ('front', 'side'):
+        images.frames[view] = [needle() for _ in range(5)]
+        images[view] = images.frames[view][0]
+    board = Board(tooltip_images=images,
                   tooltip_session={'tool': 1, 'images': [{'overlay': {}, 'raw': {}, 'iteration': 0}]},
                   tooltip_baseline=SimpleNamespace(views=views), task_id=1)
     node._blackboard = board

@@ -156,7 +156,9 @@ def test_capture_interface_matches_both_hosts(tmp_path, monkeypatch, host_type):
         prep.close()
         monkeypatch.setattr('nest_clear.supervisor.tooltip_host.CalibCameraWorker', lambda *args, **kwargs: worker)
         monkeypatch.setattr('nest_clear.baseline.session.settings', lambda path: {'main_tol_mm': .15})
-        config = SimpleNamespace(record_directory=str(tmp_path), capture_timeout_s=1, tool_calibration=SimpleNamespace(cameras={}, detection={'front': {}, 'side': {}}))
+        config = SimpleNamespace(record_directory=str(tmp_path), capture_timeout_s=1,
+                                 vision=SimpleNamespace(calibration=tmp_path / "camera.yaml"),
+                                 tool_calibration=SimpleNamespace(directory=tmp_path, cameras={}, detection={'front': {}, 'side': {}}))
         events = SimpleNamespace(clock=lambda: datetime.now().astimezone(), monotonic=time.monotonic, emit=lambda *args, **kwargs: None)
         host = TooltipHost(config, events)
         prep = host.tooltip_preparation

@@ -84,7 +84,7 @@ def test_pending_jacobian_starts_probe(tmp_path, monkeypatch):
         def write(self, key, value, _): self.data[key] = value
     events = SimpleNamespace(emit=lambda *args, **kwargs: None, clock=datetime.now)
     config = SimpleNamespace(tools=((0, 0, 0), (0, 0, 0)),
-                             tool_calibration=SimpleNamespace(enabled=True, directory=tmp_path))
+                             tool_calibration=SimpleNamespace(enabled=True, directory=tmp_path, detection={}))
     node = StartCalibration(SimpleNamespace(events=events, config=config))
     node._blackboard = Blackboard()
     assert node.on_start() == Status.SUCCESS

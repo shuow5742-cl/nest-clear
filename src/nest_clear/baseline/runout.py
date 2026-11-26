@@ -10,37 +10,83 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from nest_clear.tooltip.factory import make_tip_detector
+from nest_clear.tooltip.factory import detector_identity, make_tip_detector
 from nest_clear.tooltip.runout import RunoutSession
 
 
-def detect_frames(frames, configs, std_max=0.3):
-    coords, reasons = {}, []
+FRAME_COUNT = 5
+FRAME_QUALITY_PASSED = '五帧质量及一致性检查通过'
+
+
+def measure_frames(frames, configs, std_max=0.3, *, rms_max=None, capture_times=None):
+    """Measure each view, with the same population std gate used for runout."""
+    representatives, views, reasons = {}, {}, []
     for camera, label in (('front', '正面'), ('side', '侧面')):
-        detector = make_tip_detector(configs.get(camera, {}))
-        points = []
-        for i, frame in enumerate(frames[camera], 1):
+        config = configs.get(camera, {})
+        detector = make_tip_detector(config)
+        limit = rms_max if rms_max is not None else config.get('max_distortion_axis_rms_px', 2.0)
+        records, view_reasons = [], []
+        starts = (capture_times or {}).get(camera)
+        for i, frame in enumerate(frames.get(camera, ()), 1):
             result = detector.detect(frame)
+            if i == 1:
+                representatives[camera] = result
             point = result.point_uv
-            points.append(list(map(float, point)) if point is not None else None)
             rms = getattr(result, 'axis_rms_px', None)
-            limit = configs.get(camera, {}).get('max_distortion_axis_rms_px', 2.0)
-            if rms is None:
-                reasons.append(f'{label}第 {i} 帧缺少 axis_rms，无法检查畸变')
-            elif rms > limit:
-                reasons.append(f'{label}第 {i} 帧工具在动或画面畸变（axis_rms {rms:.3f} > {limit:g} px）')
-            elif point is None or result.coarse:
-                reasons.append(f'{label}第 {i} 帧未通过单帧质量检查：{result.diagnostic or "未识别"}')
-        coords[camera] = points
-        if len(points) != 5:
-            reasons.append(f'{label}帧数不足 5 帧')
-        elif all(p is not None for p in points):
-            std = np.std(points, axis=0)
-            for j, axis in enumerate(('u', 'v')):
-                if std[j] > std_max:
-                    reasons.append(f'{label}五帧 {axis} 标准差 {std[j]:.3f} > {std_max:g} px')
-    if reasons:
-        return coords, {'rejected': True, 'reason': '；'.join(reasons)}
+            detail = result.diagnostic
+            reason = ''
+            if point is None or not np.all(np.isfinite(point)):
+                detail = {'no dark component': '图像中未找到暗色针尖区域',
+                          'largest component is too small': '图像中的暗色针尖区域过小'}.get(detail, detail)
+                reason = f'无法识别针尖：{detail or "未识别"}'
+                point = None
+            elif rms is not None and rms > limit:
+                reason = f'工具在动或画面畸变（axis_rms {rms:.3f} > {limit:g} px）'
+            elif result.coarse:
+                reason = f'未通过单帧精定位检查：{detail}'
+            elif not result.focused:
+                reason = f'针尖模糊：{detail}'
+            elif rms is None or not np.isfinite(rms):
+                reason = '缺少有效 axis_rms，无法检查畸变'
+            if reason:
+                view_reasons.append(f'{label}第 {i} 帧{reason}')
+            records.append({
+                'index': i, 'uv': list(map(float, point)) if point is not None else None,
+                'status': getattr(result, 'status', None),
+                'focused': result.focused, 'coarse': result.coarse, 'diagnostic': detail,
+                'axis_rms_px': float(rms) if rms is not None and np.isfinite(rms) else None,
+                'tip_contrast': getattr(result, 'tip_contrast', None),
+                'edge_fit': getattr(result, 'edge_fit', None),
+                'edge_width_px': result.edge_width_px, 'width_px': result.width_px,
+                'reason': reason, 'capture_mono': starts[i-1] if starts is not None else None,
+            })
+        std = median = None
+        if len(records) != FRAME_COUNT:
+            view_reasons.append(f'{label}应采集 {FRAME_COUNT} 帧，实际 {len(records)} 帧')
+        elif all(row['uv'] is not None for row in records):
+            points = [row['uv'] for row in records]
+            std = np.std(points, axis=0).tolist()
+            median = np.median(points, axis=0).tolist()
+            for axis, spread in zip(('u', 'v'), std):
+                if spread > std_max:
+                    view_reasons.append(f'{label}五帧 {axis} 标准差 {spread:.3f} > {std_max:g} px')
+        reasons.extend(view_reasons)
+        views[camera] = {
+            'detector': detector_identity(config), 'frames': records,
+            'std_uv': std, 'median_uv': median, 'accepted': not view_reasons,
+            'reasons': view_reasons, 'axis_rms_max_px': limit,
+            'max_edge_width_px': detector.max_edge_width_px,
+        }
+    return representatives, {'views': views, 'std_max_px': std_max,
+                             'rejected': bool(reasons), 'reason': '；'.join(reasons)}
+
+
+def detect_frames(frames, configs, std_max=0.3):
+    _, measurement = measure_frames(frames, configs, std_max)
+    coords = {name: [row['uv'] for row in view['frames']]
+              for name, view in measurement['views'].items()}
+    if measurement['rejected']:
+        return coords, {'rejected': True, 'reason': measurement['reason']}
     return coords, None
 
 
@@ -116,7 +162,7 @@ class RunoutController:
         frames, coords = {}, {}
         try:
             with ThreadPoolExecutor(max_workers=2) as pool:
-                futures = {n: pool.submit(self.prep.capture_after, n, pressed, 5, 5) for n in ('front', 'side')}
+                futures = {n: pool.submit(self.prep.capture_after, n, pressed, FRAME_COUNT, 5) for n in ('front', 'side')}
                 for n, f in futures.items():
                     try:
                         frames[n] = [item.frame for item in f.result()]

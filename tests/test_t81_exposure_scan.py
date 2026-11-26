@@ -87,7 +87,8 @@ def test_owner_hosts_execute_scan_and_reply(tmp_path, monkeypatch, host_type, ha
     events = SimpleNamespace(directory=tmp_path, clock=lambda: datetime.now().astimezone(), monotonic=time.monotonic,
                              emit=lambda event, **data: events_seen.append((event, data)))
     config = SimpleNamespace(record_directory=str(tmp_path), capture_timeout_s=1,
-        tool_calibration=SimpleNamespace(cameras={}, detection={'front': {}, 'side': {}},
+        vision=SimpleNamespace(calibration=tmp_path / "camera.yaml"),
+        tool_calibration=SimpleNamespace(directory=tmp_path, cameras={}, detection={'front': {}, 'side': {}},
                                          auto_exposure={}, exposure_scan={'max_exposure':4}))
     host = None
     if host_type == 'supervisor':

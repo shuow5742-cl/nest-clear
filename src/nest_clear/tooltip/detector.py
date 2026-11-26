@@ -7,6 +7,8 @@ import numpy as np
 
 from .core import _error
 
+SILHOUETTE_VERSION = "silhouette-1"
+
 
 @dataclass(frozen=True)
 class TipDetection:
@@ -19,6 +21,7 @@ class TipDetection:
     edge_width_px: float | None = None
     width_px: float | None = None
     coarse: bool = False
+    axis_rms_px: float | None = None
 
 
 class TipDetector(Protocol):
@@ -171,5 +174,21 @@ class SilhouetteTipDetector:
                 return fallback("边缘过渡不完整，无法测量清晰度")
             widths.append(abs(high-low))
         edge_width = max(widths)
+        # Measure shaft straightness in axial bins; exclude the ends of the
+        # component, where round caps and the tip can change the profile.
+        bins = np.rint(projection - projection.min()).astype(int)
+        rows = np.arange(bins.max() + 1)
+        lo = np.full(len(rows), np.inf)
+        hi = np.full(len(rows), -np.inf)
+        lateral = points @ n
+        np.minimum.at(lo, bins, lateral)
+        np.maximum.at(hi, bins, lateral)
+        body_rows = (rows >= rows[-1]*.25) & (rows <= rows[-1]*.75) & np.isfinite(lo)
+        rms = None
+        if np.count_nonzero(body_rows) >= 3:
+            centers = (lo[body_rows] + hi[body_rows]) / 2
+            fit_rows = rows[body_rows]
+            slope, intercept = np.polyfit(fit_rows, centers, 1)
+            rms = float(np.sqrt(np.mean((centers - (slope*fit_rows + intercept))**2)))
         point = d * end + n * center
-        return TipDetection(tuple(map(float, point)), 1.0, f"component area: {area} pixels", edge_width <= self.max_edge_width_px, edge_width, width, False)
+        return TipDetection(tuple(map(float, point)), 1.0, f"component area: {area} pixels", edge_width <= self.max_edge_width_px, edge_width, width, False, rms)

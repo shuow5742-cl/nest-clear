@@ -19,6 +19,7 @@ from nest_clear.tooltip import ToolTipBaseline, ViewCalib
 from nest_clear.tooltip.click import ClickResult
 from nest_clear.tooltip.store import save_baseline
 from nest_clear.vision.geometry import Calibration
+from nest_clear.workers.calib_camera import CaptureImages
 
 
 def delayed_click(connection, images, points, tool, *, click_started, click_release):
@@ -54,14 +55,19 @@ class MemoryPLC(AsyncRequestWorker):
 class Camera(AsyncRequestWorker):
     name = 'calib_camera'
     def execute(self, payload):
-        return {name: np.zeros((20, 20), np.uint8) for name in ('front', 'side')}
+        images = CaptureImages()
+        for name in ('front', 'side'):
+            images.frames[name] = [np.zeros((20, 20), np.uint8) for _ in range(payload['frames_per_view'])]
+            images[name] = images.frames[name][0]
+        return images
 
 
-class CoarseDetector:
+class PreciseDetector:
     max_edge_width_px = 6
     def __init__(self, **kwargs): pass
     def detect(self, image):
-        return SimpleNamespace(point_uv=(0., 0.), focused=True, edge_width_px=1., width_px=10., coarse=True, diagnostic='coarse')
+        return SimpleNamespace(point_uv=(20., 0.), focused=True, edge_width_px=1., width_px=10.,
+                               coarse=False, axis_rms_px=.1, diagnostic='')
 
 
 def test_delayed_click_does_not_block_ticks_or_heartbeat(tmp_path, monkeypatch, caplog):
@@ -71,7 +77,7 @@ def test_delayed_click_does_not_block_ticks_or_heartbeat(tmp_path, monkeypatch, 
     import nest_clear.flow.calibration as flow
     from nest_clear.tooloffset.commands import send
     monkeypatch.setattr(flow, '_click_process', partial(delayed_click, click_started=click_started, click_release=click_release))
-    monkeypatch.setattr(flow, 'SilhouetteTipDetector', CoarseDetector)
+    monkeypatch.setattr('nest_clear.baseline.runout.make_tip_detector', lambda cfg: PreciseDetector())
     publish = flow.ConfirmCalibration.publish
     def auto_confirm(node, phase, message, **fields):
         publish(node, phase, message, **fields)

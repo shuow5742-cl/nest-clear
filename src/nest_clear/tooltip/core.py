@@ -74,6 +74,7 @@ class ToolTipBaseline:
     jacobian_pending: bool = False
     jacobian_measured_at: str = ""
     jacobian_session: str = ""
+    detector: dict[str, dict[str, str]] | None = None
 
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""

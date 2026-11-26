@@ -291,7 +291,7 @@ def test_calibration_record_and_report(rig):
     assert "模式不允许：空闲 时收到 130（对刀完成），须先开始对应工具的对刀会话" in attention
     assert "no dark component" not in text
     assert "front" not in text
-    assert text.count("    错误码：TOOLTIP-FAILED；发生了什么：正面相机无法识别针尖：图像中未找到暗色针尖区域") == 2
+    assert text.count("    错误码：TOOLTIP-FAILED；发生了什么：正面第 1 帧无法识别针尖：图像中未找到暗色针尖区域") == 2
     assert text.count("    排查建议：检查背光与曝光，以及针尖是否在画面内。") == 2
     assert "位置：对刀" not in text
     failed_event = next(row for row in events if row["event"] == "tooltip_failed")

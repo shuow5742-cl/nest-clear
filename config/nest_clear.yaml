@@ -116,6 +116,8 @@ vision:
     min_dark_frac: 0.15  # 暗像素占比下限，零表示关闭
 
 tool_calibration:  # 双相机对刀配置；目录保存当前补偿及两把工具的基准
+  # 基准建立与换针对刀：每相机五帧 u、v 各自的总体标准差上限（px，与离心测试同口径）。
+  frame_std_max_px: 0.3
   unreliable_action: fail
   click_timeout_s: 120
   enabled: true  # 相机按需打开，未接时对刀请求回 131

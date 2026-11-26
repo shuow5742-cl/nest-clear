@@ -12,9 +12,12 @@ from nest_clear.preview.control import close_previews_for
 
 
 class Detector:
+    max_edge_width_px = None
+
     def detect(self, frame):
         u, v, status, rms = frame
-        return SimpleNamespace(point_uv=(u, v), coarse=bool(status), diagnostic='末端对比度不足' if status else '', axis_rms_px=rms)
+        return SimpleNamespace(point_uv=(u, v), focused=not status, coarse=bool(status),
+                               edge_width_px=None, width_px=None, diagnostic='末端对比度不足' if status else '', axis_rms_px=rms)
 
 
 def test_quality_and_median(monkeypatch):

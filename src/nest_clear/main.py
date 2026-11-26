@@ -296,7 +296,7 @@ class Application:
             from nest_clear.flow.pick_accuracy import existing as accuracy_existing
             accuracy = accuracy_existing(SimpleNamespace(config=config), Path(config.tool_calibration.directory) / 'pick_compensation.yaml', metadata['calibration_sha256'])
             self.events.emit('pickacc_state', phase='idle', message='等待 PLC 请求', existing=accuracy)
-            from nest_clear.baseline.session import BaselineSession, existing_baselines, settings as baseline_settings
+            from nest_clear.baseline.session import BaselineSession, publish_existing_baselines, settings as baseline_settings
             baseline_config = baseline_settings(ROOT / 'config/tooltip_baseline.yaml')
             def start_baseline():
                 if self.calib_camera is None:
@@ -310,13 +310,8 @@ class Application:
             self.events.baseline_session = None
             from nest_clear.baseline.preparation import Preparation
             self.events.tooltip_preparation = Preparation(self.events, self.calib_camera, config, baseline_config)
-            self.events.emit(
-                'baseline_state',
-                phase='idle',
-                message='请开始对刀基准建立',
-                existing=existing_baselines(config, calibration_path),
-                config=baseline_config,
-            )
+            publish_existing_baselines(self.events, config, calibration_path, phase='idle',
+                                       message='请开始对刀基准建立', config=baseline_config)
             # The supervisor freezes the old owner's sequence before spawning us.
             from nest_clear.tooloffset.commands import startup_reader
             self.events.command_reader, handoff = startup_reader(self.events.directory, self.events)

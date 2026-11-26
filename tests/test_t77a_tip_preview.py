@@ -83,7 +83,9 @@ def test_tooltip_host_receives_main_baseline_settings(tmp_path, monkeypatch):
     from nest_clear.supervisor.tooltip_host import TooltipHost
     monkeypatch.setattr('nest_clear.baseline.preparation.enumerate_capture_devices', lambda: [])
     monkeypatch.setattr('nest_clear.supervisor.tooltip_host.CalibCameraWorker', lambda *args, **kwargs: SimpleNamespace(cameras={}))
-    config = SimpleNamespace(record_directory=str(tmp_path), capture_timeout_s=1, tool_calibration=SimpleNamespace(cameras={}))
+    config = SimpleNamespace(record_directory=str(tmp_path), capture_timeout_s=1,
+                                 vision=SimpleNamespace(calibration=tmp_path / "camera.yaml"),
+                                 tool_calibration=SimpleNamespace(directory=tmp_path, cameras={}))
     events = SimpleNamespace(clock=None, monotonic=None, emit=lambda *args, **kwargs: None)
     host = TooltipHost(config, events)
     assert host.tooltip_preparation.ui_config == settings(ROOT / 'config/tooltip_baseline.yaml')

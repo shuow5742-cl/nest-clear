@@ -12,6 +12,7 @@ import yaml
 
 from nest_clear.baseline.session import BaselineSession, DEFAULTS
 from nest_clear.tooltip.click import ClickResult
+from nest_clear.workers.calib_camera import CaptureImages
 from nest_clear.tooltip.store import initialize_tools, save_tools, load_baseline
 
 
@@ -27,14 +28,26 @@ class Cameras:
     def open(self): self.opened = True
     def on_stop(self): self.opened = False; self.closes += 1
     def execute(self, payload):
-        images = {}
+        images = CaptureImages()
+        self.batch_requests = getattr(self, 'batch_requests', [])
+        if payload.get('frames_per_view'):
+            self.batch_requests.append(payload)
+        count = payload.get('frames_per_view', 1)
         for name in ('front', 'side'):
-            image = np.full((480,640), 255, np.uint8)
-            if not self.blank:
-                cv2.line(image, (self.x if name == 'front' else 320, 130), (self.x if name == 'front' else 320, 237), 0, 5)
-            if name == 'side' and self.blur: image = cv2.GaussianBlur(image, (15,15), 5)
-            images[name] = image
+            images.frames[name] = []
+            images.capture_times[name] = []
+            for _ in range(count):
+                images.capture_times[name].append(time.monotonic())
+                image = np.full((480,640), 255, np.uint8)
+                if not self.blank:
+                    cx = self.x if name == 'front' else 320
+                    cv2.line(image, (cx, 130), (cx, 237), 0, 5)
+                if name == 'side' and self.blur:
+                    image = cv2.GaussianBlur(image, (15,15), 5)
+                images.frames[name].append(image)
+            images[name] = images.frames[name][0]
         return images
+
 
 
 class Plc:
@@ -59,7 +72,7 @@ def rig(tmp_path):
     calibration = cal/'camera.yaml'; calibration.write_text('camera: test\n')
     (cal/'tool_offset.yaml').write_text(yaml.safe_dump({'tool1':{'offset_xy_mm':[1,2], 'baseline_stale':True},'tool2':{'offset_xy_mm':[4,5], 'baseline_stale':True}}))
     detection = {v: {'method':'silhouette', 'direction':[0,1], 'threshold':127, 'min_area':5} for v in ('front','side')}
-    cfg = SimpleNamespace(tool_calibration=SimpleNamespace(directory=str(cal), detection=detection, click_timeout_s=2),
+    cfg = SimpleNamespace(tool_calibration=SimpleNamespace(directory=str(cal), detection=detection, click_timeout_s=2, frame_std_max_px=.3),
                           tool_offset={'settle_samples':3,'settle_window_s':.03,'jitter_tol_mm':.02}, tools=((1,2,3),(0,0,0)))
     cameras, plc, events = Cameras(), Plc(), Events(tmp_path)
     points = iter(())
@@ -82,6 +95,11 @@ def test_save_backup_stale_and_other_tool(rig):
     cmd(s,'baseline_measure','success'); assert s.candidate['p0'] == [1,2,3]
     cmd(s,'baseline_save','confirm'); cmd(s,'baseline_confirm','saved',{'accept':True})
     b=load_baseline(cal/'tool1_baseline.yaml')
+    assert b.detector == {name: {'method': 'silhouette', 'version': 'silhouette-1'} for name in ('front', 'side')}
+    assert len(camera.batch_requests) == 1
+    assert all(len(view['frames']) == 5 and
+               all(row['capture_mono'] > camera.batch_requests[0]['capture_after'] for row in view['frames'])
+               for view in s.measurements[0]['measurement']['views'].values())
     assert b.offset_xyz==(1,2,3) and b.jacobian_pending and all(v.jacobian is None for v in b.views)
     assert list((cal/'history').glob('tool1_baseline*'))
     offset=yaml.safe_load((cal/'tool_offset.yaml').read_text()); assert offset['tool1']['baseline_stale'] is False and offset['tool2']['baseline_stale'] is True
@@ -241,6 +259,7 @@ def test_existing_baselines_notice_and_calibration_paths(tmp_path):
     cfg = SimpleNamespace(tool_calibration=SimpleNamespace(directory=str(cal)))
     info = existing_baselines(cfg, cam_yaml)
     assert info['tool1']['offset_newer'] is True
+    assert info['tool1']['detector_warning'] == '基准由旧版识别算法建立，建议重建基准'
     assert info['tool1']['tool_offset_missing'] is False
     assert info['tool1']['offset_xyz'] == [1.5, -0.5, 2.0]
     assert info['tool2']['tool_offset_missing'] is True

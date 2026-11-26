@@ -111,6 +111,7 @@ class ToolCalibrationConfig:
     camera_controls: dict[str, Any] = field(default_factory=dict)
     auto_exposure: dict[str, Any] = field(default_factory=dict)
     exposure_scan: dict[str, Any] = field(default_factory=dict)
+    frame_std_max_px: float = 0.3
 
 
 @dataclass(frozen=True)
@@ -582,11 +583,11 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         scan = replace(scan, fov_mm=tuple(vision.hair_detector.expected_um_per_px * n / 1000 for n in (4024, 3036)))
     tc_data = root["tool_calibration"]
     if isinstance(tc_data, dict):
-        tc_data = {"enabled": True, "quality_hard_fail": True, "unreliable_action": "fail", "click_timeout_s": 120.0, "probe_step_mm": .2, "max_step_mm": .5, "max_total_mm": 2., "camera_controls": {}, "auto_exposure": {}, "exposure_scan": {}, "usb_vendor_id": "05a3", "usb_product_id": "9230", **tc_data}
+        tc_data = {"enabled": True, "quality_hard_fail": True, "unreliable_action": "fail", "click_timeout_s": 120.0, "probe_step_mm": .2, "max_step_mm": .5, "max_total_mm": 2., "camera_controls": {}, "auto_exposure": {}, "exposure_scan": {}, "frame_std_max_px": .3, "usb_vendor_id": "05a3", "usb_product_id": "9230", **tc_data}
     tc = _mapping(tc_data, "tool_calibration", [
         "directory", "cameras", "detection", "position_tolerance_mm", "tip_tolerance_mm",
         "consistency_tolerance_mm", "max_iterations", "max_residual_mm", "max_condition",
-        "z_disagreement_mm", "enabled", "quality_hard_fail", "unreliable_action", "click_timeout_s", "probe_step_mm", "max_step_mm", "max_total_mm", "camera_controls", "auto_exposure", "exposure_scan", "usb_vendor_id", "usb_product_id",
+        "z_disagreement_mm", "enabled", "quality_hard_fail", "unreliable_action", "click_timeout_s", "probe_step_mm", "max_step_mm", "max_total_mm", "camera_controls", "auto_exposure", "exposure_scan", "frame_std_max_px", "usb_vendor_id", "usb_product_id",
     ])
     if type(tc["enabled"]) is not bool or type(tc["quality_hard_fail"]) is not bool:
         _fail("tool_calibration.enabled", "应为布尔值")
@@ -691,6 +692,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _number(tc["max_step_mm"], "tool_calibration.max_step_mm", True),
         _number(tc["max_total_mm"], "tool_calibration.max_total_mm", True),
         common_controls, ae, exposure_scan,
+        _number(tc["frame_std_max_px"], "tool_calibration.frame_std_max_px", True),
     )
     ensure_calibration_files(directory)
     tools_path = Path(directory) / "tools.yaml"

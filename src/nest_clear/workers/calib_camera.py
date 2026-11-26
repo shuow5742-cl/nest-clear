@@ -1,15 +1,17 @@
 """在后台线程统一采集正面和侧面的对刀相机图像。"""
 
-from typing import Any, Callable
-import threading
 import json
 import logging
 import os
-import tempfile
 from pathlib import Path
+import tempfile
+import threading
+import time
+from typing import Any, Callable
 
 from nest_clear.devices.v4l2_enum import resolve_tooltip_roles, usb_port
 
+import cv2
 import numpy as np
 from autoweaver.worker import AsyncRequestWorker
 from autoweaver.sensor.camera.base import CameraBase
@@ -25,6 +27,8 @@ class CaptureImages(dict):
     def __init__(self) -> None:
         super().__init__()
         self.raw_paths: dict[str, str | None] = {}
+        self.frames: dict[str, list[np.ndarray]] = {}
+        self.capture_times: dict[str, list[float]] = {}
 
 
 class CalibCameraWorker(AsyncRequestWorker):
@@ -138,25 +142,55 @@ class CalibCameraWorker(AsyncRequestWorker):
             raise self._camera_error(RuntimeError('对刀相机插口在打开期间发生变化，请重试'))
         self.opened = True
 
-    def execute(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
-        """一次请求依次取得两视图，交给后续对刀算法。"""
+    def execute(self, payload: dict[str, Any]) -> CaptureImages:
+        """取得两视图；五帧请求只返回在该请求之后发起的新取图。"""
+        count = payload.get("frames_per_view", 1)
+        requested = payload.get("capture_after")
         self.open()
         result = CaptureImages()
         for name, camera in self.cameras.items():
             done = threading.Event()
             self.capture_done[name] = done
+
             class Adapter:
+                def __init__(self, camera, done):
+                    self.camera = camera
+                    self.done = done
+
                 def snapshot(self):
                     try:
-                        return camera.capture()
+                        return self.camera.capture()
                     finally:
-                        done.set()
+                        self.done.set()
                 snapshot_with_meta = CameraBase.snapshot_with_meta
-            worker = CameraWorker("mock", camera.config.get("sn", f"{camera.backend}:{camera.config.get('device', name)}"), Adapter(), timeout_s=self.timeout_s, role=f"对刀 {name}")
+            worker = CameraWorker("mock", camera.config.get("sn", f"{camera.backend}:{camera.config.get('device', name)}"), Adapter(camera, done), timeout_s=self.timeout_s, role=f"对刀 {name}")
             worker.needs_reopen = name in self.blocked
             try:
                 stage = "preview" if payload.get("stage") == "baseline_preview" else "对刀"
-                result[name], meta = worker.execute({"stage": stage, "task_id": payload.get("task_id")})
+                capture_payload = {"stage": stage, "task_id": payload.get("task_id")}
+                frame_index = 0
+                if requested is not None and time.monotonic() <= requested:
+                    raise ValueError("采图请求时间尚未到达")
+                if count > 1 and camera.backend == "uvc":
+                    # The exclusive worker has no continuous preview stream to
+                    # drain V4L2. Discard the queued buffers and one in-flight
+                    # exposure before collecting count distinct reads.
+                    buffers = int(camera.device.get(cv2.CAP_PROP_BUFFERSIZE)) or 4
+                    for _ in range(buffers + 1):
+                        done.clear()
+                        worker.execute({"stage": "preview", "task_id": payload.get("task_id")})
+                frames, starts = [], []
+                for frame_index in range(1, count + 1):
+                    done.clear()
+                    started = time.monotonic()
+                    image, frame_meta = worker.execute(capture_payload)
+                    frames.append(image)
+                    starts.append(started)
+                    if frame_index == 1:
+                        meta = frame_meta
+                result[name] = frames[0]
+                result.frames[name] = frames
+                result.capture_times[name] = starts
                 if str(payload.get("stage", "")).startswith("baseline_"):
                     continue
                 if self.events and self.events.run_directory is not None:
@@ -189,7 +223,9 @@ class CalibCameraWorker(AsyncRequestWorker):
                 if worker.needs_reopen:
                     self.blocked.add(name)
                 self.on_stop()
-                raise self._camera_error(exc) from exc
+                label = "正面" if name == "front" else "侧面"
+                detail = f"{label}第 {frame_index} 帧" if frame_index else f"{label}取流"
+                raise self._camera_error(RuntimeError(f"{detail}：{exc}")) from exc
             finally:
                 if worker.needs_reopen:
                     self.blocked.add(name)

@@ -369,10 +369,27 @@ def tooltip_time(value):
     return dt.strftime('%H:%M:%S') if dt else '—'
 
 
+def _with_baseline_detector_warning(state):
+    baseline = state.get('baseline') or {}
+    existing = baseline.get('existing') or {}
+    flagged = [(name, item['detector_warning']) for name, item in existing.items()
+               if item.get('detector_warning')]
+    if not flagged:
+        return state
+    notice = '；'.join(f'工具{name[-1]}：{warning}' for name, warning in flagged)
+    preview = baseline.get('preview') or {}
+    notice_hidden = (baseline.get('phase') in ('idle', 'done', 'prepare')
+                     and any((item or {}).get('on') or (item or {}).get('error') for item in preview.values()))
+    camera_warning = any(item.get('camera_differences') for item in existing.values())
+    field = 'message' if notice_hidden or camera_warning else 'notice'
+    value = '　'.join(part for part in (notice, baseline.get(field)) if part)
+    return {**state, 'baseline': {**baseline, field: value}}
+
+
 def supervisor_tooltip_main(main, supervisor, tooltip, *, supervisor_age=None, now=None):
     """Only show preparation state from the live, current supervisor."""
     if supervisor_live(supervisor, supervisor_age) and (supervisor.get('child_pid') or supervisor.get('child_state') in ('启动中', '运行', '就绪')):
-        return main
+        return _with_baseline_detector_warning(main)
     result = dict(main)
     result['mode'] = '空闲'
     pid = supervisor.get('pid')
@@ -396,4 +413,4 @@ def supervisor_tooltip_main(main, supervisor, tooltip, *, supervisor_age=None, n
     else:
         result['baseline'] = {'phase': 'unknown', 'message': '对刀状态未知或已过期', 'preview': {}}
         result['command_seq'] = 0
-    return result
+    return _with_baseline_detector_warning(result)
