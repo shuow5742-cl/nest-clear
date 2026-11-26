@@ -321,6 +321,9 @@ class Application:
             for tool in (1, 2):
                 if not accuracy[f'tool{tool}'].get('type'):
                     self.events.emit('warning', reason=f'工具{tool}挑取补偿未标定', tool=tool)
+                if not accuracy[f'tool{tool}'].get('z_calibrated'):
+                    logger.warning('工具%s 未做下针深度标定，生产与菲林模式将回退使用配置 pick_depth_z=%.3f mm', tool, config.pick_depth_z)
+                    self.events.emit('warning', reason=f'工具{tool} 未做下针深度标定', tool=tool)
             self.board = WorldBoard()
             self.clock = BTClock(self.board)
             for worker in (self.plc, self.camera, vision, CamcalWorker(), ToolOffsetWorker()):

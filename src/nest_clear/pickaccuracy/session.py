@@ -3,6 +3,7 @@ from collections import defaultdict
 import math
 import numpy as np
 
+from nest_clear.guard import GuardError
 from nest_clear.tooloffset.session import Session as OffsetSession, fit_similarity
 from nest_clear.vision.geometry import pixel_to_module
 from .store import evaluate
@@ -10,7 +11,9 @@ from .store import evaluate
 DEFAULTS = dict(center_tol_mm=.5, infield_warn_mm=.05, const_max_dev_mm=.05,
                 const_std_mm=.025, repeat_tol_mm=.03, verify_tol_mm=.05,
                 outlier_mm=.1, max_points=40, calib_tool_z_mm=-10.,
-                min_points_a=9, min_points_b=16, min_infield_corners=4)
+                min_points_a=9, min_points_b=16, min_infield_corners=4,
+                z_flat_tol_mm=.1, z_settle_samples=6, z_settle_window_s=.5,
+                z_jitter_tol_mm=.02)
 
 
 class Session(OffsetSession):
@@ -22,6 +25,7 @@ class Session(OffsetSession):
         self.offsets, self.fine_half, self.prior = offsets, fine_half, prior
         self.phase = 'overview'; self.samples = []; self.edges = []; self.skipped = []
         self.queue = []; self.candidate = None; self.sent = None; self.plan = None
+        self.pending_sample = None
         self.simple = bool(tool == 2 and prior)
         self.plans = {}
         self.available = None
@@ -148,40 +152,89 @@ class Session(OffsetSession):
         self.phase = 'tool'
         return 'tool'
 
-    def add_sample(self, actual):
-        if self.phase != 'tool' or self.sent is None: raise ValueError('当前不等待工具到位')
+    def add_xy_sample(self, actual):
+        """记录本测点 XY 对准样本并进入下针 Z 测量阶段。"""
+        if self.phase != 'tool' or self.sent is None:
+            raise ValueError('当前不等待工具到位')
         index, (stage, corner) = self.current, self.plan
         self.attempt_count += 1
-        residual = np.asarray(actual[:2])-np.asarray(self.sent[:2])
-        sample = {'target':f'T{index:02d}', 'target_xy_mm':self.measured[index].tolist(),
-                  'camera_xyz_mm':[float(v) for v in getattr(self, 'capture_pose', self.target_pose)], 'sent_xyz_mm':[float(v) for v in self.sent],
-                  'actual_xyz_mm':[float(v) for v in actual], 'residual_xy_mm':residual.tolist(),
-                  'stage':stage, 'corner':corner, 'outlier':False, 'retest':stage in ('repeat','outlier_retest'),
-                  'verification':stage == 'verify', 'camera_clamped':bool(self.camera_clamped), 'target_uv':self.target_uv}
+        residual = np.asarray(actual[:2]) - np.asarray(self.sent[:2])
+        self.pending_sample = {
+            'target': f'T{index:02d}',
+            'target_xy_mm': self.measured[index].tolist(),
+            'camera_xyz_mm': [float(v) for v in getattr(self, 'capture_pose', self.target_pose)],
+            'sent_xyz_mm': [float(v) for v in self.sent],
+            'actual_xyz_mm': [float(v) for v in actual],
+            'residual_xy_mm': residual.tolist(),
+            'stage': stage,
+            'corner': corner,
+            'outlier': False,
+            'retest': stage in ('repeat', 'outlier_retest'),
+            'verification': stage == 'verify',
+            'camera_clamped': bool(self.camera_clamped),
+            'target_uv': self.target_uv,
+        }
+        self.phase = 'z_step'
+        return 'z_step'
+
+    def record_z(self, z, z_jitter_mm=None):
+        """记录本测点下针 Z（不加减任何量）并校验 Z 行程后推进流程。"""
+        if self.phase != 'z_step' or self.pending_sample is None:
+            raise ValueError('当前不等待记录下针 Z')
+        z_val = float(z)
+        lo, hi = self.travel[2]
+        if not math.isfinite(z_val) or not lo <= z_val <= hi:
+            raise GuardError(
+                'POSITION-TRAVEL',
+                f'下针 Z {z_val} 超出 Z 行程范围 ({lo}, {hi})',
+                f'挑取精度标定 T{self.current:02d}',
+                '请将 Z 轴点动回行程范围内后重新按【记录下针 Z】。',
+            )
+        sample = dict(self.pending_sample)
+        sample['pick_z_mm'] = z_val
+        if z_jitter_mm is not None:
+            sample['z_jitter_mm'] = float(z_jitter_mm)
+        self.pending_sample = None
+        return self._commit_sample(sample)
+
+    def _commit_sample(self, sample):
+        index = int(sample['target'][1:])
+        stage, corner = sample['stage'], sample['corner']
+        residual = np.asarray(sample['residual_xy_mm'])
         self.samples.append(sample)
         if stage == 'infield':
-            base = [s['residual_xy_mm'] for s in self.samples if s['target'] == sample['target'] and s['stage'] in ('A','simple','outlier_retest') and not s.get('discarded')]
-            distance = float(np.linalg.norm(residual - np.mean(base,axis=0)))
-            self.edges.append({'corner':corner, 'distance_mm':distance, 'warning':distance > self.cfg['infield_warn_mm']})
-            if self.edges[-1]['warning']: self.warnings.append('框内误差不均，相机标定需复核')
+            base = [s['residual_xy_mm'] for s in self.samples if s['target'] == sample['target'] and s['stage'] in ('A', 'simple', 'outlier_retest') and not s.get('discarded')]
+            distance = float(np.linalg.norm(residual - np.mean(base, axis=0)))
+            self.edges.append({'corner': corner, 'distance_mm': distance, 'warning': distance > self.cfg['infield_warn_mm']})
+            if self.edges[-1]['warning']:
+                self.warnings.append('框内误差不均，相机标定需复核')
         elif stage == 'repeat':
-            first = next(s for s in self.samples if s['target']==sample['target'] and s['stage'] in ('A','B','simple','outlier_retest') and not s.get('discarded'))
-            if np.linalg.norm(residual-first['residual_xy_mm']) > self.cfg['repeat_tol_mm']:
+            first = next(s for s in self.samples if s['target'] == sample['target'] and s['stage'] in ('A', 'B', 'simple', 'outlier_retest') and not s.get('discarded'))
+            if np.linalg.norm(residual - first['residual_xy_mm']) > self.cfg['repeat_tol_mm']:
                 return self._fail('误差不可重复：检查机械间隙/标定卡是否移动/人工对准')
         elif stage == 'outlier_retest':
-            first = next(s for s in self.samples if s['target']==sample['target'] and s.get('outlier') and not s.get('resolved'))
+            first = next(s for s in self.samples if s['target'] == sample['target'] and s.get('outlier') and not s.get('resolved'))
             first['resolved'] = True
-            if np.linalg.norm(residual-first['residual_xy_mm']) > self.cfg['repeat_tol_mm']:
+            if np.linalg.norm(residual - first['residual_xy_mm']) > self.cfg['repeat_tol_mm']:
                 first['discarded'] = True
-        elif stage in ('A','B'):
-            baseline = [s['residual_xy_mm'] for s in self.samples[:-1] if s['stage'] in ('A','B','simple') and not s.get('discarded')]
-            if len(baseline) >= 3 and np.linalg.norm(residual-np.mean(baseline,axis=0)) > self.cfg['outlier_mm'] and index not in self.retested:
-                sample['outlier'] = True; self.retested.add(index)
-                self.queue.insert(0,(index,'outlier_retest',None))
+        elif stage in ('A', 'B'):
+            baseline = [s['residual_xy_mm'] for s in self.samples[:-1] if s['stage'] in ('A', 'B', 'simple') and not s.get('discarded')]
+            if len(baseline) >= 3 and np.linalg.norm(residual - np.mean(baseline, axis=0)) > self.cfg['outlier_mm'] and index not in self.retested:
+                sample['outlier'] = True
+                self.retested.add(index)
+                self.queue.insert(0, (index, 'outlier_retest', None))
         return self._move_next()
 
+    def add_sample(self, actual):
+        self.add_xy_sample(actual)
+        return self.record_z(actual[2])
+
     def discard(self):
-        self.attempt_count += 1
+        if self.phase not in ('tool', 'z_step'):
+            raise ValueError('当前不在可作废的测点阶段')
+        if self.phase == 'tool':
+            self.attempt_count += 1
+        self.pending_sample = None
         self.samples.append({'target':f'T{self.current:02d}', 'target_xy_mm':self.measured[self.current].tolist(),
                              'stage':'discard', 'discarded':True, 'reason':'本点作废重测'})
         self.queue.insert(0,(self.current,*self.plan))
@@ -299,7 +352,37 @@ class Session(OffsetSession):
         self.plans['repeat'] = [f'T{i:02d}' for i in repeat]
         self._queue(repeat,'repeat')
 
+    def z_summary(self):
+        """汇总全部非作废测点的下针 Z，按最大差阈值决定全盘最大值或位置 Z 表。"""
+        z_samples = [s for s in self.samples if not s.get('discarded') and s.get('pick_z_mm') is not None]
+        if not z_samples:
+            return {}
+        grouped = defaultdict(list)
+        for s in z_samples:
+            grouped[s['target']].append(s)
+        nodes = []
+        for target_name in sorted(grouped):
+            rows = grouped[target_name]
+            xy = np.mean([s['target_xy_mm'] for s in rows], axis=0)
+            z = float(np.mean([s['pick_z_mm'] for s in rows]))
+            nodes.append({'target': target_name, 'x': float(xy[0]), 'y': float(xy[1]), 'z': z, 'n': len(rows)})
+        zs = [n['z'] for n in nodes]
+        z_min, z_max = float(min(zs)), float(max(zs))
+        z_range = float(z_max - z_min)
+        threshold = float(self.cfg['z_flat_tol_mm'])
+        z_decision = {
+            'z_type': 'constant' if z_range <= threshold else 'table',
+            'min_z_mm': z_min,
+            'max_z_mm': z_max,
+            'range_mm': z_range,
+            'threshold_mm': threshold,
+            'point_count': len(nodes),
+        }
+        if z_range <= threshold:
+            return {'z_type': 'constant', 'z_mm': z_max, 'z_decision': z_decision}
+        return {'z_type': 'table', 'z_nodes': nodes, 'z_decision': z_decision}
+
     def result(self):
-        return dict(self.candidate, samples=self.samples, infield=self.edges, warnings=self.warnings,
+        return dict(self.candidate, **self.z_summary(), samples=self.samples, infield=self.edges, warnings=self.warnings,
                     skipped=self.skipped, decision=self.decision, plan=self.plans,
                     verification=[s for s in self.samples if s['stage']=='verify' and not s.get('superseded')])

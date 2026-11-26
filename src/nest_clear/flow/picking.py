@@ -108,51 +108,71 @@ class WorkRequest(Instant):
                 xyz = fine_camera_xy(target, pose, target_calibration)
                 guard_position(xyz, self.ctx.config.travel, "精定位拍照坐标")
                 return xyz
+            initial_cfg_tools = tuple(tuple(float(v) for v in o) for o in self.ctx.config.tools)
+            def current_tools_offsets() -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+                """读取当前工具偏移；若内存 config.tools 已变或磁盘 tools.yaml 已更新则实时生效。"""
+                from pathlib import Path
+                current_cfg = tuple(tuple(float(v) for v in o) for o in self.ctx.config.tools)
+                if current_cfg != initial_cfg_tools:
+                    return current_cfg
+                tools_path = Path(self.ctx.config.tool_calibration.directory) / 'tools.yaml'
+                result = list(current_cfg)
+                if tools_path.is_file():
+                    try:
+                        from nest_clear.tooltip.store import load_tools
+                        stored = load_tools(tools_path)['tools']
+                        for tool in (1, 2):
+                            item = stored[f'tool{tool}']
+                            if item.get('source') != '占位，未标定' or current_cfg[tool - 1] == (0.0, 0.0, 0.0):
+                                result[tool - 1] = tuple(float(v) for v in item['offset_xyz'])
+                    except Exception:
+                        pass
+                return tuple(result)
             def pick_coords(target: tuple[float, float, float]) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-                """分别补偿两把工具并守卫行程。"""
+                """分别补偿两把工具的 XY 与下针 Z（含换针 Z_ref 跟随）并守卫行程。"""
                 if getattr(self.ctx.events, "calibration_placeholder", False) and not self.ctx.config.vision.allow_placeholder_calibration:
                     raise GuardError("CALIBRATION-PLACEHOLDER", "相机标定为占位值，拒绝下发挑取坐标", "挑取坐标守卫", "完成相机标定。")
                 from pathlib import Path
-                from nest_clear.pickaccuracy.store import evaluate, read
+                from nest_clear.pickaccuracy.store import evaluate, read, resolve_pick_z
                 data = read(Path(self.ctx.config.tool_calibration.directory) / 'pick_compensation.yaml')
                 used = {}
+                z_sources = {}
                 def compensation(tool, xy):
                     delta = evaluate(data.get(f'tool{tool}'), xy)
                     used[f'tool{tool}'] = delta
                     return delta
+                offsets = current_tools_offsets()
+                result = []
+                for tool in (1, 2):
+                    entry = data.get(f'tool{tool}')
+                    pick_z, calibrated = resolve_pick_z(entry, target[:2], self.ctx.config.pick_depth_z, offsets[tool - 1][2])
+                    # calculate_pick_coords 内部计算 z = pick_depth_z + offset[2]；
+                    # 传入 base_z = pick_z - offset[2]，使最终下发 Z = z_calib(xy) + (offset_z_now - Z_ref)（未标定时为 pick_depth_z + offset_z_now）。
+                    base_z = pick_z - offsets[tool - 1][2]
+                    xyz = calculate_pick_coords(
+                        target, offsets, base_z,
+                        self.ctx.config.travel, task_id=bb.read('task_id'), tool=tool, compensation=compensation,
+                    )
+                    result.append(xyz)
+                    z_sources[f'tool{tool}'] = {
+                        'source': 'pick_compensation' if calibrated else 'pick_depth_z',
+                        'z_type': entry.get('z_type') if calibrated else None,
+                        'z_mm': float(xyz[2]),
+                        'z_ref': entry.get('z_ref') if calibrated else None,
+                    }
+                result = tuple(result)
                 if getattr(cycle, "film_mode", False):
-                    from nest_clear.tooloffset.store import load_pick_z
-                    z_sources = {}
-                    result = []
-                    for tool in (1, 2):
-                        try:
-                            source = load_pick_z(Path(self.ctx.config.tool_calibration.directory) / 'tool_offset.yaml', tool)
-                        except (OSError, ValueError):
-                            source = None
-                        if source is None:
-                            reason = f'工具{tool} 缺少工具偏移标定下针 Z，请先完成工具偏移标定'
-                            cycle.film_failure = reason
-                            raise GuardError('FILM-PICK-Z', reason, '菲林测试挑取坐标', '完成对应工具的工具偏移标定。')
-                        z, samples = source
-                        xyz = calculate_pick_coords(target, self.ctx.config.tools, z - self.ctx.config.tools[tool-1][2],
-                                                    self.ctx.config.travel, task_id=bb.read('task_id'), tool=tool, compensation=compensation)
-                        guard_position(xyz, self.ctx.config.travel, f'菲林测试工具{tool}挑取坐标')
-                        result.append(xyz)
-                        z_sources[f'tool{tool}'] = {'sample_count': len(samples), 'max_z': z}
-                    result = tuple(result)
-                    cycle.film_pending = {'tray': cycle.tray, 'view': cycle.view_index + 1,
-                                          'target': getattr(cycle.current_target(), 'film_label', None), 'pickable': True,
-                                          'target_xy': target[:2], 'pick1_xyz': result[0], 'pick2_xyz': result[1], 'z_sources': z_sources}
-                else:
-                    result = calculate_pick_coords(target, self.ctx.config.tools, self.ctx.config.pick_depth_z,
-                                                   self.ctx.config.travel, task_id=bb.read('task_id'), compensation=compensation)
-                self.ctx.events.emit('pick_compensation_used', task_id=bb.read('task_id'), target_xy=target[:2], compensation=used)
+                    cycle.film_pending = {
+                        'tray': cycle.tray, 'view': cycle.view_index + 1,
+                        'target': getattr(cycle.current_target(), 'film_label', None), 'pickable': True,
+                        'target_xy': target[:2], 'pick1_xyz': result[0], 'pick2_xyz': result[1], 'z_sources': z_sources,
+                    }
+                self.ctx.events.emit('pick_compensation_used', task_id=bb.read('task_id'), target_xy=target[:2], compensation=used, z_sources=z_sources)
                 return result
             def reachable(target: tuple[float, float, float]) -> bool:
-                # 与实际下发使用同一标定和补偿，但不写事件或 film_pending。
+                # 与实际下发使用同一标定、XY 补偿与下针 Z（含 Z_ref 跟随），但不写事件或 film_pending。
                 from pathlib import Path
-                from nest_clear.pickaccuracy.store import evaluate, read
-                from nest_clear.tooloffset.store import load_pick_z
+                from nest_clear.pickaccuracy.store import evaluate, read, resolve_pick_z
                 cfg = self.ctx.config
                 cal = getattr(cycle, "film_calibration", None) if cycle.film_mode else calibration
                 if cal is None:
@@ -164,17 +184,11 @@ class WorkRequest(Instant):
                 if not inside(camera):
                     return False
                 data = read(Path(cfg.tool_calibration.directory) / 'pick_compensation.yaml')
-                for tool, offset in enumerate(cfg.tools, 1):
-                    delta = evaluate(data.get(f'tool{tool}'), target[:2])
-                    z = cfg.pick_depth_z + offset[2]
-                    if cycle.film_mode:
-                        try:
-                            source = load_pick_z(Path(cfg.tool_calibration.directory) / 'tool_offset.yaml', tool)
-                        except (OSError, ValueError):
-                            source = None
-                        if source is None:
-                            return True  # 保留缺少标定时原有的明确异常应答
-                        z = source[0]
+                offsets = current_tools_offsets()
+                for tool, offset in enumerate(offsets, 1):
+                    entry = data.get(f'tool{tool}')
+                    delta = evaluate(entry, target[:2])
+                    z, _ = resolve_pick_z(entry, target[:2], cfg.pick_depth_z, offset[2])
                     if not inside((target[0] + offset[0] + delta[0],
                                    target[1] + offset[1] + delta[1], z)):
                         return False
@@ -185,8 +199,16 @@ class WorkRequest(Instant):
                 fields.setdefault("xid", getattr(self.ctx.events, "xid", 0))
                 self.ctx.events.emit(event, **fields)
             from nest_clear.film_mode import start_tray
+            from nest_clear.pickaccuracy.store import has_calibrated_z, read as read_pick_comp
+            from pathlib import Path
             film_mode = start_tray(self.ctx.config.record_directory)
             self.ctx.events.emit("film_mode_tray", enabled=film_mode, tool_check_disabled=film_mode, tray=getattr(self.ctx.events, "tray_id", None))
+            comp_data = read_pick_comp(Path(self.ctx.config.tool_calibration.directory) / 'pick_compensation.yaml')
+            for tool in (1, 2):
+                if not has_calibrated_z(comp_data.get(f'tool{tool}')):
+                    reason = f'工具{tool} 未做下针深度标定'
+                    logger.warning('%s，将回退使用配置 pick_depth_z=%.3f mm', reason, self.ctx.config.pick_depth_z)
+                    self.ctx.events.emit('warning', reason=reason, tool=tool)
             cycle = WorkCycle(self.ctx.path, fine_coord, pick_coords, self.ctx.config.vision,
                               record=record, tray=getattr(self.ctx.events, "tray_id", None) or "0000", film_mode=film_mode, reachable=reachable)
             if film_mode:

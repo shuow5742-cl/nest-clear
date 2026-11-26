@@ -242,9 +242,18 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert ui.pickacc_start.options['state'] == 'normal'
         ui.update_pickacc({'pickacc':{'phase':'tool_in_place','tool':2,'target':'T12','predicted':{'T12':[100,50]},'samples':[{'target':'T12','target_xy_mm':[100,50],'residual_xy_mm':[.02,.01]}]},'command_seq':0})
         assert ui.pickacc_calculate.options['state'] == 'normal'
+        assert ui.pickacc_record_z.options['state'] == 'disabled'
         assert len(ui.pickacc_table.rows) == 1
+        ui.update_pickacc({'pickacc':{'phase':'z_step','tool':2,'target':'T12','predicted':{'T12':[100,50]},'z_jitter_mm':0.008,'pending_sample':{'target':'T12','target_xy_mm':[100,50],'residual_xy_mm':[.02,.01],'stage':'A'},'samples':[{'target':'T02','target_xy_mm':[90,40],'residual_xy_mm':[.01,.01],'stage':'A','pick_z_mm':-10.05}]},'command_seq':0})
+        assert ui.pickacc_calculate.options['state'] == 'disabled'
+        assert ui.pickacc_record_z.options['state'] == 'normal'
+        assert ui.pickacc_discard.options['state'] == 'normal'
+        assert len(ui.pickacc_table.rows) == 2
+        assert '0.008 mm' in ui.pickacc_z_info.options['text']
+        assert '-10.050' in ui.pickacc_z_info.options['text']
         ui.update_pickacc({'pickacc':{'phase':'wait_tool','tool':2},'command_seq':0})
         assert ui.pickacc_calculate.options['state'] == 'disabled'
+        assert ui.pickacc_record_z.options['state'] == 'disabled'
         ui.update_baseline({'baseline':{'phase':'select'},'command_seq':0})
         assert all(b.options['state'] == 'normal' for b in ui.baseline_tools)
         ui.update_baseline({'baseline':{'phase':'live','tool':1,'live_delta':[0.01,-0.02],'live_inside':True,'existing':{'tool1':{'tool_offset_missing':True}}},'command_seq':0})
@@ -868,3 +877,39 @@ def test_exposure_sweep_ack_matches_request(monkeypatch):
     ui.exposure_cache = json.dumps([completed, None], ensure_ascii=False, sort_keys=True)
     ui.update_exposure({'exposure_sweep': completed})
     assert not ui.sweep_pending
+
+
+def test_pick_z_banner_warns_when_uncalibrated(tmp_path, monkeypatch):
+    import sys
+    for module in ('cv2', 'numpy', 'yaml'):
+        monkeypatch.setitem(sys.modules, module, None)
+    from nest_clear.ui import app
+    write_demo(tmp_path, initial=True)
+    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
+        monkeypatch.setattr(app.tk, name, Widget)
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox', 'Spinbox'):
+        monkeypatch.setattr(app.ttk, name, Widget)
+    monkeypatch.setattr(app.ttk, 'Style', Style)
+    monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
+    class FakeCard(Widget):
+        def __init__(self, parent, title, theme):
+            super().__init__(parent); self.body = Widget(self); self.title_label = Widget(self)
+    class FakePicture(Widget):
+        def __init__(self, parent, path, theme):
+            super().__init__(parent); self.image = None
+        def poll(self): pass
+    class FakeKeyValueGrid(Widget):
+        def __init__(self, parent, keys, theme): super().__init__(parent); self.values_data = {}
+        def set(self, values): self.values_data = values
+    monkeypatch.setattr(app, 'Card', FakeCard)
+    monkeypatch.setattr(app, 'Picture', FakePicture)
+    monkeypatch.setattr(app, 'KeyValueGrid', FakeKeyValueGrid)
+    ui = app.App(tmp_path, page='pickacc', ignore_before_ns=0)
+    original_fd = ui.file_data
+    ui.file_data = lambda path: ({'mode':'空闲','pickacc':{'existing':{'tool1':{'type':'constant'},'tool2':{'type':'constant','z_type':'constant','z_mm':-10.0,'z_calibrated':True}}}} if path.name == 'main_status.json' else original_fd(path))
+    ui.refresh()
+    assert ui.pick_z_banner.visible
+    assert '工具1 未做下针深度标定' in ui.pick_z_banner.options['text']
+    ui.file_data = lambda path: ({'mode':'空闲','pickacc':{'existing':{'tool1':{'type':'constant','z_type':'constant','z_mm':-10.0,'z_calibrated':True},'tool2':{'type':'constant','z_type':'constant','z_mm':-10.0,'z_calibrated':True}}}} if path.name == 'main_status.json' else original_fd(path))
+    ui.refresh()
+    assert not ui.pick_z_banner.visible

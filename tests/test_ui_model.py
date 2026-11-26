@@ -106,6 +106,7 @@ def test_pickacc_text_and_notes():
 
 def test_pickacc_demo_uses_real_plans_and_geometry():
     from nest_clear.ui.demo import pickacc_demo
+    from nest_clear.ui.model import pickacc_z_missing_tools, pickacc_z_summary_text, pickacc_z_type
     first=['T02','T03','T05','T10','T12','T21','T26','T28','T29']
     sixteen={'T02','T03','T04','T05','T10','T11','T12','T13','T18','T19','T20','T21','T26','T27','T28','T29'}
     select=pickacc_demo('select','2026-01-01')
@@ -113,6 +114,16 @@ def test_pickacc_demo_uses_real_plans_and_geometry():
     table=pickacc_demo('table','2026-01-01')
     assert [s['target'] for s in table['samples'] if s['stage']=='A']==first
     assert {s['target'] for s in table['samples'] if s['stage'] in ('A','B')}==sixteen
+    assert table['candidate']['z_type'] == 'table'
+    constant=pickacc_demo('constant','2026-01-01')
+    assert constant['candidate']['z_type'] == 'constant'
+    z_step=pickacc_demo('z_step','2026-01-01')
+    assert z_step['phase'] == 'z_step' and z_step['pending_sample']['target'] == 'T12'
+    assert pickacc_z_missing_tools(z_step['existing']) == [2]
+    assert pickacc_z_missing_tools(constant['existing']) == []
+    assert '全盘最大值' in pickacc_z_summary_text(constant)
+    assert 'Z 表插值' in pickacc_z_summary_text(table)
+    assert pickacc_z_type('constant') == '全盘最大值' and pickacc_z_type('table') == 'Z 表插值'
     simple=pickacc_demo('tool_in_place','2026-01-01')
     assert [s['target'] for s in simple['samples']]+[q['target'] for q in simple['queue']]==['T02','T05','T26','T29','T12']
     p=table['predicted']

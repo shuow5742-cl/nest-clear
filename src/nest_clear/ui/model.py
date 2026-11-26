@@ -123,6 +123,58 @@ def pickacc_type(value):
     return {'constant':'固定补偿', 'table':'补偿表'}.get(value, '未标定' if not value else value)
 
 
+def pickacc_z_type(value):
+    return {'constant': '全盘最大值', 'table': 'Z 表插值'}.get(value, '未标定' if not value else value)
+
+
+def pickacc_z_summary_text(data):
+    """格式化当前点 Z、已测点 Z 列表、当前极差及最终 Z 模式。"""
+    samples = data.get('samples') or []
+    z_rows = [(s.get('target'), s.get('pick_z_mm')) for s in samples if not s.get('discarded') and isinstance(s.get('pick_z_mm'), (int, float))]
+    pending = data.get('pending_sample') or {}
+    phase = data.get('phase')
+    if phase == 'z_step':
+        current_z = f"待测（{pending.get('target') or data.get('target') or '当前点'} 压住 0.05mm 塞尺后按【记录下针 Z】）"
+    elif z_rows:
+        current_z = f'{z_rows[-1][0]} {z_rows[-1][1]:.3f} mm'
+    else:
+        current_z = '—'
+    jitter = data.get('z_jitter_mm')
+    jitter_text = f'{jitter:.3f} mm' if isinstance(jitter, (int, float)) else '—'
+    if z_rows:
+        zs = [z for _, z in z_rows]
+        recent = '、'.join(f'{t}:{z:.3f}' for t, z in z_rows[-8:])
+        if len(z_rows) > 8:
+            recent = '… ' + recent
+        list_text = f'{len(z_rows)} 点（{min(zs):.3f}~{max(zs):.3f}，差 {max(zs)-min(zs):.3f} mm）[{recent}]'
+    else:
+        list_text = '无'
+    candidate = data.get('candidate') or {}
+    z_summary = data.get('z_summary') or {}
+    z_src = candidate if candidate.get('z_type') else z_summary
+    z_type = z_src.get('z_type')
+    z_decision = z_src.get('z_decision') or {}
+    if z_type == 'constant' and isinstance(z_src.get('z_mm'), (int, float)):
+        mode_text = f"全盘最大值 {z_src['z_mm']:.3f} mm（最大差 {z_decision.get('range_mm', 0):.3f} ≤ {z_decision.get('threshold_mm', 0.1):.3f} mm）"
+    elif z_type == 'table':
+        mode_text = f"Z 表插值（{len(z_src.get('z_nodes') or [])} 点，{z_decision.get('min_z_mm', 0):.3f}~{z_decision.get('max_z_mm', 0):.3f} mm，最大差 {z_decision.get('range_mm', 0):.3f} > {z_decision.get('threshold_mm', 0.1):.3f} mm）"
+    else:
+        mode_text = '待判定'
+    return f'该点 Z：{current_z}　|　当前极差：{jitter_text}　|　已测 Z：{list_text}\n下针 Z 模式：{mode_text}'
+
+
+def pickacc_z_missing_tools(existing):
+    """返回未做下针深度标定的工具编号列表；existing 为空时不报错。"""
+    if not isinstance(existing, dict) or not existing:
+        return []
+    missing = []
+    for tool in (1, 2):
+        old = existing.get(f'tool{tool}')
+        if isinstance(old, dict) and not old.get('z_calibrated') and old.get('z_type') not in ('constant', 'table'):
+            missing.append(tool)
+    return missing
+
+
 def pickacc_stage(value):
     return {'A':'第一轮', 'B':'补点', 'repeat':'重复性', 'verify':'验证',
             'infield':'视野内', 'simple':'工具2简化', 'outlier_retest':'离群重测',

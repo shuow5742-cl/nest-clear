@@ -35,6 +35,10 @@ def pickacc_demo(state, stamp):
     simple = (2,5,26,29,12)
     tool = 2 if state == 'tool_in_place' else 1
     samples=[]
+    def z_for(index, xy):
+        if state == 'table':
+            return round(-10.02 - 0.0025 * (xy[0] - 85.0) - 0.0012 * (xy[1] - 10.0), 3)
+        return round(-10.02 - 0.006 * (index % 7), 3)
     def add(index, stage, *, corner=None, retest=False, verification=False):
         xy=position(index); number=len(samples)
         residual=[.012,.008] if verification else [.02+(number % 3)*.02, -.02]
@@ -42,14 +46,23 @@ def pickacc_demo(state, stamp):
         actual=[sent[0]+residual[0],sent[1]+residual[1],-10]
         samples.append({'target':f'T{index:02d}', 'target_xy_mm':xy, 'sent_xyz_mm':sent,
                         'actual_xyz_mm':actual, 'residual_xy_mm':residual, 'stage':stage,
-                        'corner':corner, 'retest':retest, 'verification':verification})
+                        'corner':corner, 'retest':retest, 'verification':verification,
+                        'pick_z_mm': z_for(index, xy)})
+    pending_sample = None
     if state == 'wait_tool':
         for index in first[:4]: add(index,'A')
         pending=first[4:]; current=12
     elif state == 'tool_in_place':
         for index in simple[:4]: add(index,'simple')
         pending=simple[4:]; current=12
-    elif state in ('table','confirm'):
+    elif state == 'z_step':
+        for index in first[:4]: add(index,'A')
+        pending=first[5:]; current=12
+        xy = position(12)
+        pending_sample = {'target':'T12', 'target_xy_mm':xy, 'sent_xyz_mm':[xy[0]+1,xy[1]-1,-10],
+                          'actual_xyz_mm':[xy[0]+1.03,xy[1]-1.02,-10], 'residual_xy_mm':[.03,-.02],
+                          'stage':'A', 'corner':None, 'retest':False, 'verification':False}
+    elif state in ('table','confirm','constant'):
         for index in first: add(index,'A')
         for corner in ((-1,-1),(-1,1),(1,-1),(1,1)): add(12,'infield',corner=corner)
         if state == 'table':
@@ -62,26 +75,46 @@ def pickacc_demo(state, stamp):
         pending=first; current=None
     phases={'select':('select','请按【开始】'), 'wait_tool':('wait_tool','请等待工具前往'),
             'tool_in_place':('tool_in_place','工具已到位，调整好后按【计算补偿】'),
-            'table':('wait150','等待下一相机位置'), 'confirm':('confirm','等待确认覆盖')}
+            'z_step':('z_step','XY 已记录；请放 0.05mm 塞尺并点动工具尖刚好压住塞尺，按【记录下针 Z】'),
+            'constant':('done','保存成功（全盘下针 Z 最大值）'),
+            'table':('done','保存成功（挑取 Z 表）'), 'confirm':('confirm','等待确认覆盖')}
     phase,message=phases[state]
-    infield=[{'corner':corner,'distance_mm':distance,'warning':distance>.05} for corner,distance in zip(((-1,-1),(-1,1),(1,-1),(1,1)),(.021,.028,.070,.032))] if state in ('table','confirm') else []
+    infield=[{'corner':corner,'distance_mm':distance,'warning':distance>.05} for corner,distance in zip(((-1,-1),(-1,1),(1,-1),(1,1)),(.021,.028,.070,.032))] if state in ('table','confirm','constant') else []
     candidate={}
+    z_rows=[s for s in samples if not s.get('discarded') and s.get('pick_z_mm') is not None]
+    z_summary={}
+    if z_rows:
+        grouped={}
+        for s in z_rows: grouped.setdefault(s['target'],[]).append(s)
+        z_nodes=[]
+        for tgt in sorted(grouped):
+            rows=grouped[tgt]
+            z_nodes.append({'target':tgt,'x':sum(r['target_xy_mm'][0] for r in rows)/len(rows),'y':sum(r['target_xy_mm'][1] for r in rows)/len(rows),'z':sum(r['pick_z_mm'] for r in rows)/len(rows),'n':len(rows)})
+        zs=[n['z'] for n in z_nodes]; z_min,z_max=min(zs),max(zs); z_rng=z_max-z_min
+        z_dec={'z_type':'constant' if z_rng<=.1 else 'table','min_z_mm':z_min,'max_z_mm':z_max,'range_mm':z_rng,'threshold_mm':.1,'point_count':len(z_nodes)}
+        z_summary={'z_type':'constant','z_mm':z_max,'z_decision':z_dec} if z_rng<=.1 else {'z_type':'table','z_nodes':z_nodes,'z_decision':z_dec}
     if state=='table':
         nodes=[]
         for index in table:
             sample=next(s for s in samples if s['target']==f'T{index:02d}' and s['stage'] in ('A','B'))
             xy=sample['target_xy_mm']; r=sample['residual_xy_mm']
             nodes.append({'x':xy[0],'y':xy[1],'dx':r[0],'dy':r[1]})
-        candidate={'type':'table','nodes':nodes}
-    elif state=='confirm':
-        candidate={'type':'constant','constant_xy':[.081,-.048], 'verification':[s for s in samples if s['verification']]}
+        candidate={'type':'table','nodes':nodes,**z_summary,'z_ref':0.0}
+    elif state in ('confirm','constant'):
+        candidate={'type':'constant','constant_xy':[.081,-.048],**z_summary,'z_ref':0.0,'verification':[s for s in samples if s['verification']]}
+    existing_tool2 = {'type':'table','time':stamp,'verification':[{}],'stale':True}
+    if state != 'z_step':
+        existing_tool2.update(z_type='constant', z_mm=-10.050, z_calibrated=True, z_ref=0.0)
     return {'phase':phase, 'tool':tool, 'plc_tool_id':tool, 'message':message,
             'target':f'T{current:02d}' if current is not None else None,
             'predicted':{f'T{i:02d}':position(i) for i in set(table) | set(simple)},
             'queue':[{'target':f'T{i:02d}','stage':'simple' if tool==2 else 'A'} for i in pending],
-            'samples':samples, 'infield':infield, 'decision':({'max_dev_mm':.071,'std_mm':.027} if state=='table' else {'max_dev_mm':.022,'std_mm':.010}) if candidate else {},
-            'existing':{'tool1':{'type':'constant','constant_xy':[.08,-.05],'time':stamp,'verification':[{},{}]},
-                        'tool2':{'type':'table','time':stamp,'verification':[{}],'stale':True}}, 'candidate':candidate}
+            'samples':samples, 'pending_sample':pending_sample,
+            'z_jitter_mm': 0.009 if state in ('z_step','constant','table','confirm') else None,
+            'z_summary': z_summary,
+            'infield':infield, 'decision':({'max_dev_mm':.071,'std_mm':.027} if state=='table' else {'max_dev_mm':.022,'std_mm':.010}) if candidate else {},
+            'existing':{'tool1':{'type':'constant','constant_xy':[.08,-.05],'z_type':'constant','z_mm':-10.020,'z_calibrated':True,'z_ref':0.0,'time':stamp,'verification':[{},{}]},
+                        'tool2':existing_tool2}, 'candidate':candidate}
 
 
 def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None, focus_state=None, camcal_state=None, wb_state=None, temporary_exposure=False, film_mode=False):
@@ -295,7 +328,7 @@ def generate(root):
 
 def main():
     from .__main__ import add_view_arguments, validate_view_arguments
-    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm','prepare','prepare_error','prepare_unassigned')); parser.add_argument('--tooltip-state', choices=('idle','probe','confirm_move','in_range','done','fail')); add_view_arguments(parser)
+    parser = argparse.ArgumentParser(); parser.add_argument('--root', required=True); parser.add_argument('--preview-state', choices=('on', 'off', 'blocked'), default='on'); parser.add_argument('--offset-state', choices=('select','wait_tool','edge','confirm')); parser.add_argument('--pickacc-state', choices=('select','wait_tool','tool_in_place','z_step','constant','table','confirm')); parser.add_argument('--baseline-state', choices=('select','live','success','fail','confirm','prepare','prepare_error','prepare_unassigned')); parser.add_argument('--tooltip-state', choices=('idle','probe','confirm_move','in_range','done','fail')); add_view_arguments(parser)
     parser.add_argument('--film-mode', action='store_true')
     parser.add_argument('--temporary-exposure', action='store_true')
     parser.add_argument('--wb-state', choices=('running','success','fail'), default=None)

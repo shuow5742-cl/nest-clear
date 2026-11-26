@@ -17,7 +17,8 @@ from PIL import Image, ImageGrab, ImageTk
 from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file, ui_command_file, tooltip_preview_file
 from .model import (EventTail, camcal_progress, decode_status, display_time, duration,
                     read_json, status_indicators, parent_process_row, child_process_row, tooltip_progress, preview_controls, edge_corner_label,
-                    pickacc_tray_geometry, pickacc_type, pickacc_stage, pickacc_note, pickacc_infield,
+                    pickacc_tray_geometry, pickacc_type, pickacc_z_type, pickacc_z_summary_text, pickacc_z_missing_tools,
+                    pickacc_stage, pickacc_note, pickacc_infield,
                     tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time, page_for_mode,
                     baseline_preview_display, extract_tooltip_preview)
 
@@ -327,6 +328,7 @@ class App:
             banner.grid(row=0, column=0, sticky='ew', padx=6, pady=(4, 0))
         self.film_banner = tk.Label(self.root, text='主流程测试模式（菲林片）已开启：识别菲林片目标，非燕窝挑毛',
                                     bg='#b00020', fg='white', font=self.theme.status, anchor='center', padx=8, pady=5)
+        self.pick_z_banner = tk.Label(self.root, text='', bg='#fef0c7', fg='#b42318', font=self.theme.title, anchor='center', padx=8, pady=4)
         self.tail = EventTail(root); self.pictures = []; self.cache = {}; self.events = []; self.files = {}
         self.last_mode = read_json(main_status_file(self.directory)).get('mode') if page is not None else None
         self.build_status()
@@ -365,7 +367,10 @@ class App:
             x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
             width, height = self.root.winfo_width(), self.root.winfo_height()
             target = Path(path); target.parent.mkdir(parents=True, exist_ok=True)
-            ImageGrab.grab(bbox=(x, y, x + width, y + height)).save(target)
+            shot = ImageGrab.grab(bbox=(x, y, x + width, y + height))
+            if hasattr(shot, 'convert'):
+                shot = shot.convert('RGB')
+            shot.save(target)
         finally:
             self.root.destroy()
 
@@ -1313,9 +1318,11 @@ class App:
         controls=tk.Frame(head,bg=WHITE); controls.grid(row=1,column=0,sticky='ew'); controls.columnconfigure(4,weight=1)
         self.pickacc_start=ttk.Button(controls,text='开始',command=lambda:self.pickacc_command('pickacc_start')); self.pickacc_start.grid(row=0,column=0,padx=4)
         self.pickacc_calculate=ttk.Button(controls,text='计算补偿',style='OffsetPlace.TButton',command=lambda:self.pickacc_command('pickacc_calculate')); self.pickacc_calculate.grid(row=0,column=5,padx=4)
-        self.pickacc_discard=ttk.Button(controls,text='本点作废重测',command=lambda:self.pickacc_command('pickacc_discard')); self.pickacc_discard.grid(row=0,column=6,padx=4)
-        self.pickacc_abort=ttk.Button(controls,text='放弃本次标定',command=lambda:self.pickacc_command('abort')); self.pickacc_abort.grid(row=0,column=7,padx=4)
+        self.pickacc_record_z=ttk.Button(controls,text='记录下针 Z',style='OffsetPlace.TButton',command=lambda:self.pickacc_command('pickacc_record_z')); self.pickacc_record_z.grid(row=0,column=6,padx=4)
+        self.pickacc_discard=ttk.Button(controls,text='本点作废重测',command=lambda:self.pickacc_command('pickacc_discard')); self.pickacc_discard.grid(row=0,column=7,padx=4)
+        self.pickacc_abort=ttk.Button(controls,text='放弃本次标定',command=lambda:self.pickacc_command('abort')); self.pickacc_abort.grid(row=0,column=8,padx=4)
         self.pickacc_existing=tk.Label(head,text='',bg=WHITE,fg=COLORS['yellow'],font=self.theme.body,anchor='w',justify='left'); self.pickacc_existing.grid(row=2,column=0,sticky='ew')
+        self.pickacc_z_info=tk.Label(head,text='',bg=WHITE,fg=INK,font=self.theme.body,anchor='w',justify='left'); self.pickacc_z_info.grid(row=3,column=0,sticky='ew')
         images=tk.Frame(self.pickacc,bg=BG); images.grid(row=1,column=0,sticky='nsew'); images.columnconfigure(0,weight=3); images.columnconfigure(1,weight=2); images.rowconfigure(0,weight=1)
         self.picture(self.card(images,'相机画面 · 点击放大',0,0),'pickacc_latest')
         self.picture(self.card(images,'当前目标放大图',0,1),'pickacc_crop')
@@ -1323,8 +1330,8 @@ class App:
         self.pickacc_tray_title=tray.master.title_label
         self.pickacc_tray=tk.Canvas(tray,bg=WHITE,highlightthickness=0); self.pickacc_tray.grid(row=0,column=0,sticky='nsew')
         table=self.card(self.pickacc,'测点记录',2,0,columnspan=2)
-        columns=('序号','目标','阶段','下发 XY','实到 XY','dx','dy','|r|','备注')
-        self.pickacc_table=self.table_widget(table,columns,(55,60,95,165,165,75,75,75,190))
+        columns=('序号','目标','阶段','下发 XY','实到 XY','dx','dy','|r|','下针 Z','备注')
+        self.pickacc_table=self.table_widget(table,columns,(50,55,90,155,155,70,70,70,80,175))
         scroll=ttk.Scrollbar(table,orient='vertical',command=self.pickacc_table.yview); scroll.grid(row=0,column=1,sticky='ns'); self.pickacc_table.configure(yscrollcommand=scroll.set,style='Offset.Treeview')
         self.pickacc_stats=tk.Label(table,text='',bg=WHITE,fg=INK,font=self.theme.body,anchor='w'); self.pickacc_stats.grid(row=1,column=0,sticky='ew')
 
@@ -1337,26 +1344,48 @@ class App:
         tool=data.get('tool')
         self.pickacc_plc_id.config(text=f"40905={data.get('plc_tool_id', '—')}")
         self.pickacc_heading.config(text=f'当前：工具{tool}（PLC 指定）' if tool in (1, 2) else '当前：等待 PLC 指定',bg='#2563eb' if tool==1 else '#d56713' if tool==2 else '#667085')
-        self.pickacc_message.config(text=getattr(self, 'pickacc_command_message', '') or ('上一条命令处理中' if self.pickacc_pending else data.get('message')) or '等待 PLC 请求', fg=COLORS['red'] if getattr(self, 'pickacc_command_message', '') else INK)
+        self.pickacc_message.config(text=getattr(self, 'pickacc_command_message', '') or ('上一条命令处理中' if self.pickacc_pending else data.get('message')) or '等待 PLC 请求', fg=COLORS['red'] if getattr(self, 'pickacc_command_message', '') else COLORS['blue'] if phase=='z_step' else INK)
         self.pickacc_start.config(state='normal' if phase=='select' and tool in (1, 2) and not self.pickacc_pending else 'disabled')
-        for b in (self.pickacc_calculate,self.pickacc_discard): b.config(state='normal' if phase=='tool_in_place' and not self.pickacc_pending else 'disabled')
+        self.pickacc_calculate.config(state='normal' if phase=='tool_in_place' and not self.pickacc_pending else 'disabled')
+        self.pickacc_record_z.config(state='normal' if phase=='z_step' and not self.pickacc_pending else 'disabled')
+        self.pickacc_discard.config(state='normal' if phase in ('tool_in_place','z_step') and not self.pickacc_pending else 'disabled')
         self.pickacc_abort.config(state='normal' if phase not in (None,'idle','done','failed') and not self.pickacc_pending else 'disabled')
         summaries=[]
         for i in (1,2):
             old=(data.get('existing') or {}).get(f'tool{i}') or {}
-            summaries.append(f"工具{i}：{pickacc_type(old.get('type'))} {display_time(old.get('time'))} 验证 {len(old.get('verification',[]))}点" + (f'　工具{i} 偏移/相机标定已变更，挑取补偿需重新验证' if old.get('stale') else ''))
+            z_type=old.get('z_type')
+            if z_type=='constant' and isinstance(old.get('z_mm'), (int, float)):
+                z_label=f"Z=全盘 {old['z_mm']:.3f}mm"
+            elif z_type=='table':
+                z_label=f"Z=Z表({len(old.get('z_nodes') or [])}点)"
+            else:
+                z_label=f"⚠ 工具{i} 未做下针深度标定"
+            summaries.append(f"工具{i}：{pickacc_type(old.get('type'))} {z_label} {display_time(old.get('time'))} 验证 {len(old.get('verification',[]))}点" + (f'　工具{i} 偏移/相机标定已变更，挑取补偿需重新验证' if old.get('stale') else ''))
         self.pickacc_existing.config(text='　｜　'.join(summaries))
+        jitter=data.get('z_jitter_mm')
+        self.pickacc_z_info.config(text=pickacc_z_summary_text(data), fg=COLORS['red'] if isinstance(jitter, (int, float)) and jitter > 0.02 else COLORS['blue'] if phase=='z_step' else INK)
         self.pickacc_table.delete(*self.pickacc_table.get_children())
         import math
-        for i,s in enumerate(data.get('samples') or [],1):
+        rows_to_show=list(data.get('samples') or [])
+        if phase=='z_step' and isinstance(data.get('pending_sample'), dict):
+            rows_to_show.append(data['pending_sample'])
+        for i,s in enumerate(rows_to_show,1):
             r=s.get('residual_xy_mm'); sent=s.get('sent_xyz_mm'); actual=s.get('actual_xyz_mm')
             xy=lambda v: f'{v[0]:.3f}, {v[1]:.3f}' if v and len(v)>=2 else '—'
-            self.pickacc_table.insert('','end',values=(i,s.get('target'),pickacc_stage(s.get('stage')),xy(sent),xy(actual),f'{r[0]:.3f}' if r else '—',f'{r[1]:.3f}' if r else '—',f'{math.hypot(*r):.3f}' if r else '—',pickacc_note(s)))
-        decision=data.get('decision') or {}; candidate=data.get('candidate') or {}
+            pz=s.get('pick_z_mm')
+            z_text=f'{pz:.3f}' if isinstance(pz,(int,float)) else ('待测(压塞尺)' if s is data.get('pending_sample') else '—')
+            self.pickacc_table.insert('','end',values=(i,s.get('target'),pickacc_stage(s.get('stage')),xy(sent),xy(actual),f'{r[0]:.3f}' if r else '—',f'{r[1]:.3f}' if r else '—',f'{math.hypot(*r):.3f}' if r else '—',z_text,pickacc_note(s)))
+        decision=data.get('decision') or {}; candidate=data.get('candidate') or {}; z_src=candidate if candidate.get('z_type') else (data.get('z_summary') or {})
         mode=pickacc_type(candidate['type']) if candidate.get('type') else '待判定'
+        z_mode=pickacc_z_type(z_src.get('z_type'))
+        if z_src.get('z_type')=='constant' and isinstance(z_src.get('z_mm'),(int,float)):
+            z_mode+=f" {z_src['z_mm']:.3f}mm"
+        elif z_src.get('z_type')=='table':
+            z_dec=z_src.get('z_decision') or {}
+            z_mode+=f" ({len(z_src.get('z_nodes') or [])}点 {z_dec.get('min_z_mm',0):.3f}~{z_dec.get('max_z_mm',0):.3f}mm)"
         validation=[math.hypot(*s['residual_xy_mm']) for s in data.get('samples',[]) if s.get('verification') and s.get('residual_xy_mm') and not s.get('superseded')]
         validation_text=f'验证：{len(validation)} 点，最大 {max(validation):.3f} mm' if validation else '验证：未开始'
-        self.pickacc_stats.config(text=f"判定：{mode}  最大偏差 {decision.get('max_dev_mm','—')} / 标准差 {decision.get('std_mm','—')}　{pickacc_infield(data.get('infield') or [])}　{validation_text}")
+        self.pickacc_stats.config(text=f"XY 判定：{mode}  最大偏差 {decision.get('max_dev_mm','—')} / 标准差 {decision.get('std_mm','—')}　|　下针 Z：{z_mode}　|　{pickacc_infield(data.get('infield') or [])}　{validation_text}")
         self.draw_pickacc_tray(data)
         if phase=='confirm' and self.pickacc_dialog is None: self.pickacc_confirm(data)
         elif phase!='confirm' and self.pickacc_dialog is not None: self.pickacc_dialog.destroy(); self.pickacc_dialog=None
@@ -1430,7 +1459,14 @@ class App:
         delta=[round(new_mean[i]-old_mean[i],4) for i in range(2)] if old_mean is not None and new_mean is not None else '无旧结果'
         import math
         valid=[math.hypot(*s['residual_xy_mm']) for s in candidate.get('verification',[]) if s.get('residual_xy_mm')]
-        tk.Label(top,text=f"旧：{pickacc_type(old.get('type'))} {prior or str(len(old.get('nodes',[])))+' 节点'}\n新：{pickacc_type(candidate.get('type'))} {current or str(len(candidate.get('nodes',[])))+' 节点'}\n均值差：{delta}\n验证：{len(candidate.get('verification',[]))} 点通过，最大 {max(valid,default=0):.3f} mm",justify='left',font=self.theme.body,padx=25,pady=15).pack()
+        def z_desc(entry):
+            if not isinstance(entry, dict) or not entry.get('z_type'): return '未标定'
+            if entry['z_type']=='constant' and isinstance(entry.get('z_mm'),(int,float)):
+                return f"全盘最大值 {entry['z_mm']:.3f} mm (Z_ref={entry.get('z_ref',0.0):.3f})"
+            nodes=entry.get('z_nodes') or []; zs=[n['z'] for n in nodes if isinstance(n.get('z'),(int,float))]
+            rng=f"{min(zs):.3f}~{max(zs):.3f} mm" if zs else '—'
+            return f"Z 表 {len(nodes)} 节点 ({rng}, Z_ref={entry.get('z_ref',0.0):.3f})"
+        tk.Label(top,text=f"旧 XY：{pickacc_type(old.get('type'))} {prior or str(len(old.get('nodes',[])))+' 节点'}\n新 XY：{pickacc_type(candidate.get('type'))} {current or str(len(candidate.get('nodes',[])))+' 节点'}\n均值差：{delta}\n旧 Z：{z_desc(old)}\n新 Z：{z_desc(candidate)}\n验证：{len(candidate.get('verification',[]))} 点通过，最大 {max(valid,default=0):.3f} mm",justify='left',font=self.theme.body,padx=25,pady=15).pack()
         row=tk.Frame(top); row.pack(); ttk.Button(row,text='覆盖保存',command=lambda:self.pickacc_command('pickacc_confirm',{'accept':True})).pack(side='left',padx=15,pady=10); ttk.Button(row,text='不保存',command=lambda:self.pickacc_command('pickacc_confirm',{'accept':False})).pack(side='left',padx=15,pady=10)
         top.protocol('WM_DELETE_WINDOW',lambda:self.pickacc_command('pickacc_confirm',{'accept':False}))
         top.update_idletasks()
@@ -1687,6 +1723,12 @@ class App:
             self.film_banner.grid(row=0, column=0, sticky='ew', padx=6, pady=(4, 0))
         else:
             self.film_banner.grid_remove()
+        missing_z = pickacc_z_missing_tools((main.get('pickacc') or {}).get('existing'))
+        if missing_z:
+            self.pick_z_banner.config(text='⚠ ' + '；'.join(f'工具{t} 未做下针深度标定' for t in missing_z) + '（生产与菲林模式将回退使用配置 pick_depth_z）')
+            self.pick_z_banner.grid(row=3, column=0, sticky='ew', padx=6, pady=(0, 4))
+        else:
+            self.pick_z_banner.grid_remove()
         busy = tray_active(self.directory, supervisor.get('child_pid'))
         allowed = may_change_mode(supervisor, main, busy) and not busy
         self.film_button.config(text='主流程测试模式（菲林片）：' + ('开' if enabled else '关'),

@@ -1,13 +1,16 @@
 """PLC 150/155/156 挑取精度标定。"""
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
+import time
 
+import numpy as np
 from autoweaver.motion_policy.nodes.node import Status
-from nest_clear.guard import diagnostic
+from nest_clear.guard import GuardError, diagnostic
 from nest_clear.pickaccuracy.session import Session
-from nest_clear.pickaccuracy.store import read, save
+from nest_clear.pickaccuracy.store import has_calibrated_z, read, save
 from .calibration import change_mode
 from .modes import Mode
 from .picking import calculate_pick_coords
@@ -51,8 +54,25 @@ def existing(ctx,path,digest):
     data=read(path); result={}
     for i in (1,2):
         old=data.get(f'tool{i}') or {}
-        result[f'tool{i}']={**old,'stale':bool(old and (old.get('camera_calibration_sha256') != digest or old.get('tool_offset_xy') != list(ctx.config.tools[i-1][:2])))}
+        result[f'tool{i}']={**old,
+                            'z_calibrated': has_calibrated_z(old),
+                            'stale':bool(old and (old.get('camera_calibration_sha256') != digest or old.get('tool_offset_xy') != list(ctx.config.tools[i-1][:2])))}
     return result
+
+
+def _current_tool_z_ref(ctx, tool):
+    """读取保存挑取精度时 tools.yaml 中该工具的 offset_xyz[2] 作为 Z_ref。"""
+    tools_path = Path(ctx.config.tool_calibration.directory) / 'tools.yaml'
+    z_ref = float(ctx.config.tools[tool - 1][2])
+    if tools_path.is_file():
+        try:
+            from nest_clear.tooltip.store import load_tools
+            item = load_tools(tools_path)['tools'][f'tool{tool}']
+            if item.get('source') != '占位，未标定' or tuple(ctx.config.tools[tool - 1]) == (0.0, 0.0, 0.0):
+                z_ref = float(item['offset_xyz'][2])
+        except (GuardError, KeyError, TypeError, ValueError):
+            pass
+    return z_ref
 
 
 def refresh_existing(ctx):
@@ -68,19 +88,50 @@ def refresh_existing(ctx):
 
 class PickAccuracy(ToolOffset):
     def __init__(self,ctx):
-        super().__init__(ctx); self.name='挑取精度标定'
+        super().__init__(ctx); self.name='挑取精度标定'; self.z_jitter_mm=None
 
     def publish(self,phase,message='',**extra):
         s=self._blackboard.read('pickaccuracy_session',None); e=s.get('engine') if s else None
         fields={'phase':phase,'message':message,'tool':s.get('tool') if s else self._blackboard.read('plc_tool_id'),
-                'plc_tool_id':self._blackboard.read('plc_tool_id'),'command_seq':reader(self.ctx).last_seq}
+                'plc_tool_id':self._blackboard.read('plc_tool_id'),'command_seq':reader(self.ctx).last_seq,
+                'z_jitter_mm':getattr(self,'z_jitter_mm',None)}
         if s: fields['existing']=existing(self.ctx,s['path'],s['hash'])
         if e:
+            z_points=[{'target':item['target'],'stage':item['stage'],'pick_z_mm':item['pick_z_mm']}
+                      for item in e.samples if not item.get('discarded') and item.get('pick_z_mm') is not None]
             fields.update(target=f'T{e.current:02d}' if e.current is not None else None,
                           samples=e.samples, skipped=e.skipped, infield=e.edges, warnings=e.warnings,
                           decision=e.decision, candidate=e.candidate, plan=e.plans, predicted={f'T{k:02d}':v.tolist() for k,v in e.predicted.items()},
-                          queue=[{'target':f'T{i:02d}','stage':st} for i,st,_ in e.queue])
+                          queue=[{'target':f'T{i:02d}','stage':st} for i,st,_ in e.queue],
+                          pending_sample=e.pending_sample, z_points=z_points, z_summary=e.z_summary(),
+                          last_z_mm=z_points[-1]['pick_z_mm'] if z_points else None)
         fields.update(extra); self.ctx.events.emit('pickacc_state',**fields)
+
+    def settle_z(self, cfg):
+        """采样 6 次/0.5s 实时坐标，Z 极差 <= 0.02mm 时返回 (mean_z, z_range)；否则返回 (False, z_range)。"""
+        if self.call:
+            status = self.tick_call()
+            if status == Status.FAILURE:
+                raise ValueError('读取实时坐标失败：' + str(self._blackboard.read('error')))
+            if status == Status.RUNNING:
+                return None, None
+            value = self._blackboard.read('tooloffset_actual')
+            if len(value) != 3 or not all(math.isfinite(x) for x in value):
+                raise ValueError('实时坐标无效')
+            self.samples.append(value)
+            n = int(cfg['z_settle_samples'])
+            self.next_read = time.monotonic() + float(cfg['z_settle_window_s']) / max(1, n - 1)
+        n = int(cfg['z_settle_samples'])
+        if len(self.samples) >= n:
+            zs = np.asarray([sample[2] for sample in self.samples], dtype=float)
+            z_range = float(np.ptp(zs))
+            self.z_jitter_mm = z_range
+            if z_range <= float(cfg['z_jitter_tol_mm']):
+                return float(zs.mean()), z_range
+            return False, z_range
+        if self.call is None and time.monotonic() >= self.next_read:
+            self.start_call('plc', {'operation': 'actual'}, 'tooloffset_actual')
+        return None, None
 
     def command(self,allowed):
         item=reader(self.ctx).poll(set(allowed)|{'abort'})
@@ -123,7 +174,7 @@ class PickAccuracy(ToolOffset):
             if func==155 and s['phase']=='wait155':
                 self.stage='settle_arrival'; self.samples=[]; self.round=0; self.next_read=0.; self.publish('arrival','检查相机到位'); return Status.RUNNING
             if func==156 and s['phase']=='wait156':
-                self.stage='tool'; self.publish('tool_in_place','工具已到位，调整好后按【计算补偿】'); return Status.RUNNING
+                self.stage='tool'; self.z_jitter_mm=None; self.publish('tool_in_place','工具已到位，调整好后按【计算补偿】'); return Status.RUNNING
             return self.fail('挑取精度标定收到错序功能码',False)
         except Exception as exc:
             if bb.read('pickaccuracy_session',None): finish(ctx,bb,'aborted',str(exc))
@@ -145,14 +196,16 @@ class PickAccuracy(ToolOffset):
                 return self.process_result(e._move_next())
             e.sent=xyz; s['phase']='wait156'; self.publish('wait_tool','请等待工具前往'); return self.set_reply(155,{f'calibration{s["tool"]}_xyz':xyz})
         if result=='confirm':
-            self.stage='confirm'; self.publish('confirm','等待确认覆盖',candidate=e.result()); return Status.RUNNING
+            self.stage='confirm'
+            candidate=e.result(); candidate['z_ref']=_current_tool_z_ref(self.ctx,s['tool'])
+            self.publish('confirm','等待确认覆盖',candidate=candidate); return Status.RUNNING
         raise ValueError('未知挑取精度阶段')
 
     def on_running(self):
         bb=self._blackboard; ctx=self.ctx; s=bb.read('pickaccuracy_session',None)
         if s is None: return self.fail('标定会话已结束',False)
         try:
-            allowed={'select':{'pickacc_start'},'tool':{'pickacc_calculate','pickacc_discard'},'confirm':{'pickacc_confirm'}}.get(self.stage,set())
+            allowed={'select':{'pickacc_start'},'tool':{'pickacc_calculate','pickacc_discard'},'z_step':{'pickacc_record_z','pickacc_discard'},'confirm':{'pickacc_confirm'}}.get(self.stage,set())
             cmd=self.command(allowed)
             if cmd and cmd[0]=='abort': return self.fail('用户放弃')
             if self.stage=='select':
@@ -164,6 +217,31 @@ class PickAccuracy(ToolOffset):
                 cfg={**ctx.config.tool_offset,**ctx.config.pick_accuracy}
                 s.update(engine=Session(ctx.calibration,s['start'],s['travel'],cfg,tool,ctx.config.tools,ctx.config.vision.fine_box_half_mm,ctx.config.camera_calibration['board_thickness_mm'],prior),phase='wait155')
                 self.publish('moving','相机移动至起始位置'); return self.set_reply(150,{'scan_xyz':s['start']})
+            if self.stage=='settle_z':
+                e=s['engine']
+                mean_z,z_range=self.settle_z(e.cfg)
+                if mean_z is None: return Status.RUNNING
+                if mean_z is False:
+                    self.stage='z_step'
+                    self.publish('z_step',f'Z 轴未停稳（当前极差 {z_range:.3f} mm > {e.cfg["z_jitter_tol_mm"]:.3f} mm），请等待停稳后再按【记录下针 Z】')
+                    return Status.RUNNING
+                try:
+                    result=e.record_z(mean_z,z_jitter_mm=z_range)
+                except GuardError as exc:
+                    if exc.code=='POSITION-TRAVEL':
+                        self.stage='z_step'; self.samples=[]
+                        ctx.events.emit('warning',reason=str(exc),target=f'T{e.current:02d}')
+                        self.publish('z_step',f'下针 Z {mean_z:.3f} mm 超出 Z 行程 {s["travel"][2]}，请调整后重新按【记录下针 Z】')
+                        return Status.RUNNING
+                    raise
+                if result=='continue':
+                    s['phase']='wait150'
+                    last=e.samples[-1]
+                    message='疑似对准失误，已排入重测' if last.get('outlier') else '等待下一相机位置'
+                    self.publish('wait150',message)
+                    if last.get('outlier'): ctx.events.emit('warning',reason=message,target=last['target'])
+                    return self.set_reply(156)
+                return self.process_result(result)
             if self.stage.startswith('settle_'):
                 actual=self.settle()
                 if actual is None: return Status.RUNNING
@@ -171,15 +249,10 @@ class PickAccuracy(ToolOffset):
                     if self.stage=='settle_tool': self.stage='tool'; self.publish('tool_in_place','轴还在动或抖动过大，请稍后再按【计算补偿】'); return Status.RUNNING
                     return self.fail('相机到位坐标未停稳',False)
                 if self.stage=='settle_tool':
-                    result=s['engine'].add_sample(actual)
-                    if result=='continue':
-                        s['phase']='wait150'
-                        last=s['engine'].samples[-1]
-                        message='疑似对准失误，已排入重测' if last.get('outlier') else '等待下一相机位置'
-                        self.publish('wait150',message)
-                        if last.get('outlier'): ctx.events.emit('warning',reason=message,target=last['target'])
-                        return self.set_reply(156)
-                    return self.process_result(result)
+                    s['engine'].add_xy_sample(actual)
+                    self.stage='z_step'; self.z_jitter_mm=None
+                    self.publish('z_step','XY 已记录；请放 0.05mm 塞尺并点动工具尖刚好压住塞尺，按【记录下针 Z】')
+                    return Status.RUNNING
                 expected=s['engine'].target_pose; tolerance=ctx.config.camera_calibration.get('position_tolerance_mm',.05)
                 if any(abs(a-b)>tolerance for a,b in zip(actual,expected)): return self.fail(f'相机到位超差：期望 {expected}，实际 {actual}',False)
                 self.actual=actual; s['engine'].capture_pose=actual
@@ -194,13 +267,15 @@ class PickAccuracy(ToolOffset):
                 if status==Status.RUNNING: return status
                 if status==Status.FAILURE: return self.fail('目标识别失败')
                 data=bb.read('tooloffset_detection'); return self.process_result(s['engine'].image(data['targets'],self.actual,data['size']))
-            if self.stage=='tool':
+            if self.stage in ('tool','z_step'):
                 if not cmd: return Status.RUNNING
                 if cmd[0]=='pickacc_discard':
                     result=s['engine'].discard()
                     if result=='failed': return self.fail(s['engine'].failure)
-                    s['phase']='wait150'; self.publish('wait150','本点作废，等待重测'); return self.set_reply(156)
-                self.stage='settle_tool'; self.samples=[]; self.round=0; self.next_read=0.; return Status.RUNNING
+                    s['phase']='wait150'; self.z_jitter_mm=None; self.publish('wait150','本点作废，等待重测'); return self.set_reply(156)
+                if self.stage=='tool':
+                    self.stage='settle_tool'; self.samples=[]; self.round=0; self.next_read=0.; return Status.RUNNING
+                self.stage='settle_z'; self.samples=[]; self.next_read=0.; return Status.RUNNING
             if self.stage=='confirm':
                 if not cmd: return Status.RUNNING
                 accept=cmd[1].get('accept')
@@ -208,7 +283,7 @@ class PickAccuracy(ToolOffset):
                 if not accept: return self.fail('用户取消保存')
                 try: commit=subprocess.run(['git','rev-parse','HEAD'],capture_output=True,text=True,timeout=2,check=True).stdout.strip()
                 except (OSError,subprocess.SubprocessError): commit=None
-                result=s['engine'].result(); result.update(time=ctx.events.clock().isoformat(),git_commit=commit,camera_calibration_sha256=s['hash'],tool_offset_xy=list(ctx.config.tools[s['tool']-1][:2]),tool_offset_result_sha256=offset_digest(ctx,s['tool']))
+                result=s['engine'].result(); result.update(time=ctx.events.clock().isoformat(),git_commit=commit,camera_calibration_sha256=s['hash'],tool_offset_xy=list(ctx.config.tools[s['tool']-1][:2]),tool_offset_result_sha256=offset_digest(ctx,s['tool']),z_ref=_current_tool_z_ref(ctx,s['tool']))
                 save(s['path'],s['tool'],result); self.publish('done','保存成功',candidate=result); finish(ctx,bb,'done'); return self.set_reply(151)
             raise ValueError('未知等待阶段')
-        except Exception as exc: return self.fail(str(exc),business=self.stage!='settle_arrival')
+        except Exception as exc: return self.fail(str(exc),business=self.stage not in ('settle_arrival','settle_z'))

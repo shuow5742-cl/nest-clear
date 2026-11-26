@@ -227,6 +227,7 @@ pick_accuracy:
   outlier_mm: 0.3  # 11-23 用户定：先放宽跑通全流程，后续收紧；原值 0.1
   max_points: 40
   calib_tool_z_mm: -10.0
+  z_flat_tol_mm: 0.1  # 11-26 用户定：所有测点下针 Z 最大差 <=0.1mm 取全盘最大值，>0.1mm 生成 Z 表
 
 # 主流程菲林测试：列出的目标不下发挑取坐标。
 test_mode:

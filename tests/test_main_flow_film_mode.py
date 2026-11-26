@@ -274,45 +274,49 @@ def test_main_exception_cleans_tray_even_if_close_fails(tmp_path, monkeypatch):
     assert not tray_active(tmp_path, os.getpid())
 
 
-def test_film_work_request_independent_z_and_missing_z_raises(tmp_path):
+def test_film_work_request_uses_pick_accuracy_z_and_warns_when_missing(tmp_path):
     from dataclasses import replace
     from types import SimpleNamespace
     import numpy as np
-    import pytest
     from nest_clear.config import load_config
     from nest_clear.film_mode import write_mode
     from nest_clear.flow.context import FlowContext, RequestTracker
     from nest_clear.flow.picking import WorkRequest
-    from nest_clear.guard import GuardError
+    from nest_clear.pickaccuracy.store import save
     from nest_clear.vision.fine import FineResult
     from nest_clear.vision.geometry import Calibration
     from test_hair_integration import Board, Events
     config = load_config('config/nest_clear.yaml')
     config = replace(config, record_directory=str(tmp_path), travel=((-100.,100.),)*3,
-                     tools=((1.,2.,3.), (4.,5.,6.)),
+                     tools=((1.,2.,3.), (4.,5.,6.)), pick_depth_z=-1.0,
                      tool_calibration=replace(config.tool_calibration, directory=str(tmp_path)))
     write_mode(tmp_path, True)
-    path = tmp_path / 'tool_offset.yaml'
+    comp_path = tmp_path / 'pick_compensation.yaml'
     def make_cycle():
-        ctx = FlowContext(None, config, [(0,0,0)], RequestTracker(0), Events(),
+        events = Events()
+        ctx = FlowContext(None, config, [(0,0,0)], RequestTracker(0), events,
                           Calibration(np.eye(3), np.zeros(5), np.eye(3), np.zeros(3), 10))
         bb = Board(work_cycle=None, request_func=1, task_id=1)
         req = WorkRequest(ctx); req._blackboard = bb; req.perform()
         cycle = bb.read('work_cycle')
         obs = SimpleNamespace(target=SimpleNamespace(xyz=(2.,3.,1.)), identity=(2.,3.,1.), status='eligible', reason=None, area=1., film_label='T02')
         cycle.on_coarse((0,0,0), [obs])
-        return cycle
-    path.write_text(yaml.safe_dump({'tool1': {'samples':[{'tool_xyz_mm':[0,0,-4]},{'tool_xyz_mm':[0,0,-2]}]},
-                                    'tool2': {'samples':[{'tool_xyz_mm':[0,0,-8]},{'tool_xyz_mm':[0,0,-6]}]}}))
-    cycle = make_cycle()
+        return cycle, events
+    save(comp_path, 1, {'type': 'constant', 'constant_xy': [0., 0.], 'z_type': 'constant', 'z_mm': -2.0, 'z_ref': 3.0})
+    save(comp_path, 2, {'type': 'constant', 'constant_xy': [0., 0.], 'z_type': 'constant', 'z_mm': -6.0, 'z_ref': 6.0})
+    cycle, events = make_cycle()
     reply = cycle.on_fine((0,0,0), FineResult('ok', target_xyz=(2.,3.,1.)))
     assert reply.func_code == 3
     assert reply.tool1_xyz == (3.,5.,-2.) and reply.tool2_xyz == (6.,8.,-6.)
-    path.write_text(yaml.safe_dump({'tool1': {'samples':[{'tool_xyz_mm':[0,0,-4]}]}}))
-    cycle = make_cycle()
-    with pytest.raises(GuardError, match='工具2 缺少工具偏移标定下针 Z'):
-        cycle.on_fine((0,0,0), FineResult('ok', target_xyz=(2.,3.,1.)))
-    assert cycle.attempt_count == 0
+    assert not any(name == 'warning' and '未做下针深度标定' in row.get('reason', '') for name, row in events.rows)
+    # 工具2 未做下针深度标定时不阻止，回退配置 pick_depth_z (-1 + 6 = 5.0) 并发出警告。
+    comp_path.unlink()
+    save(comp_path, 1, {'type': 'constant', 'constant_xy': [0., 0.], 'z_type': 'constant', 'z_mm': -2.0, 'z_ref': 3.0})
+    cycle, events = make_cycle()
+    reply = cycle.on_fine((0,0,0), FineResult('ok', target_xyz=(2.,3.,1.)))
+    assert reply.func_code == 3
+    assert reply.tool1_xyz == (3.,5.,-2.) and reply.tool2_xyz == (6.,8.,5.0)
+    assert any(name == 'warning' and row.get('reason') == '工具2 未做下针深度标定' for name, row in events.rows)
 
 
 def test_synthetic_full_image_detects_film():
@@ -459,9 +463,9 @@ def test_site_geometry_full_tray_filters_unreachable(tmp_path, monkeypatch):
     config = replace(config, record_directory=str(tmp_path), travel=travel,
                      tools=((29.330, 24.322, 0.), (30.092, -25.283, 0.)),
                      tool_calibration=replace(config.tool_calibration, directory=str(tmp_path)))
-    (tmp_path / 'tool_offset.yaml').write_text(yaml.safe_dump({
-        'tool1': {'samples': [{'tool_xyz_mm': [0, 0, -15]}]},
-        'tool2': {'samples': [{'tool_xyz_mm': [0, 0, 0]}]}}))
+    from nest_clear.pickaccuracy.store import save
+    save(tmp_path / 'pick_compensation.yaml', 1, {'type': 'constant', 'constant_xy': [0., 0.], 'z_type': 'constant', 'z_mm': -15.0, 'z_ref': 0.0})
+    save(tmp_path / 'pick_compensation.yaml', 2, {'type': 'constant', 'constant_xy': [0., 0.], 'z_type': 'constant', 'z_mm': 0.0, 'z_ref': 0.0})
     write_mode(tmp_path, True)
     monkeypatch.setattr('nest_clear.flow.picking.fine_camera_xy',
                         lambda target, pose, cal: (target[0] + .86, target[1] + .92, pose[2]))
