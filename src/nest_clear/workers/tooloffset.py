@@ -87,7 +87,101 @@ def render_crop(image, target, principal):
 class ToolOffsetWorker(AsyncRequestWorker):
     name = 'tooloffset'
 
+    def _execute_triangulate_shot(self, payload):
+        """在后台线程检测 3 帧主相机标定尖并保存原图与诊断叠加图。"""
+        from nest_clear.tooloffset.ref_tip_top import RefTipTopDetector, render_ref_tip_top_overlay
+
+        ctx, session = payload['context'], payload['session']
+        frames = payload['frames']
+        shot_idx = int(payload['shot_index'])
+        cfg_tri = ctx.config.tool_offset['triangulation']
+        detector = RefTipTopDetector(ctx.config.tool_offset['ref_tip_top'])
+
+        raw_paths = []
+        results = []
+        rep_image = None
+        for f_idx, item in enumerate(frames, 1):
+            image, _ = item if isinstance(item, tuple) else (item, {})
+            if rep_image is None:
+                rep_image = image
+            raw_rel = None
+            if ctx.events.run_directory is not None:
+                raw_file = ctx.events.run_directory / 'tooloffset' / session['directory'] / f'tri_s{shot_idx:02d}_f{f_idx}_raw.png'
+                raw_file.parent.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(raw_file), image):
+                    raise OSError(f'保存三角定位原图失败：{raw_file}')
+                raw_rel = str(raw_file.relative_to(ctx.events.directory))
+            raw_paths.append(raw_rel)
+            results.append(detector.detect(image))
+
+        principal = (float(ctx.calibration.K[0, 2]), float(ctx.calibration.K[1, 2])) if ctx.calibration is not None else None
+        rep_res = results[0]
+        overlay = render_ref_tip_top_overlay(
+            rep_image,
+            rep_res,
+            shot_index=shot_idx,
+            principal=principal,
+            margin_frac=cfg_tri['center_margin_frac'],
+        )
+        ovl_rel = None
+        if ctx.events.run_directory is not None:
+            ovl_file = ctx.events.run_directory / 'tooloffset' / session['directory'] / f'tri_s{shot_idx:02d}_ovl.png'
+            ovl_file.parent.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(ovl_file), overlay):
+                raise OSError(f'保存三角定位叠加图失败：{ovl_file}')
+            ovl_rel = str(ovl_file.relative_to(ctx.events.directory))
+        write_live(ctx.events.directory, 'tooloffset_latest', overlay)
+        if 1 <= shot_idx <= 5:
+            write_live(ctx.events.directory, f'tooloffset_tri_{shot_idx}', overlay)
+
+        frame_records = []
+        reasons = []
+        pts = []
+        for f_idx, res in enumerate(results, 1):
+            frame_records.append({
+                'frame': f_idx,
+                'uv': list(res.point_uv) if res.point_uv is not None else None,
+                'quality': res.quality,
+                'focused': res.focused,
+                'contrast': res.contrast,
+                'edge_rms_px': res.edge_rms_px,
+                'apex_angle_deg': res.apex_angle_deg,
+                'diagnostic': res.diagnostic,
+            })
+            if res.point_uv is None or not res.focused:
+                reasons.append(f'第 {f_idx} 帧{res.diagnostic}')
+            else:
+                pts.append(res.point_uv)
+
+        std_uv = None
+        median_uv = None
+        if not reasons:
+            arr = np.asarray(pts, dtype=float)
+            std = np.std(arr, axis=0)
+            std_uv = (float(std[0]), float(std[1]))
+            median_uv = tuple(float(v) for v in np.median(arr, axis=0))
+            max_std = float(cfg_tri['frame_std_max_px'])
+            for axis_name, val in zip(('u', 'v'), std_uv):
+                if val > max_std:
+                    reasons.append(f'三帧 {axis_name} 标准差 {val:.3f} > {max_std:g} px（疑似未停稳）')
+
+        h, w = rep_image.shape[:2]
+        return {
+            'ok': not reasons,
+            'reason': '；'.join(reasons),
+            'uv': median_uv,
+            'std_uv': std_uv,
+            'quality': float(np.median([r.quality for r in results])) if results else 0.0,
+            'frames': frame_records,
+            'raw_paths': raw_paths,
+            'raw_path': raw_paths[0] if raw_paths else None,
+            'overlay_path': ovl_rel,
+            'size': (w, h),
+        }
+
     def execute(self, payload):
+        if payload.get('operation') == 'triangulate_shot':
+            return self._execute_triangulate_shot(payload)
         captured, ctx, session = payload['captured'], payload['context'], payload['session']
         image, meta = captured if isinstance(captured, tuple) else (captured, {})
         session['shots'] += 1

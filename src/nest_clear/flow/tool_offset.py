@@ -332,6 +332,24 @@ class ToolOffset(TreeNode):
                 if len(self.tri_frames) < self.tri_target_frames:
                     self.start_call('camera', {'stage': 'tooloffset', 'task_id': bb.read('task_id')}, 'tooloffset_image')
                     return Status.RUNNING
+                shot_idx = len(s['triangulation_state']['views']) + 1
+                self.start_call('tooloffset', {
+                    'operation': 'triangulate_shot',
+                    'frames': self.tri_frames,
+                    'shot_index': shot_idx,
+                    'context': ctx,
+                    'session': s,
+                    'task_id': bb.read('task_id'),
+                }, 'tooloffset_tri_detect')
+                self.stage = 'detect_triangulate'
+                return Status.RUNNING
+
+            if self.stage == 'detect_triangulate':
+                status = self.tick_call()
+                if status == Status.RUNNING:
+                    return Status.RUNNING
+                if status == Status.FAILURE:
+                    return self.fail('主相机标定尖检测失败：' + str(bb.read('error')), code='TOOLOFFSET-DETECT', where='90 标定尖检测', hint='检查标定尖照明、对焦与相机视野。')
                 return self._handle_triangulate()
 
             if self.stage == 'settle_tool':
@@ -382,7 +400,81 @@ class ToolOffset(TreeNode):
             return self.fail(str(exc))
 
     def _handle_triangulate(self):
-        raise NotImplementedError('三角定位将在 T86-2 实现')
+        from nest_clear.tooloffset.triangulation import TriangulationSession
+
+        bb, ctx = self._blackboard, self.ctx
+        s = bb.read('tooloffset_session')
+        det = bb.read('tooloffset_tri_detect')
+        bb.write('raw_path', det.get('raw_path'), self.name)
+        s['shots'] += 1
+        shot_idx = len(s['triangulation_state']['views']) + 1
+        view_entry = {
+            'index': shot_idx,
+            'pose': list(self.actual),
+            'uv': list(det['uv']) if det.get('uv') else None,
+            'std_uv': list(det['std_uv']) if det.get('std_uv') else None,
+            'quality': det.get('quality', 0.0),
+            'raw_path': det.get('raw_path'),
+            'overlay_path': det.get('overlay_path'),
+            'frames': det.get('frames', []),
+            'ok': bool(det.get('ok')),
+            'reason': det.get('reason', ''),
+        }
+        s['triangulation_state']['views'].append(view_entry)
+        if not det.get('ok'):
+            return self.fail(
+                det.get('reason') or '主相机标定尖检测失败',
+                code='TOOLOFFSET-REF-TOP',
+                where=f'三角定位第 {shot_idx} 张',
+                hint='检查标定尖是否在视野内、照明是否均匀以及背景无干扰物。',
+            )
+        if s['tri_session'] is None:
+            s['tri_session'] = TriangulationSession(
+                ctx.calibration,
+                ctx.config.travel,
+                det['size'],
+                ctx.config.tool_offset['triangulation'],
+            )
+        tri = s['tri_session']
+        step = tri.add_observation(
+            self.actual,
+            det['uv'],
+            frame_std_uv=det['std_uv'],
+            quality=det['quality'],
+            raw_path=det.get('raw_path'),
+            overlay_path=det.get('overlay_path'),
+        )
+        if tri.result is not None:
+            s['triangulation_state'].update({
+                'xyz': list(tri.result.tip_xyz_mm),
+                'target_xy': list(tri.result.target_xy_mm),
+                'max_residual_mm': tri.result.max_residual_mm,
+                'rms_residual_mm': tri.result.rms_residual_mm,
+                'max_baseline_ratio': tri.result.max_baseline_ratio,
+                'max_angle_deg': math.degrees(tri.result.max_angle_rad),
+                'ray_residuals_mm': tri.result.ray_residuals_mm,
+                'reproj_errors_px': tri.result.reproj_errors_px,
+            })
+        s['triangulation_record'] = {
+            'views': s['triangulation_state']['views'],
+            'result': s['triangulation_state'],
+        }
+        if step == 'failed':
+            return self.fail(
+                tri.failure or '三角定位失败',
+                code='TOOLOFFSET-TRIANGULATION',
+                where='主相机三角定位',
+                hint='检查 camera.yaml 标定精度、模组行程及视角基线范围。',
+            )
+        if step == 'move':
+            target = tuple(float(v) for v in tri.target_pose)
+            self.publish('triangulate', f'三角定位 第 {shot_idx}/≥3 张完成，等待移至下一视角', next_camera_xyz=list(target))
+            return self.set_reply(90, {'scan_xyz': target})
+        # 三角定位完成，回 91 等待 PLC 100/110
+        s['phase'] = 'wait_tool_start'
+        ctx.events.emit('tooloffset_triangulation_done', task_id=bb.read('task_id'), **s['triangulation_state'])
+        self.publish('wait_tool_start', f"三角定位完成（{len(tri.views)} 视角，最大残差 {tri.result.max_residual_mm:.4f} mm），等待 PLC 100/110")
+        return self.set_reply(91)
 
     def _handle_tool_align(self):
         raise NotImplementedError('对刀相机对准将在 T86-3 实现')

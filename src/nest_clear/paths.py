@@ -38,6 +38,12 @@ def tooltip_preview_file(root: str | Path) -> Path:
 
 
 def live_image_file(root: str | Path, name: str = 'latest') -> Path:
-    if name not in {'latest', 'preview_latest', 'camcal_latest', 'tooloffset_latest', 'tooloffset_crop', 'pickacc_latest', 'pickacc_crop', 'calib_front_latest', 'calib_side_latest', 'baseline_front', 'baseline_side'}:
+    allowed = {
+        'latest', 'preview_latest', 'camcal_latest', 'tooloffset_latest', 'tooloffset_crop',
+        'tooloffset_front_latest', 'tooloffset_side_latest',
+        'tooloffset_tri_1', 'tooloffset_tri_2', 'tooloffset_tri_3', 'tooloffset_tri_4', 'tooloffset_tri_5',
+        'pickacc_latest', 'pickacc_crop', 'calib_front_latest', 'calib_side_latest', 'baseline_front', 'baseline_side',
+    }
+    if name not in allowed:
         raise ValueError('未知实时图片')
     return Path(root) / 'live' / (name + '.jpg')
