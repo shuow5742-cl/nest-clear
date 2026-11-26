@@ -68,3 +68,15 @@ def test_sequence_quality_gates_motion_without_hiding_positions():
     assert all(r.point_uv is not None for r in moved)
     with pytest.raises(ValueError):
         detector.detect_sequence([image])
+
+
+def test_axis_rms_ignores_isolated_edge_artifacts():
+    image = scene()
+    detector = TridentTipDetector()
+    reference = detector.detect(image)
+    for y in (240, 270, 300):
+        noisy = image.copy()
+        cv2.rectangle(noisy, (315, y), (322, y + 2), 20, -1)
+        result = detector.detect(noisy)
+        assert abs(result.axis_rms_px - reference.axis_rms_px) < .02
+        assert np.linalg.norm(np.asarray(result.point_uv) - reference.point_uv) < .1

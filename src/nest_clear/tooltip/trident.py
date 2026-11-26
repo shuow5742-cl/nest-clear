@@ -81,7 +81,7 @@ class TridentTipDetector:
         start_y=max(int(end*.40),end-300); stop_y=end-80
         if stop_y-start_y<30: return done(diagnostic='针身直线段不足')
         centers=[]; rows=[]; gradients=[]; widths=[]; esf_profiles=[]; band_gradients=[]
-        for y in range(start_y,stop_y,3):
+        for y in range(start_y, stop_y, 3):
             xs=np.flatnonzero(comp[y]);
             if len(xs)<5: continue
             l,r=int(xs[0]),int(xs[-1]); row=crop[y].astype(float)
@@ -129,7 +129,11 @@ class TridentTipDetector:
                 return float(offsets_esf[i]+(level-esf[i])*(offsets_esf[i+1]-offsets_esf[i])/(esf[i+1]-esf[i]))
             x10,x90=esf_cross(.1),esf_cross(.9)
             if x10 is not None and x90 is not None and x90>x10: esf_width=x90-x10
-        axis_rms=float(np.sqrt(np.mean((np.asarray(centers)-(slope*np.asarray(rows)+intercept))**2)))
+        # Measure the same inliers used by the robust fit; a few spurious edge
+        # crossings must not dominate RMS. If many rows were rejected, retain
+        # them in the quality metric: a moving tool can produce two modes.
+        quality_rows = good if np.mean(good) >= .8 else np.ones(len(good), dtype=bool)
+        axis_rms=float(np.sqrt(np.mean((np.asarray(centers)[quality_rows]-(slope*np.asarray(rows)[quality_rows]+intercept))**2)))
         # Sample axis-parallel profiles inside the body envelope. This is independent
         # of whether thin prongs remain attached in the thresholded component.
         normal=np.array([d[1],-d[0]])
