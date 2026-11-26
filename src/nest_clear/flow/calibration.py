@@ -691,6 +691,11 @@ class ConfirmCalibration(TreeNode):
             name, _ = command
             if name == 'tooltip_abort': fail('用户放弃')
             if name == 'tooltip_click':
+                focus = bb.read('tooltip_focus')
+                invalid = [f for f in focus.values() if f.get('method') == 'trident' and (f.get('coarse') or not f.get('focused'))]
+                if invalid:
+                    self.publish('limit', '识别不可靠：' + '；'.join(f.get('diagnostic') or '识别不准' for f in invalid))
+                    return Status.RUNNING
                 parent, child = mp.get_context('spawn').Pipe(False); self.connection = parent
                 self.process = mp.get_context('spawn').Process(target=_click_process, args=(child, bb.read('tooltip_images'), bb.read('tooltip_points'), session['tool']))
                 self.process.start(); child.close(); self.publish('clicking', '请依次点选两台相机的针尖'); return Status.RUNNING

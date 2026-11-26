@@ -79,7 +79,8 @@ def test_handoff_keeps_camera_open(tmp_path, monkeypatch):
     camera=Camera(); events=Events(); events.directory=tmp_path
     monkeypatch.setattr('nest_clear.baseline.preparation.enumerate_capture_devices', lambda: [])
     monkeypatch.setattr('nest_clear.baseline.preparation.auto_exposure', lambda c, **kw: {'exposure':100,'p99':210,'saturated_fraction':0,'contrast':100})
-    prep=Preparation(events, SimpleNamespace(cameras={'front':camera,'side':Camera()}))
+    config = SimpleNamespace(tool_calibration=SimpleNamespace(detection={n: {'method': 'silhouette'} for n in ('front', 'side')}))
+    prep=Preparation(events, SimpleNamespace(cameras={'front':camera,'side':Camera()}), config)
     prep.command('tooltip_preview', {'camera':'front','on':True})
     deadline=time.monotonic()+2
     while not camera.opens and time.monotonic()<deadline: time.sleep(.01)
@@ -110,7 +111,8 @@ def test_focus_improves_and_tip_motion_resets_peak(tmp_path, monkeypatch):
     camera=Camera(); events=Events(); events.directory=tmp_path
     monkeypatch.setattr('nest_clear.baseline.preparation.enumerate_capture_devices', lambda: [])
     monkeypatch.setattr('nest_clear.baseline.preparation.auto_exposure', lambda *a,**kw: (_ for _ in ()).throw(AssertionError('already measured')))
-    prep=Preparation(events, SimpleNamespace(cameras={'front':camera,'side':Camera()}))
+    config = SimpleNamespace(tool_calibration=SimpleNamespace(detection={n: {'method': 'silhouette'} for n in ('front', 'side')}))
+    prep=Preparation(events, SimpleNamespace(cameras={'front':camera,'side':Camera()}), config)
     prep.command('tooltip_preview', {'camera':'front','on':True})
     def wait(predicate):
         deadline=time.monotonic()+5

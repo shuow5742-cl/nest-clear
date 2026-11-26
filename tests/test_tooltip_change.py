@@ -33,6 +33,8 @@ class Events:
 @pytest.fixture
 def rig(tmp_path):
     config = load_config(ROOT / 'config/nest_clear.yaml')
+    # Mock cameras render the legacy silhouette, not a three-pronged needle.
+    for settings in config.tool_calibration.detection.values(): settings['method'] = 'silhouette'
     config = replace(config, travel=((-100., 100.),)*3, tool_calibration=replace(config.tool_calibration, enabled=True, directory=str(tmp_path)), tools=((1.,2.,3.),(4.,5.,6.)))
     initialize_tools(tmp_path / 'tools.yaml')
     events = Events(tmp_path)
@@ -226,3 +228,13 @@ def test_manual_click_still_over_limit_can_only_abort(rig):
     assert command(ctx,node,'tooltip_abort') == Status.FAILURE
     failed = CalibrationFailed(ctx); failed._blackboard = bb; failed.perform()
     assert bb.read('reply_func') == 131
+
+
+def test_trident_unreliable_result_cannot_be_overridden_by_click(rig):
+    ctx, _ = rig
+    bb, cameras = setup(rig)
+    node = frame(ctx, bb, cameras)
+    bb.read('tooltip_focus')['front'].update(method='trident', coarse=True, focused=False, diagnostic='工具在动或画面畸变')
+    assert command(ctx, node, 'tooltip_click') == Status.RUNNING
+    assert node.process is None
+    assert bb.read('tooltip_focus')['front']['coarse']
