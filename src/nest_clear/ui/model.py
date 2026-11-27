@@ -7,6 +7,15 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from nest_clear.display import format_number
 from nest_clear.paths import tooltip_preview_file
+from nest_clear.baseline.focus_rules import (
+    BASELINE_RULE,
+    CAMERA_AXES,
+    EDGE_MARGIN_MESSAGE,
+    GEOMETRY_SUMMARY,
+    PEAK_OVERSHOOT_HINT,
+    evaluate_baseline_readiness,
+    evaluate_camera_readiness,
+)
 
 BITS = ('手动模式','自动模式','循环启动','循环暂停','循环停止','上电完成','急停中','初始化中','初始化完成','信息提示','一般报警','严重故障')
 TOOLTIP_PREVIEW_STALE_SECONDS = 3.0
@@ -106,12 +115,14 @@ def baseline_focus_status(live, *, good_px=2.0, warn_px=3.0, axis_rms_limit=0.7)
         level, badge, color_key = 'warn', '⚠ 稍虚', 'yellow'
     else:
         level, badge, color_key = 'bad', '✖ 未对焦', 'red'
+    pct = src.get('percent')
+    pct_txt = f'{float(pct):.0f}%' if isinstance(pct, (int, float)) and not isinstance(pct, bool) and math.isfinite(pct) else '—%'
     edge_px_txt = f'{float(edge_px):.2f} px' if isinstance(edge_px, (int, float)) and not isinstance(edge_px, bool) and math.isfinite(edge_px) else '— px'
     edge_um_txt = f'{float(edge_um):.1f} µm' if isinstance(edge_um, (int, float)) and not isinstance(edge_um, bool) and math.isfinite(edge_um) else '— µm'
     contrast_txt = f'{float(contrast):.0f}' if isinstance(contrast, (int, float)) and not isinstance(contrast, bool) and math.isfinite(contrast) else '—'
     rms_txt = f'{float(axis_rms):.2f} px' if isinstance(axis_rms, (int, float)) and not isinstance(axis_rms, bool) and math.isfinite(axis_rms) else '— px'
     lim_txt = f'{float(lim_val):g}' if isinstance(lim_val, (int, float)) and math.isfinite(lim_val) else '0.7'
-    summary = f'边缘 {edge_px_txt}（{edge_um_txt}）· 对比度 {contrast_txt} · 轴残差 {rms_txt}（门限 {lim_txt}）· {det_txt}'
+    summary = f'清晰度 {pct_txt}（相对本次峰值）· 边缘 {edge_px_txt}（{edge_um_txt}）· 对比度 {contrast_txt} · 轴残差 {rms_txt}（门限 {lim_txt}）· {det_txt}'
     return {
         'level': level,
         'badge': badge,

@@ -23,6 +23,8 @@ from .model import (EventTail, camcal_progress, command_timeout_message, decode_
                     tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time,
                     page_for_mode, depthcal_session_key, next_auto_page,
                     baseline_focus_status, baseline_preview_display, extract_tooltip_preview,
+                    CAMERA_AXES, EDGE_MARGIN_MESSAGE, GEOMETRY_SUMMARY, PEAK_OVERSHOOT_HINT,
+                    evaluate_baseline_readiness, evaluate_camera_readiness,
                     depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout,
                     depthcal_curve_dof, depthcal_latest_dof_text, depthcal_dof_summary_text,
                     depthcal_point_arrival_text, depthcal_arrival_summary_text, depthcal_exposure_display,
@@ -818,7 +820,7 @@ class App:
         self.baseline_heading.grid(row=0, column=0, sticky='w')
         self.baseline_message = label(bar, '请开始对刀基准建立', width=1)
         self.baseline_message.grid(row=0, column=1, sticky='ew', padx=6)
-        self.baseline_live = label(bar, '实时辅助：等待针尖', fg=MUTED)
+        self.baseline_live = label(bar, '中心偏差（参考）：等待针尖', fg=MUTED)
         self.baseline_live.grid(row=0, column=2, sticky='w')
         self.baseline_notice = label(bar, fg=COLORS['yellow'], width=1)
         self.baseline_notice.grid(row=0, column=3, sticky='ew', padx=6)
@@ -828,9 +830,9 @@ class App:
         controls = tk.Frame(head, bg=WHITE)
         controls.grid(row=1, column=0, sticky='ew', pady=(2, 0))
 
-        def action(column, text, command, *, params=None, style='Baseline.TButton'):
+        def action(column, text, command, *, params=None, style='Baseline.TButton', row=0):
             widget = button(controls, text, lambda: self.baseline_command(command, params), style)
-            widget.grid(row=0, column=column, padx=(0, 3))
+            widget.grid(row=row, column=column, padx=(0, 3))
             return widget
 
         self.baseline_start = action(0, '开始对刀基准建立', 'baseline_start')
@@ -851,6 +853,23 @@ class App:
         self.runout_max.grid(row=0, column=12, padx=(4, 7))
         bind_text_tooltip(self.runout_detail, self.runout_detail)
 
+        subbar = tk.Frame(head, bg=WHITE)
+        subbar.grid(row=2, column=0, sticky='ew', pady=(2, 0))
+        subbar.columnconfigure(0, weight=2)
+        subbar.columnconfigure(2, weight=1)
+        self.baseline_overall_bar = tk.Frame(subbar, bg='#f1f5f9', highlightbackground='#cbd5e1', highlightthickness=1, padx=6, pady=1)
+        self.baseline_overall_bar.grid(row=0, column=0, sticky='ew', padx=(0, 6))
+        self.baseline_overall_bar.columnconfigure(0, weight=1)
+        self.baseline_overall = label(self.baseline_overall_bar, '等待打开两路预览或开始对刀基准建立', bg='#f1f5f9', fg='#475569', font=(small[0], 10, 'bold'), width=1, anchor='w')
+        self.baseline_overall.grid(row=0, column=0, sticky='ew')
+        self.baseline_peak_reset = button(subbar, '清晰度峰值清零', lambda: self.baseline_command('tooltip_peak_reset', {'camera': 'all'}), 'Action.Baseline.TButton')
+        self.baseline_peak_reset.grid(row=0, column=1, padx=(0, 6))
+        self.baseline_measure_reason = label(subbar, '', fg=MUTED, width=1, anchor='w', justify='left')
+        self.baseline_measure_reason.grid(row=0, column=2, sticky='ew')
+        bind_text_tooltip(self.baseline_measure, self.baseline_measure_reason)
+        bind_text_tooltip(self.baseline_measure_reason, self.baseline_measure_reason)
+        bind_text_tooltip(self.baseline_overall, self.baseline_overall)
+
         self.baseline_views = {}
         self.baseline_exposure_pending = {}
         camera_cards = []
@@ -866,25 +885,29 @@ class App:
             focus_bar.columnconfigure(1, weight=1)
             focus_badge = label(focus_bar, '未检出', bg='#e2e8f0', fg='#475569', font=(small[0], 10, 'bold'), padx=6)
             focus_badge.grid(row=0, column=0, sticky='w', padx=(0, 6))
-            focus_summary = label(focus_bar, '边缘 — px（— µm）· 对比度 — · 轴残差 — px（门限 0.7）· 未检出', bg='#f1f5f9', fg='#475569', width=1)
+            focus_summary = label(focus_bar, '清晰度 —%（相对本次峰值）· 边缘 — px（— µm）· 对比度 — · 轴残差 — px（门限 0.7）· 未检出', bg='#f1f5f9', fg='#475569', width=1)
             focus_summary.grid(row=0, column=1, sticky='ew')
+            focus_graph = tk.Canvas(focus_bar, width=96, height=16, bg='#f1f5f9', highlightthickness=0)
+            focus_graph.grid(row=0, column=2, sticky='e', padx=(4, 0))
             bind_text_tooltip(focus_summary, focus_summary)
 
             actions = tk.Frame(body, bg=WHITE)
             actions.grid(row=1, column=0, sticky='ew')
-            actions.columnconfigure(3, weight=2)
+            actions.columnconfigure(4, weight=2)
             toggle = tk.Button(actions, text=title+'预览：关', font=small, padx=4, pady=0,
                                command=lambda n=name: self.baseline_toggle(n))
             toggle.grid(row=0, column=0, padx=(0, 3))
             exposure = button(actions, '重新测曝光', lambda n=name: self.baseline_retest_exposure(n), 'Action.Baseline.TButton')
             exposure.grid(row=0, column=1, padx=(0, 3))
-            reset = button(actions, '清晰度峰值清零', lambda n=name: self.baseline_command('tooltip_peak_reset', {'camera': n}), 'Action.Baseline.TButton')
+            reset = button(actions, '本路峰值清零', lambda n=name: self.baseline_command('tooltip_peak_reset', {'camera': n}), 'Action.Baseline.TButton')
             reset.grid(row=0, column=2, padx=(0, 3))
+            manual_confirm = button(actions, '人工点选', lambda n=name: self.baseline_command('baseline_manual_view', {'camera': n}), 'Action.Baseline.TButton')
+            manual_confirm.grid(row=0, column=3, padx=(0, 3))
             path = label(actions, '未分配', fg=MUTED, width=1)
-            path.grid(row=0, column=3, sticky='ew')
+            path.grid(row=0, column=4, sticky='ew')
             reason = label(actions, fg=MUTED, width=1)
-            reason.grid(row=0, column=4, sticky='ew')
-            actions.columnconfigure(4, weight=1)
+            reason.grid(row=0, column=5, sticky='ew')
+            actions.columnconfigure(5, weight=1)
             bind_text_tooltip(path, path)
             bind_text_tooltip(toggle, reason)
 
@@ -956,6 +979,7 @@ class App:
             bind_text_tooltip(detail, detail)
             self.baseline_views[name] = dict(
                 title=title, focus_bar=focus_bar, focus_badge=focus_badge, focus_summary=focus_summary,
+                focus_graph=focus_graph, manual_confirm=manual_confirm,
                 path=path, toggle=toggle, exposure=exposure, reset=reset, reason=reason,
                 info=info, hint=hint, detail=detail, graph=graph, picture=pic, exposure_entry=entry,
                 exposure_set=set_exposure, exposure_restore=restore, exposure_save=save, exposure_saved=saved,
@@ -965,7 +989,7 @@ class App:
         footer = tk.Frame(self.baseline, bg=BG)
         footer.grid(row=2, column=0, columnspan=2, sticky='ew')
         footer.columnconfigure(0, weight=1)
-        canvas = tk.Canvas(footer, height=113, highlightthickness=0, bg=BG)
+        canvas = tk.Canvas(footer, height=96, highlightthickness=0, bg=BG)
         canvas.grid(row=0, column=0, sticky='ew')
         scroll = ttk.Scrollbar(footer, orient='vertical', command=canvas.yview)
         scroll.grid(row=0, column=1, sticky='ns')
@@ -982,7 +1006,7 @@ class App:
             camera_height = max(card.winfo_reqheight() for card in camera_cards)
             picture_height = round((page_width // 2 - 16) * 9 / 16)
             spare = self.baseline.winfo_height() - head.winfo_reqheight() - camera_height - picture_height - 9
-            height = min(cards.winfo_reqheight(), max(64, spare))
+            height = min(cards.winfo_reqheight(), max(52, spare))
             if height != canvas.winfo_reqheight():
                 canvas.configure(height=height)
 
@@ -1135,7 +1159,10 @@ class App:
         msg_color = COLORS['red'] if phase == 'fail' or (phase == 'done' and any(word in message for word in ('失败', '异常'))) else COLORS['green'] if phase in ('success', 'saved') else INK
         self.baseline_message.config(text=message, fg=COLORS['red'] if getattr(self, 'baseline_command_message', '') else COLORS['yellow'] if self.baseline_pending else msg_color)
         live = data.get('live_delta')
-        self.baseline_live.config(text=f'实时辅助：离中心 横向 {live[0]:+.3f} mm / 竖向 {live[1]:+.3f} mm' if isinstance(live, list) and len(live) == 2 else '实时辅助：等待针尖', fg=COLORS['green'] if data.get('live_inside') else COLORS['red'] if live else MUTED)
+        self.baseline_live.config(
+            text=f'中心偏差（参考）：横向 {live[0]:+.3f} mm / 竖向 {live[1]:+.3f} mm' if isinstance(live, list) and len(live) == 2 else '中心偏差（参考）：等待针尖',
+            fg=MUTED,
+        )
         notice = data.get('notice') or ''
         if not notice and tool in (1, 2):
             selected_old = existing.get(f'tool{tool}') or {}
@@ -1217,12 +1244,17 @@ class App:
             'gray': ('#f1f5f9', '#475569', '#cbd5e1', '#e2e8f0', '#475569'),
         }
         cfg_ui = data.get('config') or {}
+        manual_confirmed = data.get('manual_confirmed') or {}
         session_live = phase in ('live', 'fail') and bool(tool) and not no_main
+        live_by_cam = {}
+        any_cam_active = session_live
         for name, widgets in self.baseline_views.items():
             may_prepare, blocked_reason = permissions[name]
             item = self.baseline_preview.get(name) or {}; on = item.get('on', False)
-            device = item.get('device') or '未分配'
+            if on:
+                any_cam_active = True
             import re
+            device = item.get('device') or '未分配'
             short = re.search(r'usb-[0-9]+:[0-9.]+', str(device))
             rule = '口号小=正面' if name == 'front' else '口号大=侧面'
             widgets['path'].config(text='设备：' + (short.group(0) if short else str(device)) + f'（自动：{rule}）')
@@ -1237,6 +1269,8 @@ class App:
             widgets['toggle'].config(text=button_text, fg=COLORS['red'] if display['failed'] else INK, bg='#fee4e2' if display['failed'] else '#b7ebc6' if on else '#e5e7eb', state='normal' if may_prepare and not self.baseline_pending else 'disabled')
             scan_reason = ('请打开相机预览' if not on else '正在测曝光' if item.get('exposure_busy') else '请先精定位工具' if not live or live.get('detection_status') != '精定位' else '当前不可操作' if not may_prepare else '')
             enable(widgets['exposure'], not scan_reason and name not in self.baseline_exposure_pending); enable(widgets['reset'], (on and may_prepare) or session_live)
+            enable(widgets['manual_confirm'], phase in ('live', 'fail', 'success', 'saved') and not no_main)
+            widgets['manual_confirm'].config(text='人工点选 ✓' if manual_confirmed.get(name) else '人工点选')
             scan_status = item.get('exposure_progress') or scan_reason
             scan_rows = item.get('exposure_scan_rows') or []
             lines = []
@@ -1298,13 +1332,21 @@ class App:
             def number(value): return f'{value:.2f}' if isinstance(value, (float,int)) else '—'
             delay_warning = False
             focus_live = None if (display['failed'] or (not display['on'] and not display.get('session_live')) or display['no_live_data']) else display['live']
+            if focus_live is not None:
+                live_by_cam[name] = focus_live
             good_px = (focus_live or {}).get('focus_good_px', cfg_ui.get('focus_good_px', 2.0))
             warn_px = (focus_live or {}).get('focus_warn_px', cfg_ui.get('focus_warn_px', 3.0))
             focus_info = baseline_focus_status(focus_live, good_px=good_px, warn_px=warn_px)
+            cam_ready = evaluate_camera_readiness(
+                name, focus_live, config=cfg_ui, manual_confirmed=bool(manual_confirmed.get(name))
+            )
             bar_bg, bar_fg, bar_border, badge_bg, badge_fg = focus_palettes[focus_info['color_key']]
             widgets['focus_bar'].config(bg=bar_bg, highlightbackground=bar_border)
             widgets['focus_badge'].config(text=focus_info['badge'], bg=badge_bg, fg=badge_fg)
             widgets['focus_summary'].config(text=focus_info['summary'], bg=bar_bg, fg=bar_fg)
+            widgets['focus_graph'].config(bg=bar_bg)
+            hint_text = display.get('hint', '')
+            hint_color = COLORS['red'] if display['failed'] else MUTED
             if display['failed']:
                 text = display['message']; color = COLORS['red']
                 detail = '清晰度 —　边缘 — µm / — px　对比度 —　识别来源 —　曝光 —'
@@ -1328,20 +1370,31 @@ class App:
                 src = display['live']
                 pct = src.get('percent')
                 percent_text = f'{pct:.0f}' if isinstance(pct, (int, float)) else '—'
-                if name == 'front':
-                    color = COLORS['green'] if isinstance(pct, (int,float)) and pct >= 95 else COLORS['yellow'] if isinstance(pct, (int,float)) and pct >= 80 else COLORS['red']
-                    if src.get('source') == 'band_gradient_p995':
-                        text = f'清晰度 {percent_text}%（相对本次峰值）　当前 {number(src.get("band_gradient"))} / 本次最佳 {number(src.get("peak"))}'
-                    else:
-                        text = f'清晰度 {percent_text}%（相对本次峰值）　当前 {number(src.get("edge_width_px"))} px / 本次最佳 {number(src.get("peak"))} px'
+                axis_hint = CAMERA_AXES[name]['jog_hint']
+                if cam_ready['edge_near']:
+                    color = COLORS['red']
+                    hint_text = hint_text or EDGE_MARGIN_MESSAGE
+                    hint_color = COLORS['red']
+                elif cam_ready['ready']:
+                    color = COLORS['green']
+                    hint_text = hint_text or PEAK_OVERSHOOT_HINT
+                elif isinstance(pct, (int, float)) and pct >= 80:
+                    color = COLORS['yellow']
+                    hint_text = hint_text or PEAK_OVERSHOOT_HINT
                 else:
-                    color = COLORS.get(focus_info['color_key'], MUTED)
-                    text = '侧面只需对焦合格，调整侧面镜头对焦环至绿色'
+                    color = COLORS.get(focus_info['color_key'], COLORS['red'])
+                    hint_text = hint_text or PEAK_OVERSHOOT_HINT
+                if src.get('source') == 'band_gradient_p995':
+                    text = f'清晰度 {percent_text}%（相对本次峰值）　当前 {number(src.get("band_gradient"))} / 本次最佳 {number(src.get("peak"))}　{axis_hint}'
+                else:
+                    text = f'清晰度 {percent_text}%（相对本次峰值）　当前 {number(src.get("edge_width_px"))} px / 本次最佳 {number(src.get("peak"))} px　{axis_hint}'
+                if cam_ready['edge_near']:
+                    text += f'　{EDGE_MARGIN_MESSAGE}'
                 tip = src.get('tip_uv')
                 delta = src.get('delta_uv')
                 source = f'{src.get("detection_status", "—")} {str(src.get("detection_reason") or "")}　针尖 ' + (f'({number(tip[0])}, {number(tip[1])})' if tip else '—')
                 if name == 'front' and delta:
-                    source += f'　Δu {number(delta[0])}（右+） Δv {number(delta[1])}（下+）px'
+                    source += f'　中心参考偏 Δu {number(delta[0])} Δv {number(delta[1])} px'
                 if src.get('axis_rms_px') is not None:
                     source += f'　axis_rms {number(src.get("axis_rms_px"))} px'
                 if src.get('focus_reason'):
@@ -1359,37 +1412,69 @@ class App:
                     detail += f'　帧龄 {age:.0f} ms' + ('　画面延迟' if age > 1000 else '')
                     delay_warning = age > 1000
             widgets['info'].config(text=text, fg=color)
-            hint_text = display.get('hint', '')
-            widgets['hint'].config(text=hint_text)
+            widgets['hint'].config(text=hint_text, fg=hint_color)
             if hint_text: widgets['hint'].grid()
             else: widgets['hint'].grid_remove()
             widgets['detail'].config(text=detail, fg=COLORS['red'] if delay_warning else INK)
-            graph=widgets['graph']; graph.delete('all'); values=display.get('history') or []
-            if len(values)>1:
-                width=max(2, graph.winfo_width()); height=max(2, graph.winfo_height())
-                points=[coord for i,v in enumerate(values) for coord in (i*width/(len(values)-1), height-max(0,min(100,v))*height/100)]
-                graph.create_line(*points, fill=COLORS['blue'], width=2)
+            values = display.get('history') or []
+            for graph in (widgets['graph'], widgets['focus_graph']):
+                graph.delete('all')
+                if len(values) > 1:
+                    width = max(2, graph.winfo_width()); height = max(2, graph.winfo_height())
+                    points = [coord for i, v in enumerate(values) for coord in (i*width/(len(values)-1), height-max(0, min(100, v))*height/100)]
+                    graph.create_line(*points, fill=COLORS['blue'], width=2)
+
+        if live_by_cam:
+            overall = evaluate_baseline_readiness(
+                live_by_cam.get('front'), live_by_cam.get('side'), config=cfg_ui, manual_confirmed=manual_confirmed
+            )
+        elif isinstance(data.get('live_readiness'), dict):
+            overall = data['live_readiness']
+        else:
+            overall = evaluate_baseline_readiness(None, None, config=cfg_ui, manual_confirmed=manual_confirmed)
+        if not any_cam_active and phase in ('idle', 'done', 'unknown'):
+            ob_bg, ob_fg, ob_bd = '#f1f5f9', '#475469', '#cbd5e1'
+            ob_text = f'等待打开两路预览或开始对刀基准建立（{GEOMETRY_SUMMARY}）'
+        else:
+            ob_bg, ob_fg, ob_bd, _, _ = focus_palettes.get(overall.get('banner_color', 'gray'), focus_palettes['gray'])
+            ob_text = overall.get('banner_text', '')
+        self.baseline_overall_bar.config(bg=ob_bg, highlightbackground=ob_bd)
+        self.baseline_overall.config(text=ob_text, bg=ob_bg, fg=ob_fg)
 
         def enable_main(widget, condition): enable(widget, condition and not no_main)
         for i, button in enumerate(self.baseline_tools, 1):
             enable_main(button, phase == 'select'); button.config(style='Selected.Baseline.TButton' if i == tool else 'Baseline.TButton')
-        for b in (self.baseline_measure, self.baseline_manual): enable_main(b, phase in ('live','fail','success','saved'))
-        enable_main(self.baseline_aux, phase in ('success','saved') and bool(candidate.get('p0')))
+        can_measure_phase = phase in ('live', 'fail', 'success', 'saved') and not no_main
+        ready_to_measure = can_measure_phase and bool(overall.get('ready'))
+        enable(self.baseline_measure, ready_to_measure)
+        if ready_to_measure:
+            self.baseline_measure_reason.config(text='')
+        elif no_main:
+            self.baseline_measure_reason.config(text='不可点：主程序未运行')
+        elif phase not in ('live', 'fail', 'success', 'saved'):
+            self.baseline_measure_reason.config(text='不可点：请先点击开始并选择工具')
+        else:
+            self.baseline_measure_reason.config(text='不可点：' + (overall.get('disabled_reason') or '两路针尖尚未都最清晰'))
+        enable_main(self.baseline_manual, phase in ('live', 'fail', 'success', 'saved'))
+        enable_main(self.baseline_aux, phase in ('success', 'saved') and bool(candidate.get('p0')))
         enable_main(self.baseline_save, phase == 'success')
-        enable_main(self.baseline_end, phase not in ('idle','done'))
+        enable_main(self.baseline_end, phase not in ('idle', 'done'))
+        any_prep_reset = any((self.baseline_preview.get(n) or {}).get('on') and permissions[n][0] for n in ('front', 'side'))
+        enable(self.baseline_peak_reset, session_live or any_prep_reset)
         pixels = candidate.get('pixels') or {}; focus = candidate.get('focus') or {}; click = candidate.get('click') or {}
         def vector(value, digits=2):
             return '(' + ', '.join(f'{x:.{digits}f}' for x in value) + ')' if isinstance(value, (list,tuple)) else '—'
-        lines = [f"主相机偏差 mm：{vector(candidate.get('delta_mm'), 3)}　{'在圈内' if candidate.get('inside') else '不在圈内' if candidate else '—'}",
+        lines = [f"主相机中心偏差（参考）mm：{vector(candidate.get('delta_mm'), 3)}",
                  f"主/辅针尖：{vector(pixels.get('front'))} / {vector(pixels.get('side'))}　P0：{vector(candidate.get('p0'), 3)}"]
         for key, title in (('front','主'), ('side','辅助')):
             item = focus.get(key) or {}
             conf = item.get('confidence'); conf = f'{conf:.2f}' if isinstance(conf, (int, float)) else '—'
             focused = item.get('focused'); focused_text = ('清晰' if focused else '模糊') if isinstance(focused, bool) else '—'
             edge = item.get('edge_width_px'); edge = f'{edge:.2f}' if isinstance(edge, (int,float)) else '—'
+            fpct = item.get('focus_percent'); fpct_text = f'{fpct:.0f}%' if isinstance(fpct, (int, float)) else '—'
             coarse = '（粗定位）' if item.get('coarse') else ''
             override = f"　{item['override_note']}" if item.get('override_note') else ('　人工确认' if item.get('manual_override') else '')
-            lines.append(f"{title}相机：可靠度 {conf}　{focused_text}{coarse}　边缘 {edge}px　人工 {'是' if key in click else '否'}{override}")
+            lines.append(f"{title}相机：清晰度 {fpct_text}　可靠度 {conf}　{focused_text}{coarse}　边缘 {edge}px　人工 {'是' if key in click else '否'}{override}")
         self.baseline_result.config(text='\n'.join(lines))
         lines = []
         for i in (1, 2):

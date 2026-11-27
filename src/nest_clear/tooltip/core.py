@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
+from typing import Any
 import numpy as np
 
 from nest_clear.guard import GuardError
@@ -53,6 +54,8 @@ class ViewCalib:
     axis_rms_px: float | None = None
     edge_width_px: float | None = None
     override_note: str | None = None
+    focus_percent: float | None = None
+    focus_peak: float | None = None
 
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""
@@ -60,7 +63,7 @@ class ViewCalib:
             raise _error("width_px must be positive", locals())
         if type(self.manual_override) is not bool:
             raise _error("manual_override must be a boolean", locals())
-        for attr in ("axis_rms_px", "edge_width_px"):
+        for attr in ("axis_rms_px", "edge_width_px", "focus_percent", "focus_peak"):
             val = getattr(self, attr)
             if val is not None and (isinstance(val, bool) or not isinstance(val, (int, float)) or not np.isfinite(val) or val < 0):
                 raise _error(f"{attr} must be non-negative and finite", locals())
@@ -88,6 +91,8 @@ class ToolTipBaseline:
     jacobian_session: str = ""
     detector: dict[str, dict[str, str]] | None = None
     manual_override: bool = False
+    baseline_rule: str | None = None
+    focus_criteria: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""
@@ -112,6 +117,10 @@ class ToolTipBaseline:
             raise _error("manual_override must be a boolean", locals())
         if not isinstance(self.jacobian_measured_at, str) or not isinstance(self.jacobian_session, str):
             raise _error("jacobian measurement metadata must be strings", locals())
+        if self.baseline_rule is not None and not isinstance(self.baseline_rule, str):
+            raise _error("baseline_rule must be a string", locals())
+        if self.focus_criteria is not None and not isinstance(self.focus_criteria, Mapping):
+            raise _error("focus_criteria must be a mapping", locals())
 
 
 @dataclass(frozen=True)

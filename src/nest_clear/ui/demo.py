@@ -748,7 +748,7 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
         from nest_clear.baseline.session import format_outside_message
         delta = candidate.get('delta_mm') or [0.0, 0.0]
         fail_msg = format_outside_message(delta)
-        phases = {'select':('select','请选择工具'), 'live':('live','请点动针尖到主相机中心后按【对刀基准】'),
+        phases = {'select':('select','请选择工具'), 'live':('live','请点动使两路针尖都最清晰（正面调 Y、侧面调 X）后按【对刀基准】'),
                   'success':('success','基准建立成功（待保存）'), 'fail':('fail', fail_msg), 'confirm':('confirm','请确认覆盖保存'),
                   'prepare':('prepare','请调焦后开始对刀基准建立'), 'prepare_error':('prepare','请检查相机连接'), 'prepare_unassigned':('idle','请分配相机')}
         phase,message = phases[baseline_state]

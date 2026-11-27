@@ -45,7 +45,7 @@ logger = logging.getLogger("nest_clear.flow")
 REQUEST_NAMES = {1: "请求扫描位或下一任务", 60: "挑取完成"}
 BASELINE_COMMANDS = frozenset({
     'baseline_start', 'baseline_select', 'baseline_measure', 'baseline_manual',
-    'baseline_aux', 'baseline_save', 'baseline_confirm', 'baseline_end',
+    'baseline_manual_view', 'baseline_aux', 'baseline_save', 'baseline_confirm', 'baseline_end',
 })
 PREVIEW_COMMANDS = frozenset({'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap', 'tooltip_runout_start', 'tooltip_runout_press', 'tooltip_runout_end'})
 

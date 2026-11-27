@@ -140,6 +140,8 @@ def save_baseline(
         **({"jacobian_session": baseline.jacobian_session} if baseline.jacobian_session else {}),
         **({"detector": baseline.detector} if baseline.detector else {}),
         **({"manual_override": True} if baseline.manual_override else {}),
+        **({"baseline_rule": baseline.baseline_rule} if baseline.baseline_rule else {}),
+        **({"focus_criteria": dict(baseline.focus_criteria)} if baseline.focus_criteria else {}),
         "views": [
             {
                 "name": view.name,
@@ -151,6 +153,8 @@ def save_baseline(
                 **({"axis_rms_px": view.axis_rms_px} if view.axis_rms_px is not None else {}),
                 **({"edge_width_px": view.edge_width_px} if view.edge_width_px is not None else {}),
                 **({"override_note": view.override_note} if view.override_note else {}),
+                **({"focus_percent": view.focus_percent} if view.focus_percent is not None else {}),
+                **({"focus_peak": view.focus_peak} if view.focus_peak is not None else {}),
             }
             for view in baseline.views
         ],

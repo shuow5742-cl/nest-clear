@@ -110,11 +110,12 @@ def test_save_backup_stale_and_other_tool(rig):
 
 def test_outside_retry_and_discard(rig):
     s,camera,*_=rig
-    camera.x=325; cmd(s,'baseline_measure','fail'); assert '基准标定失败' in s.message and '右侧' in s.message and '画面方向' in s.message
+    camera.x=180; cmd(s,'baseline_measure','success')
+    assert abs(s.candidate['pixels']['front'][0] - 180) <= 1.0
     front_img = cv2.imread(str(s.events.directory / 'live' / 'baseline_front.jpg'))
     assert front_img is not None and front_img.shape[1] > 640
-    camera.x=320; cmd(s,'baseline_measure','success'); cmd(s,'baseline_save','confirm'); cmd(s,'baseline_confirm','live',{'accept':False})
-    cmd(s,'baseline_measure','success')
+    cmd(s,'baseline_save','confirm'); cmd(s,'baseline_confirm','live',{'accept':False})
+    camera.x=320; cmd(s,'baseline_measure','success')
 
 
 def test_manual_and_aux_reset(rig):

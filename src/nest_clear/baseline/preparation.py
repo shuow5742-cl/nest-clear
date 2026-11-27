@@ -22,6 +22,12 @@ from nest_clear.tooltip.focus_metrics import focus_metrics, EdgeWidthTracker, Ba
 from nest_clear.tooltip.trident import TridentResult
 from nest_clear.tooltip.exposure_scan import scan_exposure
 from nest_clear.baseline.latest_capture import FrameBroker
+from nest_clear.baseline.focus_rules import (
+    CAMERA_AXES,
+    EDGE_MARGIN_MESSAGE,
+    evaluate_camera_readiness,
+    resolve_focus_config,
+)
 
 logger = logging.getLogger(__name__)
 LOW_FREQUENCY_PREVIEW_KEYS = ('on', 'device', 'error', 'exposure_source', 'exposure_error', 'exposure_limits', 'exposure_result', 'exposure_busy', 'exposure_saved', 'exposure_progress', 'exposure_scan_rows')
@@ -35,6 +41,31 @@ def make_tip_tracker(detector_cfg):
     """按检测方法构造对应的清晰度峰值跟踪器。"""
     method = (detector_cfg or {}).get('method', 'trident')
     return BandGradientTracker() if method == 'trident' else EdgeWidthTracker(reset_distance=50)
+
+
+class ReadinessTracker:
+    """按帧跟踪单路对刀相机的连续达标帧数与就绪结论。"""
+
+    def __init__(self) -> None:
+        self.consecutive = 0
+
+    def reset(self) -> None:
+        self.consecutive = 0
+
+    def update(self, name, payload_fields, ui_config=None, *, manual_confirmed=False):
+        probe = evaluate_camera_readiness(
+            name,
+            {**payload_fields, 'consecutive_ready': None},
+            config=ui_config,
+            manual_confirmed=manual_confirmed,
+        )
+        self.consecutive = (self.consecutive + 1) if probe['frame_ok'] else 0
+        return evaluate_camera_readiness(
+            name,
+            {**payload_fields, 'consecutive_ready': self.consecutive},
+            config=ui_config,
+            manual_confirmed=manual_confirmed,
+        )
 
 
 def write_tooltip_preview_file(directory, cameras, updated_at):
@@ -79,30 +110,58 @@ def build_preview_camera_payload(
     captured_at=None,
     frame_age_ms=None,
     processing_ms=None,
+    image_size=None,
+    readiness=None,
+    manual_confirmed=False,
+    consecutive_ready=None,
 ):
     """构造单路写入 tooltip_preview.json 的标准化实时清晰度字典。"""
     method = (detector_cfg or {}).get('method', 'trident')
     axis_rms_limit = detector_cfg.get('max_axis_rms_px', 0.7) if method == 'trident' else None
+    focus_cfg = resolve_focus_config(ui_config, ui_config)
     peak_edge_um = (
         tracked['best'] * scale
         if metrics.get('source') != 'band_gradient_p995' and tracked.get('best') is not None
         else None
+    )
+    sample_count = int(tracked.get('sample_count', 0) or 0)
+    peak_valid = (
+        bool(readiness['peak_valid'])
+        if readiness is not None
+        else (tracked.get('best') is not None and sample_count >= int(focus_cfg['peak_min_frames']))
+    )
+    consec = (
+        int(readiness['consecutive_ready'])
+        if readiness is not None and readiness.get('consecutive_ready') is not None
+        else int(consecutive_ready or 0)
     )
     return {
         'tenengrad': metrics['tenengrad'],
         'band_gradient': metrics.get('band_gradient'),
         'axis_rms_px': metrics.get('axis_rms_px'),
         'axis_rms_limit': axis_rms_limit,
-        'focus_good_px': ui_config.get('focus_good_px', 2.0),
-        'focus_warn_px': ui_config.get('focus_warn_px', 3.0),
+        'focus_good_px': focus_cfg['focus_good_px'],
+        'focus_warn_px': focus_cfg['focus_warn_px'],
+        'focus_ready_percent': focus_cfg['focus_ready_percent'],
+        'focus_ready_frames': focus_cfg['focus_ready_frames'],
+        'peak_min_frames': focus_cfg['peak_min_frames'],
+        'edge_margin_px': focus_cfg['edge_margin_px'],
         'peak': tracked['best'],
         'percent': tracked['percent'],
+        'sample_count': sample_count,
+        'peak_valid': peak_valid,
+        'consecutive_ready': consec,
+        'edge_near': bool(readiness['edge_near']) if readiness is not None else False,
+        'manual_confirmed': bool(manual_confirmed),
+        'ready': bool(readiness['ready']) if readiness is not None else False,
+        'ready_reason': readiness['reason'] if readiness is not None else '',
         'edge_width_um': metrics['edge_width_um'],
         'edge_width_px': metrics['edge_width_px'],
         'peak_edge_width_um': peak_edge_um,
         'contrast': metrics['contrast'],
         'source': metrics['source'],
         'tip_uv': list(tip) if tip is not None else None,
+        'image_size': list(image_size) if image_size is not None else None,
         'detection_status': status,
         'detection_reason': getattr(detection, 'diagnostic', ''),
         'focus_reason': reason,
@@ -119,12 +178,15 @@ def build_preview_camera_payload(
     }
 
 
-def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127):
-    tip = detection.point_uv
+def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127, *, manual_confirmed=False, manual_tip=None):
+    tip = manual_tip if (manual_confirmed and manual_tip is not None) else detection.point_uv
     if isinstance(detection, TridentResult):
         status = detection.status
-        reason = detection.diagnostic if status != '精定位' else ''
-        value = (detection.sharpness or {}).get('band_gradient_p995') if status == '精定位' else None
+        diag = detection.diagnostic or ''
+        has_distortion = '工具在动或画面畸变' in diag
+        reason = diag if status != '精定位' else ''
+        can_track = (status == '精定位') or (manual_confirmed and not has_distortion)
+        value = (detection.sharpness or {}).get('band_gradient_p995') if can_track else None
         tracked = tracker.update(value, tip if value is not None else None)
         edge_px = detection.edge_width_px
         edge_um = edge_px * scale if edge_px is not None else None
@@ -132,11 +194,12 @@ def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127):
                    'contrast': detection.tip_contrast, 'source': 'band_gradient_p995',
                    'band_gradient': tracked['current'], 'axis_rms_px': detection.axis_rms_px}
         return status, reason, metrics, tracked
-    status = '未识别' if tip is None else '粗定位' if detection.coarse else '精定位'
-    reason = detection.diagnostic or ('未识别到针尖' if tip is None else '针尖为粗定位' if detection.coarse else '')
+    status = '未识别' if detection.point_uv is None else '粗定位' if detection.coarse else '精定位'
+    reason = detection.diagnostic or ('未识别到针尖' if detection.point_uv is None else '针尖为粗定位' if detection.coarse else '')
     metrics = {'tenengrad': None, 'edge_width_px': None, 'edge_width_um': None, 'contrast': None,
                'source': 'none' if tip is None else 'coarse' if detection.coarse else 'tip'}
-    if status == '精定位':
+    can_measure = (status == '精定位') or (manual_confirmed and tip is not None)
+    if can_measure:
         count, labels, stats, _ = cv2.connectedComponentsWithStats((frame <= threshold).astype(np.uint8), connectivity=8)
         silhouette = labels == (1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])) if count > 1 else np.zeros(frame.shape, dtype=bool)
         metrics = focus_metrics(frame, tip=tip, um_per_px=scale, silhouette_mask=silhouette)
@@ -145,8 +208,8 @@ def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127):
         elif metrics['edge_width_px'] is None or metrics['edge_width_px'] <= 0:
             reason = '针尖附近无有效边缘'
         else:
-            reason = ''
-    valid = status == '精定位' and not reason
+            reason = '' if status == '精定位' or manual_confirmed else reason
+    valid = can_measure and not reason
     if not valid:
         metrics['edge_width_px'] = metrics['edge_width_um'] = None
     tracked = tracker.update(metrics['edge_width_px'], tip if valid else None)
@@ -155,15 +218,15 @@ def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127):
 
 def draw_tip_preview(frame, name, detection, ui_config, scale):
     from nest_clear.baseline.session import _draw_labels
+    readiness = ui_config.get('_live_readiness') if isinstance(ui_config, dict) else None
+    tracked = ui_config.get('_live_tracked') if isinstance(ui_config, dict) else None
     image = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     height, width = frame.shape[:2]
     tip = detection.point_uv
     center = ui_config.get('main_target_uv') or ((width - 1) / 2, (height - 1) / 2)
     if name == 'front':
-        x, y = map(round, center)
-        cv2.drawMarker(image, (x, y), (255, 0, 255), cv2.MARKER_CROSS, 40, 2)
-        radius = round(ui_config.get('main_tol_mm', .1) * 1000 / scale)
-        cv2.circle(image, (x, y), max(1, radius), (255, 0, 255), 2)
+        cx, cy = map(round, center)
+        cv2.drawMarker(image, (cx, cy), (160, 165, 175), cv2.MARKER_CROSS, 24, 1)
     labels = []
     if isinstance(detection, TridentResult):
         if detection.axis and detection.sampling_rows:
@@ -179,7 +242,7 @@ def draw_tip_preview(frame, name, detection, ui_config, scale):
         if detection.farthest_prong_uv:
             cv2.circle(image, tuple(map(round, detection.farthest_prong_uv)), 5, (255, 180, 0), 2)
         if detection.axis_rms_px is not None and '工具在动或画面畸变' in detection.diagnostic:
-            labels.append(((20, 65), detection.diagnostic, 'Motion or distortion', (0, 0, 255), 30))
+            labels.append(((20, 95), detection.diagnostic, 'Motion or distortion', (0, 0, 255), 30))
     if tip is None:
         labels.append(((20, 20), '未识别到针尖：' + (detection.diagnostic or '无结果'), 'Tip not detected: ' + detection.diagnostic, (0, 0, 255), 36))
     else:
@@ -191,8 +254,27 @@ def draw_tip_preview(frame, name, detection, ui_config, scale):
         status = '粗定位' if detection.coarse else '精定位'
         position = f'{status} ({tip[0]:.1f}, {tip[1]:.1f})'
         if name == 'front':
-            position += f'  Δu={tip[0]-center[0]:+.1f}（右+） Δv={tip[1]-center[1]:+.1f}（下+）'
-        labels.append(((20, 20), position, f'{status} ({tip[0]:.1f}, {tip[1]:.1f})', color, 36))
+            position += f'  中心参考偏 Δu={tip[0]-center[0]:+.1f} Δv={tip[1]-center[1]:+.1f}'
+        labels.append(((20, 20), position, f'{status} ({tip[0]:.1f}, {tip[1]:.1f})', color, 32))
+        axis_hint = CAMERA_AXES.get(name, {}).get('jog_hint', '')
+        pct = (tracked or {}).get('percent')
+        edge_px = getattr(detection, 'edge_width_px', None)
+        pct_str = f'{pct:.0f}%' if isinstance(pct, (int, float)) else '—%'
+        edge_str = f'{edge_px:.2f}px' if isinstance(edge_px, (int, float)) else '—px'
+        if readiness and readiness.get('edge_near'):
+            focus_line = EDGE_MARGIN_MESSAGE
+            focus_en = 'Near edge'
+            focus_color = (0, 0, 220)
+        elif readiness and readiness.get('ready'):
+            focus_line = f'清晰度 {pct_str}  边缘 {edge_str}  已最清晰'
+            focus_en = f'Focus {pct_str} edge {edge_str} READY'
+            focus_color = (0, 165, 0)
+        else:
+            reason_hint = (readiness or {}).get('short_reason') or axis_hint
+            focus_line = f'清晰度 {pct_str}  边缘 {edge_str}  {reason_hint}'
+            focus_en = f'Focus {pct_str} edge {edge_str}'
+            focus_color = (0, 145, 220) if (readiness or {}).get('color_key') == 'yellow' else (0, 0, 220)
+        labels.append(((20, 58), focus_line, focus_en, focus_color, 26))
     return _draw_labels(image, labels)
 
 
@@ -214,6 +296,7 @@ class Preparation:
         self.devices = []
         detector_settings = getattr(getattr(config, 'tool_calibration', None), 'detection', {})
         self.trackers = {n: make_tip_tracker(detector_settings.get(n, {})) for n in self.enabled}
+        self.readiness_trackers = {n: ReadinessTracker() for n in self.enabled}
         self.reset_peak = {n: threading.Event() for n in self.enabled}
         self.history = {n: [] for n in self.enabled}
         self._preview_cameras = {}
@@ -569,6 +652,18 @@ class Preparation:
         if name.startswith('tooltip_runout_'):
             self.runout.command(name, params.get('_seq'))
             return
+        if name == 'tooltip_peak_reset':
+            camera = params.get('camera')
+            if camera in (None, 'all'):
+                for cam_name in self.enabled:
+                    self.reset_peak[cam_name].set()
+                self.publish()
+                return
+            if camera not in self.enabled:
+                raise ValueError('请选择主或辅助对刀相机')
+            self.reset_peak[camera].set()
+            self.publish()
+            return
         if name in ('tooltip_assign', 'tooltip_swap'):
             raise ValueError('对刀相机已按插口固定，不可在界面修改')
         camera = params.get('camera')
@@ -630,8 +725,6 @@ class Preparation:
                     self.exposure_requests[camera] = {**params, 'action': name}
             if error:
                 self.exposure_reply(camera, params.get('_seq'), 'error', error)
-        elif name == 'tooltip_peak_reset':
-            self.reset_peak[camera].set()
         else:
             raise ValueError('未知对刀相机命令')
         self.publish()
@@ -640,7 +733,7 @@ class Preparation:
         if previous: previous.join()
         if stop.is_set(): return
         camera = self.worker.cameras[name]
-        self.trackers[name].reset(); self.history[name] = []
+        self.trackers[name].reset(); self.readiness_trackers[name].reset(); self.history[name] = []
         self._last_summary[name] = None
         target = Path(self.events.directory) / 'live' / f'baseline_{name}.jpg'
         target.unlink(missing_ok=True)
@@ -666,6 +759,7 @@ class Preparation:
                 processing_start = time.monotonic()
                 if exposure is not None and last_exposure is not None and exposure != last_exposure:
                     self.trackers[name].reset()
+                    self.readiness_trackers[name].reset()
                     self.history[name] = []
                 if exposure is not None:
                     last_exposure = exposure
@@ -679,9 +773,24 @@ class Preparation:
                 delta_uv = [tip[0] - target_uv[0], tip[1] - target_uv[1]] if name == 'front' and tip is not None else None
                 scale = self.ui_config.get('main_um_per_px' if name == 'front' else 'aux_um_per_px', 13.5)
                 if self.reset_peak[name].is_set():
-                    self.trackers[name].reset(); self.reset_peak[name].clear()
+                    self.trackers[name].reset(); self.readiness_trackers[name].reset(); self.reset_peak[name].clear()
                     self.history[name] = []
                 status, reason, metrics, tracked = analyze_tip(frame, detection, self.trackers[name], scale, self.ui_config.get('min_focus_contrast', 40), detector_cfg.get('threshold', 127))
+                image_size = (frame.shape[1], frame.shape[0])
+                readiness = self.readiness_trackers[name].update(
+                    name,
+                    {
+                        'detection_status': status,
+                        'detection_reason': detection.diagnostic,
+                        'tip_uv': list(tip) if tip is not None else None,
+                        'image_size': list(image_size),
+                        'percent': tracked['percent'],
+                        'peak': tracked['best'],
+                        'sample_count': tracked.get('sample_count', 0),
+                        'edge_width_px': metrics['edge_width_px'],
+                    },
+                    self.ui_config,
+                )
                 self.history[name] = [(t,v) for t,v in self.history[name] if now-t <= 30]
                 if tracked['percent'] is not None:
                     self.history[name].append((now, tracked['percent']))
@@ -693,8 +802,11 @@ class Preparation:
                         edge_width_um=metrics['edge_width_um'], edge_width_px=metrics['edge_width_px'], contrast=metrics['contrast'],
                         source=metrics['source'], tip_uv=list(tip) if tip is not None else None,
                         detection_status=status, detection_reason=detection.diagnostic, focus_reason=reason,
+                        ready=readiness['ready'], ready_reason=readiness['reason'],
+                        sample_count=tracked.get('sample_count', 0), consecutive_ready=readiness['consecutive_ready'],
                         history=[v for _,v in self.history[name]], fps=fps)
-                image = draw_tip_preview(frame, name, detection, self.ui_config, scale)
+                preview_cfg = {**self.ui_config, '_live_readiness': readiness, '_live_tracked': tracked}
+                image = draw_tip_preview(frame, name, detection, preview_cfg, scale)
                 image = cv2.resize(image, (960, max(1, round(frame.shape[0]*960/frame.shape[1]))), interpolation=cv2.INTER_AREA)
                 ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 with stream.condition:
@@ -727,6 +839,8 @@ class Preparation:
                         captured_at=item.captured_at,
                         frame_age_ms=max(0., (published - item.captured_mono) * 1000),
                         processing_ms=max(0., (published - processing_start) * 1000),
+                        image_size=image_size,
+                        readiness=readiness,
                     )
                 self._write_preview_file(now=now)
                 last_sum = self._last_summary[name]

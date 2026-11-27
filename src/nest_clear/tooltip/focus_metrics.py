@@ -62,20 +62,22 @@ class EdgeWidthTracker:
         self.best = None
         self.position = None
         self.widths = deque(maxlen=3)
+        self.sample_count = 0
 
     def update(self, width, position=None):
         if width is None or not np.isfinite(width) or width <= 0:
-            return {'best': self.best, 'percent': None}
+            return {'best': self.best, 'percent': None, 'sample_count': self.sample_count}
         if position is not None and self.position is not None and np.linalg.norm(np.asarray(position) - self.position) > self.reset_distance:
             self.reset()
         if position is not None:
             self.position = np.asarray(position, dtype=float)
+        self.sample_count += 1
         self.widths.append(float(width))
         if len(self.widths) < 3:
-            return {'best': self.best, 'percent': None}
+            return {'best': self.best, 'percent': None, 'sample_count': self.sample_count}
         median = float(np.median(self.widths))
         self.best = min(median, self.best if self.best is not None else median)
-        return {'best': self.best, 'percent': min(100., 100. * self.best / width)}
+        return {'best': self.best, 'percent': min(100., 100. * self.best / width), 'sample_count': self.sample_count}
 
 
 class BandGradientTracker:
@@ -85,14 +87,17 @@ class BandGradientTracker:
     def reset(self):
         self.values = deque(maxlen=5)
         self.best = None
+        self.sample_count = 0
 
     def update(self, value, position=None):
         if value is None or not np.isfinite(value) or value <= 0:
-            return {'current': None, 'best': self.best, 'percent': None}
+            return {'current': None, 'best': self.best, 'percent': None, 'sample_count': self.sample_count}
+        self.sample_count += 1
         self.values.append(float(value))
         if len(self.values) >= 3:
             candidate = float(np.median(list(self.values)[-3:]))
             self.best = max(candidate, self.best if self.best is not None else candidate)
         current = float(np.median(self.values)) if len(self.values) == 5 else None
         return {'current': current, 'best': self.best,
-                'percent': 100 * current / self.best if current is not None and self.best else None}
+                'percent': 100 * current / self.best if current is not None and self.best else None,
+                'sample_count': self.sample_count}

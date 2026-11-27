@@ -259,8 +259,13 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert ui.pickacc_record_z.options['state'] == 'disabled'
         ui.update_baseline({'baseline':{'phase':'select'},'command_seq':0})
         assert all(b.options['state'] == 'normal' for b in ui.baseline_tools)
-        ui.update_baseline({'baseline':{'phase':'live','tool':1,'live_delta':[0.01,-0.02],'live_inside':True,'existing':{'tool1':{'tool_offset_missing':True}}},'command_seq':0})
+        ui.update_baseline({'baseline':{'phase':'live','tool':1,'live_delta':[0.01,-0.02],'live_inside':False,'existing':{'tool1':{'tool_offset_missing':True}}},'command_seq':0})
+        assert ui.baseline_measure.options['state'] == 'disabled'
+        assert '不可点' in ui.baseline_measure_reason.options['text']
+        assert ui.baseline_live.options['fg'] == app.MUTED
+        ui.update_baseline({'baseline':{'phase':'live','tool':1,'live_delta':[0.01,-0.02],'live_inside':False,'live_readiness':{'ready':True,'banner_text':'✔ 两路针尖都最清晰，可作为对刀基准 → 点【对刀基准】','banner_color':'green','disabled_reason':''},'existing':{'tool1':{'tool_offset_missing':True}}},'command_seq':0})
         assert ui.baseline_measure.options['state'] == 'normal'
+        assert ui.baseline_measure_reason.options['text'] == ''
         assert ui.baseline_save.options['state'] == 'disabled'
         assert '尚无工具偏移标定结果' in ui.baseline_notice.options['text']
         ui.update_baseline({'baseline':{'phase':'fail','tool':1,'message':'基准标定失败'},'command_seq':0})
@@ -270,7 +275,7 @@ def test_all_page_construction_refresh_and_screenshot(tmp_path, monkeypatch):
         assert ui.baseline_tools[0].options['state'] == 'disabled'
         assert ui.baseline_tools[0].options['style'] == 'Selected.Baseline.TButton'
         ui.update_baseline({'mode':'对刀基准建立中', 'command_seq':0, 'baseline':{
-            'phase':'prepare', 'preview':{'front':{'on':True,'device':'/dev/v4l/by-path/pci-usb-0:4:1.0-video-index0','percent':98,'tenengrad':1.0,'peak':1.1,'source':'tip'},
+            'phase':'prepare', 'preview':{'front':{'on':True,'device':'/dev/v4l/by-path/pci-usb-0:4:1.0-video-index0','percent':98,'tenengrad':1.0,'peak':1.1,'edge_width_px':1.5,'detection_status':'精定位','tip_uv':[320,240],'source':'tip'},
                                            'side':{'on':True,'error':'USB 带宽不足'}},
             'existing':{'tool1':{'camera_differences':['front.device']}}}})
         assert ui.baseline_views['front']['info'].options['fg'] == app.COLORS['green']

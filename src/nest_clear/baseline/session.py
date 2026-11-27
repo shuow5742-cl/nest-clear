@@ -25,10 +25,20 @@ from nest_clear.tooloffset.store import _read, save_mapping
 from nest_clear.tooltip import SilhouetteTipDetector, ToolTipBaseline, ViewCalib
 from nest_clear.tooltip.factory import baseline_detector_warning, make_tip_detector
 from nest_clear.baseline.preparation import (
+    ReadinessTracker,
     analyze_tip,
     build_preview_camera_payload,
     make_tip_tracker,
     write_tooltip_preview_file,
+)
+from nest_clear.baseline.focus_rules import (
+    BASELINE_RULE,
+    CAMERA_AXES,
+    EDGE_MARGIN_MESSAGE,
+    FOCUS_DEFAULTS,
+    evaluate_baseline_readiness,
+    evaluate_camera_readiness,
+    is_near_edge,
 )
 from nest_clear.baseline.runout import FRAME_COUNT, FRAME_QUALITY_PASSED, measure_frames
 from nest_clear.tooltip.trident import TridentResult
@@ -43,8 +53,7 @@ DEFAULTS: dict[str, Any] = {
     "main_um_per_px": 13.5,
     "aux_um_per_px": 13.5,
     "min_focus_contrast": 40,
-    "focus_good_px": 2.0,
-    "focus_warn_px": 3.0,
+    **FOCUS_DEFAULTS,
     "runout_max_mm": 0.05,
     # 11-25 评测：静止组中位 0.05px；个别帧最远齿选择翻转可达 1.6px
     "runout_frame_std_max_px": 0.3,
@@ -116,14 +125,24 @@ def settings(path: str | Path) -> dict[str, Any]:
         "min_focus_contrast",
         "focus_good_px",
         "focus_warn_px",
+        "focus_ready_percent",
         "runout_max_mm",
         "runout_frame_std_max_px",
     ):
         value = cfg[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"{key} 必须为有限正数")
+    if cfg["focus_ready_percent"] > 100:
+        raise ValueError("focus_ready_percent 不能大于 100")
     if cfg["focus_warn_px"] < cfg["focus_good_px"]:
         raise ValueError("focus_warn_px 不能小于 focus_good_px")
+    for key in ("focus_ready_frames", "peak_min_frames"):
+        value = cfg[key]
+        if type(value) is not int or value < 1:
+            raise ValueError(f"{key} 必须为正整数")
+    margin = cfg["edge_margin_px"]
+    if isinstance(margin, bool) or not isinstance(margin, (int, float)) or not math.isfinite(margin) or margin < 0:
+        raise ValueError("edge_margin_px 必须为非负有限数")
     target = cfg["main_target_uv"]
     if target is not None and (
         not isinstance(target, (tuple, list))
@@ -224,6 +243,10 @@ def baseline_mapping(baseline: ToolTipBaseline) -> dict[str, Any]:
             item["edge_width_px"] = view.edge_width_px
         if view.override_note:
             item["override_note"] = view.override_note
+        if view.focus_percent is not None:
+            item["focus_percent"] = view.focus_percent
+        if view.focus_peak is not None:
+            item["focus_peak"] = view.focus_peak
         views.append(item)
     return {
         "version": 1,
@@ -235,6 +258,8 @@ def baseline_mapping(baseline: ToolTipBaseline) -> dict[str, Any]:
         "jacobian_pending": True,
         **({"detector": baseline.detector} if baseline.detector else {}),
         **({"manual_override": True} if baseline.manual_override else {}),
+        **({"baseline_rule": baseline.baseline_rule} if baseline.baseline_rule else {}),
+        **({"focus_criteria": dict(baseline.focus_criteria)} if baseline.focus_criteria else {}),
         "views": views,
     }
 
@@ -400,7 +425,11 @@ class BaselineSession:
         self.shots = 0
         detector_settings = getattr(getattr(config, "tool_calibration", None), "detection", {}) or {}
         self.trackers = {n: make_tip_tracker(detector_settings.get(n, {})) for n in ("front", "side")}
+        self.readiness_trackers = {n: ReadinessTracker() for n in ("front", "side")}
         self.history: dict[str, list[tuple[float, float]]] = {"front": [], "side": []}
+        self.manual_points: dict[str, list[float]] = {}
+        self.manual_clicks: dict[str, dict[str, Any]] = {}
+        self.live_snapshots: dict[str, dict[str, Any]] = {}
         self._last_live_emit = 0.0
         self._live_last_ts: float | None = None
         self.start_time = events.clock().isoformat()
@@ -439,6 +468,17 @@ class BaselineSession:
         if self.phase in ("select", "done"):
             data["live_delta"] = None
             data["live_inside"] = False
+            data["live_readiness"] = None
+        else:
+            data["manual_confirmed"] = {n: n in getattr(self, "manual_points", {}) for n in ("front", "side")}
+            snapshots = getattr(self, "live_snapshots", None)
+            if snapshots:
+                data["live_readiness"] = evaluate_baseline_readiness(
+                    snapshots.get("front"),
+                    snapshots.get("side"),
+                    config=self.cfg,
+                    manual_confirmed=data["manual_confirmed"],
+                )
         if self.tool is not None:
             try:
                 data["offset_xyz"] = load_tools(Path(self.config.tool_calibration.directory) / "tools.yaml")["tools"][f"tool{self.tool}"]["offset_xyz"]
@@ -481,52 +521,32 @@ class BaselineSession:
         return ((image.shape[1] - 1) / 2.0, (image.shape[0] - 1) / 2.0)
 
     def _annotate(self, images: dict[str, np.ndarray], detections: dict[str, Any]) -> None:
-        """在主/辅助整幅画面及右侧放大小窗绘制基准中心、容许圆、针尖、轮廓及中文状态。"""
+        """在主/辅助整幅画面及右侧放大小窗绘制针尖、轮廓与清晰度就绪状态（无容许圆红绿判定）。"""
+        cfg = getattr(self, "cfg", DEFAULTS)
+        snapshots = getattr(self, "live_snapshots", {}) or {}
+        manual_pts = getattr(self, "manual_points", {}) or {}
         for name in ("front", "side"):
             raw = images[name]
             base_bgr = cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR) if raw.ndim == 2 else raw.copy()
             h, w = base_bgr.shape[:2]
             d = detections.get(name)
-            scale_um = float(self.cfg["main_um_per_px"] if name == "front" else self.cfg["aux_um_per_px"])
-            tol_px = float(self.cfg["main_tol_mm"]) * 1000.0 / scale_um
-            crop_size = max(60, int(math.ceil(tol_px * 3.0)))
+            scale_um = float(cfg["main_um_per_px"] if name == "front" else cfg["aux_um_per_px"])
+            crop_size = max(60, round(min(w, h) * 0.125))
             if crop_size % 2:
                 crop_size += 1
             inset_size = max(280, round(h * 0.625))
             zoom = inset_size / crop_size
 
-            has_target = False
-            roi_label_cn = ""
-            roi_label_en = ""
-            if name == "front":
-                roi_center = self._target(raw)
-                has_target = True
-                roi_label_cn = "基准中心"
-                roi_label_en = "Target"
-            elif self.candidate and self.candidate.get("passed"):
-                pts = self.candidate["pixels"]["side"]
-                roi_center = (float(pts[0]), float(pts[1]))
-                has_target = True
-                roi_label_cn = "辅助基准点（本次建立）"
-                roi_label_en = "Aux Target"
-            elif d and d.point_uv is not None:
-                roi_center = (float(d.point_uv[0]), float(d.point_uv[1]))
-            else:
-                roi_center = ((w - 1) / 2.0, (h - 1) / 2.0)
-
             tip_uv = tuple(float(x) for x in d.point_uv) if d and d.point_uv is not None else None
             manual_uv = (
                 tuple(float(x) for x in self.candidate["pixels"][name])
-                if self.candidate and name in self.candidate.get("click", {})
-                else None
+                if self.candidate and name in self.candidate.get("click", {}) and self.candidate["pixels"].get(name)
+                else (tuple(float(x) for x in manual_pts[name]) if name in manual_pts else None)
             )
             eval_uv = manual_uv if manual_uv is not None else tip_uv
-            inside = False
-            if has_target and eval_uv is not None:
-                inside = math.dist(eval_uv, roi_center) * scale_um / 1000.0 <= float(self.cfg["main_tol_mm"])
-            circle_color = (0, 175, 0) if (name == "side" and has_target) or inside else (0, 0, 230)
+            roi_center = eval_uv if eval_uv is not None else ((w - 1) / 2.0, (h - 1) / 2.0)
 
-            # 放大图取原图加轮廓，避免整幅图大十字线遮挡细节。
+            # 放大图取原图加轮廓，避免整幅图线标遮挡细节。
             zoom_src = base_bgr.copy()
             detection_cfg = getattr(getattr(self.config, "tool_calibration", None), "detection", {}) or {}
             threshold = (detection_cfg.get(name) or {}).get("threshold", 127)
@@ -538,17 +558,10 @@ class BaselineSession:
                 cv2.drawContours(zoom_src, [largest], -1, (255, 120, 0), 1)
 
             labels: list[tuple[tuple[int, int], str, str, tuple[int, int, int], int]] = []
-            if has_target:
-                cx, cy = round(roi_center[0]), round(roi_center[1])
-                cross_color = (220, 0, 220)
-                cv2.line(base_bgr, (0, cy), (w - 1, cy), cross_color, 1)
-                cv2.line(base_bgr, (cx, 0), (cx, h - 1), cross_color, 1)
-                half = crop_size // 2
-                x0, y0 = max(0, cx - half), max(0, cy - half)
-                x1, y1 = min(w - 1, cx + half), min(h - 1, cy + half)
-                cv2.rectangle(base_bgr, (x0, y0), (x1, y1), cross_color, 2)
-                cv2.circle(base_bgr, (cx, cy), max(2, round(tol_px)), circle_color, 1, cv2.LINE_AA)
-                labels.append(((min(w - 90, x0 + 2), max(4, y0 - 22)), roi_label_cn, roi_label_en, cross_color, 15))
+            center_ref = self._target(raw) if name == "front" else None
+            if center_ref is not None:
+                cx, cy = round(center_ref[0]), round(center_ref[1])
+                cv2.drawMarker(base_bgr, (cx, cy), (160, 165, 175), cv2.MARKER_CROSS, 24, 1)
 
             if tip_uv is not None:
                 tip_pt = (round(tip_uv[0]), round(tip_uv[1]))
@@ -561,15 +574,40 @@ class BaselineSession:
                 labels.append(((min(w - 70, click_pt[0] + 10), max(4, click_pt[1] - 20)), "人工点", "MANUAL", (180, 0, 220), 14))
 
             if name == "front":
-                if eval_uv is not None:
-                    dx, dy = ((eval_uv[i] - roi_center[i]) * scale_um / 1000.0 for i in (0, 1))
-                    labels.append(((12, 8), f"横向偏差 {dx:+.3f}mm  竖向偏差 {dy:+.3f}mm", f"dx {dx:+.3f}mm dy {dy:+.3f}mm", circle_color, 18))
+                if eval_uv is not None and center_ref is not None:
+                    dx, dy = ((eval_uv[i] - center_ref[i]) * scale_um / 1000.0 for i in (0, 1))
+                    labels.append((
+                        (12, 8),
+                        f"中心偏差（参考）横向 {dx:+.3f}mm  竖向 {dy:+.3f}mm",
+                        f"Ref center dx {dx:+.3f}mm dy {dy:+.3f}mm",
+                        (100, 110, 125),
+                        16,
+                    ))
                 else:
-                    labels.append(((12, 8), "等待识别针尖", "Waiting tip", (0, 0, 220), 18))
+                    labels.append(((12, 8), "等待识别针尖", "Waiting tip", (100, 110, 125), 16))
 
-            if d and d.point_uv is not None:
-                cfg = getattr(self, "cfg", DEFAULTS)
-                edge_val = d.edge_width_px
+            snap = snapshots.get(name) or {}
+            axis_hint = CAMERA_AXES[name]["jog_hint"]
+            pct = snap.get("percent")
+            pct_str = f"{pct:.0f}%" if isinstance(pct, (int, float)) and math.isfinite(pct) else "--%"
+            readiness = evaluate_camera_readiness(
+                name,
+                {
+                    **snap,
+                    "detection_status": snap.get("detection_status")
+                    or ("未识别" if not d or d.point_uv is None else "粗定位" if d.coarse else "精定位"),
+                    "detection_reason": getattr(d, "diagnostic", "") if d else "",
+                    "tip_uv": list(eval_uv) if eval_uv is not None else None,
+                    "image_size": [w, h],
+                    "edge_width_px": snap.get("edge_width_px") if snap.get("edge_width_px") is not None else (d.edge_width_px if d else None),
+                },
+                config=cfg,
+                manual_confirmed=(name in manual_pts),
+            )
+            color_map = {"green": (0, 155, 0), "yellow": (0, 145, 220), "red": (0, 0, 220), "gray": (100, 110, 125)}
+
+            if d and (d.point_uv is not None or name in manual_pts):
+                edge_val = snap.get("edge_width_px") if snap.get("edge_width_px") is not None else d.edge_width_px
                 edge_text = f"{edge_val:.2f}px" if edge_val is not None else "--"
                 if edge_val is not None and math.isfinite(edge_val) and edge_val > 0:
                     good_px = float(cfg.get("focus_good_px", 2.0))
@@ -577,31 +615,39 @@ class BaselineSession:
                     if edge_val <= good_px:
                         focus_cn, focus_en, focus_color = "清晰", "GOOD", (0, 155, 0)
                     elif edge_val <= warn_px:
-                        focus_cn, focus_en, focus_color = "稍虚", "WARN", (0, 165, 220)
+                        focus_cn, focus_en, focus_color = "稍虚", "WARN", (0, 145, 220)
                     else:
                         focus_cn, focus_en, focus_color = "偏糊", "BLUR", (0, 0, 220)
                 else:
                     focus_cn = "清晰" if d.focused else "偏糊"
                     focus_en = "OK" if d.focused else "FAIL"
                     focus_color = (0, 155, 0) if d.focused and not d.coarse else (0, 0, 220)
+                if readiness["edge_near"]:
+                    focus_color = (0, 0, 220)
+                elif readiness["ready"]:
+                    focus_color = (0, 155, 0)
                 coarse_cn = " 粗定位" if d.coarse else ""
+                manual_cn = " 人工确认" if name in manual_pts else ""
+                ready_tag = " [已最清晰]" if readiness["ready"] else f" [{axis_hint}]"
                 labels.append((
                     (12, 34 if name == "front" else 10),
-                    f"可靠度 {d.confidence:.2f}  边缘 {edge_text}  {focus_cn}{coarse_cn}",
-                    f"conf {d.confidence:.2f} edge {edge_text} {focus_en}",
+                    f"清晰度 {pct_str}  边缘 {edge_text}  {focus_cn}{coarse_cn}{manual_cn}{ready_tag}",
+                    f"focus {pct_str} edge {edge_text} {focus_en}",
                     focus_color,
                     15,
                 ))
+                if readiness["edge_near"]:
+                    labels.append(((12, 58 if name == "front" else 34), EDGE_MARGIN_MESSAGE, "Near image edge", (0, 0, 220), 14))
             else:
                 labels.append((
                     (12, 34 if name == "front" else 10),
-                    "未检测到针尖（模糊或无目标）",
+                    f"未检测到针尖（{axis_hint}）",
                     "NO TIP / focus FAIL",
                     (0, 0, 220),
                     15,
                 ))
 
-            # 右侧放大小窗：裁剪约 60x60 放大至约 300px；辅助相机建立成功前仅放大针尖，不画中心十字或圆圈。
+            # 右侧放大小窗：围绕针尖局部放大，展示清晰度与调焦引导。
             matrix = np.array(
                 [
                     [zoom, 0.0, inset_size / 2.0 - roi_center[0] * zoom],
@@ -610,22 +656,12 @@ class BaselineSession:
                 dtype=np.float32,
             )
             zoomed = cv2.warpAffine(zoom_src, matrix, (inset_size, inset_size), flags=cv2.INTER_NEAREST, borderValue=(235, 235, 235))
-            if has_target:
-                ic = inset_size // 2
-                cv2.line(zoomed, (0, ic), (inset_size - 1, ic), (220, 0, 220), 1)
-                cv2.line(zoomed, (ic, 0), (ic, inset_size - 1), (220, 0, 220), 1)
-                zoom_radius = max(3, round(tol_px * zoom))
-                cv2.circle(zoomed, (inset_size // 2, inset_size // 2), zoom_radius, circle_color, 2, cv2.LINE_AA)
-
-            out_of_inset = False
             if tip_uv is not None:
                 zx = (tip_uv[0] - roi_center[0]) * zoom + inset_size / 2.0
                 zy = (tip_uv[1] - roi_center[1]) * zoom + inset_size / 2.0
                 if 0 <= zx < inset_size and 0 <= zy < inset_size:
                     cv2.circle(zoomed, (round(zx), round(zy)), 6, (0, 0, 0), -1, cv2.LINE_AA)
                     cv2.circle(zoomed, (round(zx), round(zy)), 5, (0, 220, 255), -1, cv2.LINE_AA)
-                else:
-                    out_of_inset = True
             if manual_uv is not None:
                 mx = (manual_uv[0] - roi_center[0]) * zoom + inset_size / 2.0
                 my = (manual_uv[1] - roi_center[1]) * zoom + inset_size / 2.0
@@ -642,25 +678,16 @@ class BaselineSession:
             canvas[iy:iy + inset_size, ix:ix + inset_size] = zoomed
             cv2.rectangle(canvas, (ix - 1, iy - 1), (ix + inset_size, iy + inset_size), (150, 160, 175), 1)
 
-            if has_target:
-                title_cn = f"{'基准中心' if name == 'front' else '辅助基准点'}放大 {zoom:.1f}× ({crop_size}×{crop_size}px)"
-            else:
-                title_cn = f"针尖局部放大 {zoom:.1f}× ({crop_size}×{crop_size}px)"
+            title_cn = f"针尖局部放大 {zoom:.1f}× ({crop_size}×{crop_size}px)"
             title_en = f"Zoom {zoom:.1f}x ({crop_size}x{crop_size}px)"
             labels.append(((ix, 8), title_cn, title_en, (30, 41, 59), 15))
 
             ly = iy + inset_size + 8
-            if has_target:
-                labels.append(((ix, ly), f"品红十字：{roi_label_cn}  圆圈：{self.cfg['main_tol_mm']:.2f}mm", f"Cross: {roi_label_en}  Circle: {self.cfg['main_tol_mm']:.2f}mm", (60, 70, 85), 13))
-                labels.append(((ix, ly + 22), "黄实心点：自动检测  紫实心点：人工确认", "Yellow: Auto  Purple: Manual", (60, 70, 85), 13))
-                if out_of_inset:
-                    labels.append(((ix, ly + 44), "状态：针尖超出放大窗范围", "Status: Tip outside zoom", (0, 0, 220), 14))
-                elif name == "front":
-                    labels.append(((ix, ly + 44), "状态：针尖在容许圆内" if inside else "状态：针尖超出容许圆", "Status: Inside" if inside else "Status: Outside", circle_color, 14))
-                else:
-                    labels.append(((ix, ly + 44), "状态：辅助基准范围已建立", "Status: Aux baseline set", (0, 155, 0), 14))
-            else:
-                labels.append(((ix, ly), "黄实心点：自动检测  紫实心点：人工确认", "Yellow: Auto  Purple: Manual", (60, 70, 85), 13))
+            labels.append(((ix, ly), "黄实心点：自动检测  紫实心点：人工确认", "Yellow: Auto  Purple: Manual", (60, 70, 85), 13))
+            labels.append(((ix, ly + 22), CAMERA_AXES[name]["geometry_hint"], f"Adjust {CAMERA_AXES[name]['axis']}", (60, 70, 85), 13))
+            status_cn = "状态：已最清晰（可作为对刀基准）" if readiness["ready"] else f"状态：{readiness['short_reason']}"
+            status_en = "Status: Ready" if readiness["ready"] else f"Status: Adjust {CAMERA_AXES[name]['axis']}"
+            labels.append(((ix, ly + 44), status_cn, status_en, color_map.get(readiness["color_key"], (0, 0, 220)), 14))
 
             annotated = _draw_labels(canvas, labels)
             path = live_image_file(self.events.directory, "baseline_" + name)
@@ -784,6 +811,9 @@ class BaselineSession:
             else:
                 override_note = None
             resolved_edge = edge_px if edge_px is not None else d.edge_width_px
+            snap = getattr(self, "live_snapshots", {}).get(name) or {}
+            focus_pct = snap.get("percent")
+            focus_peak = snap.get("peak")
             focus[name] = {
                 "focused": d.focused,
                 "edge_width_px": resolved_edge,
@@ -795,6 +825,8 @@ class BaselineSession:
                 "axis_rms_limit": rms_limit,
                 "manual_override": is_override,
                 "override_note": override_note,
+                "focus_percent": float(focus_pct) if isinstance(focus_pct, (int, float)) and math.isfinite(focus_pct) else None,
+                "focus_peak": float(focus_peak) if isinstance(focus_peak, (int, float)) and math.isfinite(focus_peak) else None,
             }
             if name in clicked:
                 clicked[name]["manual_override"] = is_override
@@ -848,6 +880,7 @@ class BaselineSession:
         }
         self._annotate(images, ds)
         mode = "manual" if clicked else "auto"
+        margin_px = float(getattr(self, "cfg", DEFAULTS).get("edge_margin_px", 40.0))
         for name in ("front", "side"):
             label = "主对刀相机" if name == "front" else "辅助相机"
             if points[name] is None:
@@ -856,13 +889,9 @@ class BaselineSession:
                 raise ValueError(f"{label}识别不可靠，请手动确认：{ds[name].diagnostic}")
             if not ds[name].focused and name not in clicked:
                 raise ValueError(f"{label}针尖模糊，检查对焦/背光：{ds[name].diagnostic}")
-        if not inside:
-            assert delta is not None
-            self.phase = "fail"
-            self.message = format_outside_message(delta)
-            self._record_measurement(mode, "fail", self.message)
-            self.publish()
-            return
+            img_h, img_w = images[name].shape[:2]
+            if is_near_edge(points[name], (img_w, img_h), margin_px):
+                raise ValueError(f"{label}{EDGE_MARGIN_MESSAGE}")
         self.candidate["p0"] = self._stable_position()
         self.candidate["passed"] = True
         self._annotate(images, ds)
@@ -879,7 +908,7 @@ class BaselineSession:
     def _save(self) -> None:
         """覆盖保存当前工具基准并备份历史，同时清除 tool_offset 的 baseline_stale。"""
         c = self.candidate
-        if not c or not c.get("p0") or not c.get("inside"):
+        if not c or not c.get("p0") or not c.get("passed"):
             raise ValueError("没有可保存的基准")
         directory = Path(self.config.tool_calibration.directory)
         offset = load_tools(directory / "tools.yaml")["tools"][f"tool{self.tool}"]["offset_xyz"]
@@ -900,14 +929,23 @@ class BaselineSession:
                     True if name in c["click"] else None,
                     manual_override=is_override,
                     axis_rms_px=f_info.get("axis_rms_px") if is_override else None,
-                    edge_width_px=f_info.get("edge_width_px") if is_override else None,
+                    edge_width_px=f_info.get("edge_width_px"),
                     override_note=note_item if is_override else None,
+                    focus_percent=f_info.get("focus_percent"),
+                    focus_peak=f_info.get("focus_peak"),
                 )
             )
         has_override = bool(c.get("manual_override")) or any(v.manual_override for v in views)
-        baseline_note = "界面建立，雅可比待测"
+        baseline_note = "界面建立（双路最清晰规则），雅可比待测"
         if override_notes:
             baseline_note += "；" + "；".join(override_notes)
+        criteria = {
+            "focus_ready_percent": float(self.cfg.get("focus_ready_percent", 95.0)),
+            "focus_good_px": float(self.cfg.get("focus_good_px", 2.0)),
+            "focus_ready_frames": int(self.cfg.get("focus_ready_frames", 5)),
+            "peak_min_frames": int(self.cfg.get("peak_min_frames", 10)),
+            "edge_margin_px": float(self.cfg.get("edge_margin_px", 40.0)),
+        }
         baseline = ToolTipBaseline(
             f"tool{self.tool}",
             c["p0"],
@@ -918,6 +956,8 @@ class BaselineSession:
             True,
             detector=c["detector"],
             manual_override=has_override,
+            baseline_rule=BASELINE_RULE,
+            focus_criteria=criteria,
         )
         path = directory / f"tool{self.tool}_baseline.yaml"
         offsets_path = self.calibration_path.parent / "tool_offset.yaml"
@@ -962,20 +1002,59 @@ class BaselineSession:
             self.cameras.open()
             for cam in ("front", "side"):
                 self.trackers[cam].reset()
+                self.readiness_trackers[cam].reset()
                 self.history[cam] = []
+            self.manual_points.clear()
+            self.manual_clicks.clear()
+            self.live_snapshots.clear()
             self.tool = tool
             self.notice = self._selection_notice(tool, self.existing())
             self.phase = "live"
-            self.message = "请点动针尖到主相机中心后按【对刀基准】"
+            self.message = "请点动使两路针尖都最清晰（正面调 Y、侧面调 X）后按【对刀基准】"
             self.events.emit("baseline_select", tool=tool, notice=self.notice)
             self.publish()
         elif name == "tooltip_peak_reset":
             camera = params.get("camera")
-            if camera in self.trackers:
-                self.trackers[camera].reset()
-                self.history[camera] = []
-                self.events.emit("tooltip_peak_reset", camera=camera)
+            targets = ("front", "side") if camera in (None, "all") else ((camera,) if camera in self.trackers else ())
+            if targets:
+                for cam in targets:
+                    self.trackers[cam].reset()
+                    self.readiness_trackers[cam].reset()
+                    self.history[cam] = []
+                    self.live_snapshots.pop(cam, None)
+                self.events.emit("tooltip_peak_reset", camera=camera or "all")
                 self.publish()
+        elif name == "baseline_manual_view" and self.phase in ("live", "fail", "success", "saved"):
+            camera = params.get("camera")
+            if camera not in ("front", "side"):
+                raise ValueError("请选择正面或侧面相机")
+            images = self.frames or self._frame("baseline_preview")
+            ds = self._detect(images)
+            d = ds[camera]
+            if isinstance(d, TridentResult) and (
+                "工具在动或画面畸变" in d.diagnostic
+                or (d.axis_rms_px is not None and d.axis_rms_px > 2.0)
+            ):
+                raise ValueError(f"{'主对刀' if camera == 'front' else '辅助'}相机识别不可靠：{d.diagnostic}")
+            previous_phase = self.phase
+            previous_message = self.message
+            manual = self._manual(images, ds, (camera,))
+            result = manual.get(camera)
+            if result is None or result.point_uv is None:
+                self.phase = previous_phase if previous_phase in ("live", "success", "saved") else "live"
+                self.message = "已取消手动点选" if previous_phase in ("live", "fail") else previous_message
+                self.events.emit("baseline_manual_cancelled", tool=self.tool, command=name, camera=camera)
+                self.publish()
+                return
+            self.manual_points[camera] = [float(result.point_uv[0]), float(result.point_uv[1])]
+            self.manual_clicks[camera] = {
+                "source": result.source,
+                "zoom": result.zoom,
+                "elapsed_s": result.elapsed_s,
+            }
+            self.events.emit("baseline_manual_view", tool=self.tool, camera=camera, point_uv=self.manual_points[camera])
+            self.message = f"{'正面' if camera == 'front' else '侧面'}已人工确认针尖，请继续调焦至峰值附近"
+            self.publish()
         elif name in ("baseline_measure", "baseline_manual", "baseline_aux") and self.phase in ("live", "fail", "success", "saved"):
             self.measurement = None
             if name == "baseline_aux" and (not self.candidate or not self.candidate.get("p0")):
@@ -991,23 +1070,44 @@ class BaselineSession:
                     capture_times=images.capture_times)
             finally:
                 images.frames.clear()  # Keep the archived first frames for display and manual picks.
+            manual_pre: dict[str, ClickResult] = {}
             if self.measurement["rejected"]:
                 if name == "baseline_measure":
-                    raise ValueError(_format_measure_failure(self.measurement, cfg.detection, getattr(self, "cfg", DEFAULTS)))
-                target_views = ("side",) if name == "baseline_aux" else ("front", "side")
-                distortion = [
-                    reason
-                    for cam in target_views
-                    for reason in self.measurement["views"][cam]["reasons"]
-                    if "工具在动或画面畸变" in reason
-                ]
-                if distortion:
-                    raise ValueError("；".join(distortion))
+                    # 若仅因已在实时画面人工点选的相机未通过单帧自动质量，且无运动畸变/五帧漂移，则沿用该路人工点。
+                    can_use_pre_manual = True
+                    for cam in ("front", "side"):
+                        view_info = self.measurement["views"][cam]
+                        if view_info["accepted"]:
+                            continue
+                        reasons = view_info["reasons"]
+                        has_hard = any(("工具在动或画面畸变" in r or "标准差" in r) for r in reasons)
+                        if has_hard or cam not in self.manual_points:
+                            can_use_pre_manual = False
+                            break
+                        info = self.manual_clicks.get(cam) or {}
+                        manual_pre[cam] = ClickResult(
+                            tuple(self.manual_points[cam]),
+                            str(info.get("source", "manual")),
+                            float(info.get("zoom", 8.0)),
+                            float(info.get("elapsed_s", 0.0)),
+                        )
+                    if not can_use_pre_manual or not manual_pre:
+                        raise ValueError(_format_measure_failure(self.measurement, cfg.detection, getattr(self, "cfg", DEFAULTS)))
+                else:
+                    target_views = ("side",) if name == "baseline_aux" else ("front", "side")
+                    distortion = [
+                        reason
+                        for cam in target_views
+                        for reason in self.measurement["views"][cam]["reasons"]
+                        if "工具在动或画面畸变" in reason
+                    ]
+                    if distortion:
+                        raise ValueError("；".join(distortion))
             for camera, view in self.measurement["views"].items():
                 if view["accepted"]:
                     ds[camera] = replace(ds[camera], point_uv=tuple(view["median_uv"]),
                                          diagnostic=FRAME_QUALITY_PASSED)
-            manual: dict[str, ClickResult] = {}
+            manual: dict[str, ClickResult] = dict(manual_pre)
             if name != "baseline_measure":
                 names: tuple[str, ...] = ("side",) if name == "baseline_aux" else ("front", "side")
                 previous_phase = self.phase
@@ -1051,10 +1151,8 @@ class BaselineSession:
         return float(exp) / 10.0 if isinstance(exp, (int, float)) else None
 
     def _publish_live_focus(self, images: dict[str, np.ndarray], detections: dict[str, Any], now: float, proc_start: float) -> None:
-        """计算两路实时清晰度/边缘宽度/轴残差并写入 runs/state/tooltip_preview.json。"""
+        """计算两路实时清晰度/边缘宽度/轴残差/就绪度并写入 runs/state/tooltip_preview.json。"""
         directory = getattr(self.events, "directory", None)
-        if directory is None:
-            return
         fps = round(1 / (now - self._live_last_ts), 1) if self._live_last_ts is not None and now > self._live_last_ts else None
         self._live_last_ts = now
         detection_cfg = getattr(getattr(self.config, "tool_calibration", None), "detection", {}) or {}
@@ -1065,6 +1163,8 @@ class BaselineSession:
             det = detections[name]
             det_cfg = detection_cfg.get(name, {})
             scale = float(self.cfg["main_um_per_px"] if name == "front" else self.cfg["aux_um_per_px"])
+            is_manual = name in self.manual_points
+            manual_tip = tuple(self.manual_points[name]) if is_manual else None
             status, reason, metrics, tracked = analyze_tip(
                 frame,
                 det,
@@ -1072,14 +1172,32 @@ class BaselineSession:
                 scale,
                 self.cfg.get("min_focus_contrast", 40),
                 det_cfg.get("threshold", 127),
+                manual_confirmed=is_manual,
+                manual_tip=manual_tip,
             )
             self.history[name] = [(t, v) for t, v in self.history[name] if now - t <= 30.0]
             if tracked["percent"] is not None:
                 self.history[name].append((now, tracked["percent"]))
-            tip = det.point_uv
+            tip = manual_tip if (is_manual and manual_tip is not None) else det.point_uv
             center = self._target(images["front"]) if name == "front" else None
             delta_uv = [tip[0] - center[0], tip[1] - center[1]] if name == "front" and tip is not None and center is not None else None
-            cameras_payload[name] = build_preview_camera_payload(
+            image_size = (frame.shape[1], frame.shape[0])
+            readiness = self.readiness_trackers[name].update(
+                name,
+                {
+                    "detection_status": status,
+                    "detection_reason": getattr(det, "diagnostic", ""),
+                    "tip_uv": list(tip) if tip is not None else None,
+                    "image_size": list(image_size),
+                    "percent": tracked["percent"],
+                    "peak": tracked["best"],
+                    "sample_count": tracked.get("sample_count", 0),
+                    "edge_width_px": metrics["edge_width_px"],
+                },
+                self.cfg,
+                manual_confirmed=is_manual,
+            )
+            payload = build_preview_camera_payload(
                 metrics=metrics,
                 tracked=tracked,
                 status=status,
@@ -1095,8 +1213,14 @@ class BaselineSession:
                 updated_at=updated_at,
                 exposure_ms=self._read_exposure_ms(name),
                 processing_ms=max(0.0, (time.monotonic() - proc_start) * 1000.0),
+                image_size=image_size,
+                readiness=readiness,
+                manual_confirmed=is_manual,
             )
-        write_tooltip_preview_file(directory, cameras_payload, updated_at)
+            self.live_snapshots[name] = payload
+            cameras_payload[name] = payload
+        if directory is not None:
+            write_tooltip_preview_file(directory, cameras_payload, updated_at)
 
     def run(self) -> None:
         """后台循环：处理队列命令，并在等待测量时以 ≥5Hz 刷新实时画面与清晰度。"""
@@ -1151,10 +1275,19 @@ class BaselineSession:
                             if d.point_uv is not None
                             else None
                         )
+                        manual_map = {n: n in self.manual_points for n in ("front", "side")}
+                        overall = evaluate_baseline_readiness(
+                            self.live_snapshots.get("front"),
+                            self.live_snapshots.get("side"),
+                            config=self.cfg,
+                            manual_confirmed=manual_map,
+                        )
                         self.events.emit(
                             "baseline_state",
                             live_delta=delta,
                             live_inside=bool(delta is not None and math.hypot(*delta) <= self.cfg["main_tol_mm"]),
+                            manual_confirmed=manual_map,
+                            live_readiness=overall,
                         )
                     self._annotate(images, self.detections)
                 remaining = 0.2 - (time.monotonic() - loop_start)

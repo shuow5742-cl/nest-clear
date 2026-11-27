@@ -58,7 +58,18 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
         _fields(
             raw,
             {"version", "tool_name", "p0", "offset_xyz", "views"},
-            {"timestamp", "note", "jacobian_pending", "jacobian_measured_at", "jacobian_session", "camera_settings", "detector", "manual_override"},
+            {
+                "timestamp",
+                "note",
+                "jacobian_pending",
+                "jacobian_measured_at",
+                "jacobian_session",
+                "camera_settings",
+                "detector",
+                "manual_override",
+                "baseline_rule",
+                "focus_criteria",
+            },
             "baseline",
         )
         if type(raw["version"]) is not int or raw["version"] != 1:
@@ -70,7 +81,17 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
             _fields(
                 v,
                 {"name", "target_uv"},
-                {"jacobian", "width_px", "click", "manual_override", "axis_rms_px", "edge_width_px", "override_note"},
+                {
+                    "jacobian",
+                    "width_px",
+                    "click",
+                    "manual_override",
+                    "axis_rms_px",
+                    "edge_width_px",
+                    "override_note",
+                    "focus_percent",
+                    "focus_peak",
+                },
                 f"views[{i}]",
             )
             try:
@@ -89,6 +110,8 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
             raw.get("jacobian_session", ""),
             raw.get("detector"),
             raw.get("manual_override", False),
+            raw.get("baseline_rule"),
+            raw.get("focus_criteria"),
         )
     except (yaml.YAMLError, GuardError, ValueError, TypeError, OSError) as exc:
         raise ToolCalSchemaError(f"{path}: {exc}") from exc
@@ -109,6 +132,8 @@ def save_baseline(baseline: ToolTipBaseline, path: str | Path) -> None:
         **({"jacobian_session": baseline.jacobian_session} if baseline.jacobian_session else {}),
         **({"detector": baseline.detector} if baseline.detector else {}),
         **({"manual_override": True} if baseline.manual_override else {}),
+        **({"baseline_rule": baseline.baseline_rule} if baseline.baseline_rule else {}),
+        **({"focus_criteria": dict(baseline.focus_criteria)} if baseline.focus_criteria else {}),
         "views": [
             {
                 "name": v.name,
@@ -120,6 +145,8 @@ def save_baseline(baseline: ToolTipBaseline, path: str | Path) -> None:
                 **({"axis_rms_px": v.axis_rms_px} if v.axis_rms_px is not None else {}),
                 **({"edge_width_px": v.edge_width_px} if v.edge_width_px is not None else {}),
                 **({"override_note": v.override_note} if v.override_note else {}),
+                **({"focus_percent": v.focus_percent} if v.focus_percent is not None else {}),
+                **({"focus_peak": v.focus_peak} if v.focus_peak is not None else {}),
             }
             for v in baseline.views
         ],
