@@ -43,6 +43,10 @@ def preview_command_allowed(events, mode, name, params):
 
 logger = logging.getLogger("nest_clear.flow")
 REQUEST_NAMES = {1: "请求扫描位或下一任务", 60: "挑取完成"}
+BASELINE_COMMANDS = frozenset({
+    'baseline_start', 'baseline_select', 'baseline_measure', 'baseline_manual',
+    'baseline_aux', 'baseline_save', 'baseline_confirm', 'baseline_end',
+})
 PREVIEW_COMMANDS = frozenset({'tooltip_preview', 'tooltip_exposure_retest', 'tooltip_exposure_set', 'tooltip_exposure_restore', 'tooltip_exposure_save', 'tooltip_peak_reset', 'tooltip_assign', 'tooltip_swap', 'tooltip_runout_start', 'tooltip_runout_press', 'tooltip_runout_end'})
 
 
@@ -103,8 +107,12 @@ class WaitRequest(CallWorker):
         self.config = config
         self.failure_since = None
         self.failures = 0
+        self._paused_poll = False
 
-    def on_running(self) -> Status:
+    def _device_paused(self) -> bool:
+        return bool(getattr(self.events, "device_paused", False))
+
+    def _poll_ui_commands(self) -> None:
         from .tool_offset import reader
         from .depth_calibration import handle_depthcal_exposure_command
         # 没有挂起的标定请求时，也消费并记录不合时宜的界面命令。
@@ -112,8 +120,7 @@ class WaitRequest(CallWorker):
         accuracy_session = self._blackboard.read("pickaccuracy_session", None)
         offset_session = self._blackboard.read("tooloffset_session", None)
         depth_session = self._blackboard.read("depth_session", None)
-        baseline_commands = {'baseline_start', 'baseline_select', 'baseline_measure', 'baseline_manual',
-                             'baseline_aux', 'baseline_save', 'baseline_confirm', 'baseline_end'}
+        baseline_commands = BASELINE_COMMANDS
         preview_commands = PREVIEW_COMMANDS
         depth_commands = {'depthcal_exposure'}
         abort_commands = set()
@@ -169,6 +176,23 @@ class WaitRequest(CallWorker):
                 offset_session["commands"].append({"seq": reader(reader_ctx).last_seq, "command": command[0], "params": command[1]})
                 offset_session["abort_requested"] = True
                 self.events.emit("tooloffset_state", abort_requested=True, message="用户已点击放弃，下一个 PLC 请求将回 99 结束")
+
+    def on_start(self) -> Status:
+        self._poll_ui_commands()
+        if self._device_paused():
+            self._paused_poll = True
+            return Status.RUNNING
+        self._paused_poll = False
+        return super().on_start()
+
+    def on_running(self) -> Status:
+        self._poll_ui_commands()
+        if self._device_paused():
+            self._paused_poll = True
+            return Status.RUNNING
+        if self._paused_poll:
+            self._paused_poll = False
+            return CallWorker.on_start(self)
         status = super().on_running()
         if status == Status.RUNNING:
             return status

@@ -817,6 +817,9 @@ def test_cam_scroll_geometry_coalesces_feedback_and_ignores_content_width():
 
 
 def test_page_commands_timeout_and_recover(tmp_path, monkeypatch, caplog):
+    import json
+    import os
+    from nest_clear.paths import supervisor_state_file
     from nest_clear.ui import app
     now = [100.0]
     monkeypatch.setattr(app.time, 'monotonic', lambda: now[0])
@@ -833,11 +836,22 @@ def test_page_commands_timeout_and_recover(tmp_path, monkeypatch, caplog):
         now[0] += 5.1
         ui._check_page_command(page, 0)
         assert getattr(ui, page + '_pending') == 0
-        assert page + '_test' in getattr(ui, page + '_command_message')
+        assert getattr(ui, page + '_command_message') == '主程序未运行，请先让 PLC 初始化'
         ui._send_page_command(page, 'retry')
         ui._check_page_command(page, getattr(ui, page + '_pending'))
         assert not getattr(ui, page + '_pending')
-    assert '未被确认' in caplog.text
+    supervisor_state_file(tmp_path).write_text(
+        json.dumps({'pid': os.getpid(), 'child_pid': os.getpid(), 'child_state': '就绪'}),
+        encoding='utf-8',
+    )
+    for page in ('baseline', 'offset', 'pickacc', 'tip'):
+        ui._send_page_command(page, page + '_running_test')
+        now[0] += 5.1
+        ui._check_page_command(page, 0)
+        assert getattr(ui, page + '_pending') == 0
+        assert getattr(ui, page + '_command_message') == f'主程序未响应命令【{page}_running_test】（已放弃，可重试），请查看日志'
+    assert '主程序未运行，请先让 PLC 初始化' in caplog.text
+    assert '主程序未响应命令【baseline_running_test】（已放弃，可重试），请查看日志' in caplog.text
 
 
 def test_system_python_ui_imports_without_vision_dependencies(tmp_path):

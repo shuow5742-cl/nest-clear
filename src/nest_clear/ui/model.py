@@ -292,6 +292,24 @@ def supervisor_live(s, age):
     return age is not None and age <= SUPERVISOR_STALE_SECONDS and bool(s.get('pid'))
 
 
+def main_running(supervisor, main=None, *, supervisor_age=None, main_alive_age=None):
+    """根据父程序与主程序状态判断主程序当前是否在运行。"""
+    if isinstance(supervisor, dict) and supervisor:
+        if not supervisor_live(supervisor, supervisor_age):
+            return False
+        return bool(supervisor.get('child_pid')) or supervisor.get('child_state') in ('启动中', '运行', '就绪')
+    if main_alive_age is not None and main_alive_age <= SUPERVISOR_STALE_SECONDS:
+        return bool(isinstance(main, dict) and main.get('pid')) or True
+    return False
+
+
+def command_timeout_message(name, supervisor, main=None, *, supervisor_age=None, main_alive_age=None):
+    """命令 5 秒未确认时按主程序运行状态给出准确提示。"""
+    if main_running(supervisor, main, supervisor_age=supervisor_age, main_alive_age=main_alive_age):
+        return f'主程序未响应命令【{name}】（已放弃，可重试），请查看日志'
+    return '主程序未运行，请先让 PLC 初始化'
+
+
 def parent_process_row(s, supervisor_age, now=None):
     live = supervisor_live(s, supervisor_age)
     return ('父程序', s.get('pid') if live else '—', display_time(s.get('start_time'), _now_and_epoch(now)[0].date()),

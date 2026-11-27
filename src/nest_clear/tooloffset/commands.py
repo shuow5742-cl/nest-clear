@@ -41,6 +41,17 @@ class CommandReader:
     def __init__(self, root, events, *, last_seq=0):
         self.path, self.events, self.last_seq = command_path(root), events, last_seq
 
+    def pending_command(self):
+        """Return unread command name without advancing last_seq."""
+        try:
+            cmd = json.loads(self.path.read_text(encoding='utf-8'))
+            seq, name, params = cmd['seq'], cmd['command'], cmd['params']
+            if type(seq) is int and seq > self.last_seq and isinstance(name, str) and isinstance(params, dict):
+                return name
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return None
+
     def poll(self, allowed, *, defer_unallowed=False, rejection_message=None):
         try:
             cmd = json.loads(self.path.read_text(encoding='utf-8'))

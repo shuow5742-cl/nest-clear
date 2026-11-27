@@ -211,6 +211,19 @@ def test_main_status_running_stopped_and_recovery():
     assert status_indicators(running, main, supervisor_age=0)['主程序'] == ('green', '挑毛中')
 
 
+def test_command_timeout_message_distinguishes_main_running_and_stopped():
+    from nest_clear.ui.model import command_timeout_message, main_running
+    running = {'pid': 1, 'child_pid': 2, 'child_state': '就绪'}
+    stopped = {'pid': 1, 'child_pid': None, 'child_state': '未启动'}
+    assert main_running(running, supervisor_age=0) is True
+    assert main_running(stopped, supervisor_age=0) is False
+    assert main_running(running, supervisor_age=31) is False
+    assert main_running({}, {'pid': 2}, main_alive_age=0) is True
+    assert main_running({}, {'pid': 2}, main_alive_age=31) is False
+    assert command_timeout_message('baseline_start', stopped, supervisor_age=0) == '主程序未运行，请先让 PLC 初始化'
+    assert command_timeout_message('baseline_start', running, supervisor_age=0) == '主程序未响应命令【baseline_start】（已放弃，可重试），请查看日志'
+
+
 def test_reply_time_crosses_day_boundary():
     from nest_clear.ui.model import display_time
     assert display_time('2026-11-22T07:00:15-08:00', date(2026, 11, 23)) == '11-22 07:00:15'

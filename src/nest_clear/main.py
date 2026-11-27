@@ -376,6 +376,7 @@ class Application:
         # Preview commands must remain responsive while a calibration node is
         # waiting for user input, and while the device gate pauses PLC polling.
         events = getattr(self, 'events', None)
+        cmd_reader = None
         if events is not None:
             from nest_clear.flow.modes import Mode
             main_preview = getattr(self, 'main_preview', None)
@@ -383,28 +384,33 @@ class Application:
                 mode = self.handle.batch.blackboard.read('mode') if self.handle is not None else Mode.IDLE
                 main_preview.poll(mode)
             from nest_clear.flow.leaves import PREVIEW_COMMANDS, handle_preview_command
-            from nest_clear.flow.modes import Mode
             from nest_clear.flow.tool_offset import reader
-            command = reader(type('CommandContext', (), {'events': events})()).poll(PREVIEW_COMMANDS, defer_unallowed=True)
+            cmd_reader = reader(type('CommandContext', (), {'events': events})())
+            command = cmd_reader.poll(PREVIEW_COMMANDS, defer_unallowed=True)
             if command:
                 mode = self.handle.batch.blackboard.read('mode') if self.handle is not None else Mode.IDLE
                 handle_preview_command(events, mode, *command)
+        paused = False
         if gate is not None:
             gate.beat()
-            if gate.paused():
-                # 用户裁决：PC 对每个 PLC 请求都必须应答。已接收的请求暂停期间照常完成并应答；暂停期间不接收下一请求。
-                events = getattr(self, "events", None)
-                if events is not None:
-                    from nest_clear.flow.depth_calibration import handle_depthcal_exposure_command
-                    from nest_clear.flow.tool_offset import reader
-                    depth_cmd = reader(type('CommandContext', (), {'events': events})()).poll(
-                        {'depthcal_exposure'}, defer_unallowed=True
-                    )
-                    if depth_cmd:
-                        session = self.handle.batch.blackboard.read('depth_session', None) if self.handle is not None else None
-                        handle_depthcal_exposure_command(events, self.config, depth_cmd[1], session=session)
-                if not (events and events.request_pending):
-                    return
+            paused = gate.paused()
+        if events is not None:
+            events.device_paused = paused
+        if paused:
+            # 用户裁决：PC 对每个 PLC 请求都必须应答。已接收的请求暂停期间照常完成并应答；暂停期间不接收下一请求。
+            # 对刀基准建立是人工点动流程，暂停期间仍处理 baseline_* 命令并推进会话，但不读取/接收新 PLC 请求。
+            baseline_active = False
+            if events is not None:
+                from nest_clear.flow.depth_calibration import handle_depthcal_exposure_command
+                from nest_clear.flow.leaves import BASELINE_COMMANDS
+                depth_cmd = cmd_reader.poll({'depthcal_exposure'}, defer_unallowed=True)
+                if depth_cmd:
+                    session = self.handle.batch.blackboard.read('depth_session', None) if self.handle is not None else None
+                    handle_depthcal_exposure_command(events, self.config, depth_cmd[1], session=session)
+                pending = cmd_reader.pending_command() if hasattr(cmd_reader, 'pending_command') else None
+                baseline_active = getattr(events, 'baseline_session', None) is not None or pending in BASELINE_COMMANDS
+            if not ((events and getattr(events, 'request_pending', False)) or baseline_active):
+                return
         if self.handle is None or self.handle.result is not None:
             if self.handle is not None:
                 result = self.handle.result

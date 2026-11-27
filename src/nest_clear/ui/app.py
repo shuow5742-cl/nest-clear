@@ -15,8 +15,8 @@ from tkinter import font as tkfont, ttk, messagebox
 from PIL import Image, ImageGrab, ImageTk
 
 from nest_clear.depthcal.exposure import validate_depthcal_exposure
-from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file, ui_command_file, tooltip_preview_file
-from .model import (EventTail, camcal_progress, decode_status, display_time, duration,
+from nest_clear.paths import live_image_file, main_alive_file, main_status_file, supervisor_state_file, ui_command_file, tooltip_preview_file
+from .model import (EventTail, camcal_progress, command_timeout_message, decode_status, display_time, duration,
                     read_json, status_indicators, parent_process_row, child_process_row, tooltip_progress, preview_controls, edge_corner_label,
                     pickacc_tray_geometry, pickacc_type, pickacc_z_type, pickacc_z_summary_text, pickacc_z_missing_tools,
                     pickacc_stage, pickacc_note, pickacc_infield,
@@ -1027,7 +1027,7 @@ class App:
         getattr(self, page + '_message').config(text='上一条命令处理中', fg=COLORS['yellow'])
         return seq
 
-    def _check_page_command(self, page, ack):
+    def _check_page_command(self, page, ack, *, supervisor=None, main=None):
         pending = getattr(self, page + '_pending', 0)
         if not pending:
             return
@@ -1036,7 +1036,29 @@ class App:
             setattr(self, page + '_command_message', '')
         elif time.monotonic() - getattr(self, page + '_pending_since', time.monotonic()) >= 5:
             name = getattr(self, page + '_pending_name', '未知')
-            message = f'上一条命令【{name}】未被确认（主程序/父程序可能未运行），已放弃，可重新操作'
+            sup_path = supervisor_state_file(self.directory)
+            try:
+                disk_sup_age = max(0, time.time() - sup_path.stat().st_mtime)
+            except OSError:
+                disk_sup_age = None
+            use_file_data = 'file_data' in self.__dict__ or hasattr(self, 'files')
+            if supervisor is None:
+                supervisor = getattr(self, '_last_supervisor', None)
+                supervisor_age = getattr(self, '_last_supervisor_age', None) if supervisor is not None else disk_sup_age
+                if supervisor is None:
+                    supervisor = self.file_data(sup_path) if use_file_data else read_json(sup_path)
+            else:
+                supervisor_age = disk_sup_age if disk_sup_age is not None else (0 if supervisor else None)
+            if main is None:
+                main = getattr(self, '_last_main', None)
+                if main is None:
+                    main_path = main_status_file(self.directory)
+                    main = self.file_data(main_path) if use_file_data else read_json(main_path)
+            try:
+                main_alive_age = max(0, time.time() - main_alive_file(self.directory).stat().st_mtime)
+            except OSError:
+                main_alive_age = None
+            message = command_timeout_message(name, supervisor, main, supervisor_age=supervisor_age, main_alive_age=main_alive_age)
             logger.warning(message)
             setattr(self, page + '_pending', 0)
             setattr(self, page + '_command_message', message)
@@ -1081,13 +1103,15 @@ class App:
         runout = data.get('runout') or {}
         pending_name = getattr(self, 'baseline_pending_name', '')
         ack = (runout.get('reply_seq') or 0) if pending_name.startswith('tooltip_runout_') else self.baseline_ack
-        self._check_page_command('baseline', ack)
+        self._check_page_command('baseline', ack, supervisor=supervisor, main=main)
         tool = data.get('tool'); candidate = data.get('candidate') or {}; existing = data.get('existing') or {}
         self.baseline_heading.config(text=f'当前：工具{tool}' if tool else '当前：未选择', bg='#2563eb' if tool == 1 else '#d56713' if tool == 2 else '#667085')
         no_main = supervisor is not None and not supervisor.get('child_pid')
-        message = getattr(self, 'baseline_command_message', '') or ('上一条命令处理中' if self.baseline_pending else data.get('message') or '请开始对刀基准建立')
+        cmd_message = getattr(self, 'baseline_command_message', '')
+        message = cmd_message or ('上一条命令处理中' if self.baseline_pending else data.get('message') or '请开始对刀基准建立')
         if phase == 'unknown': message = '对刀状态未知或已过期'
-        if no_main: message = '主程序未运行（等待 PLC 初始化）　' + message
+        if no_main and not cmd_message.startswith('主程序未运行'):
+            message = '主程序未运行（等待 PLC 初始化）　' + message
         msg_color = COLORS['red'] if phase == 'fail' or (phase == 'done' and any(word in message for word in ('失败', '异常'))) else COLORS['green'] if phase in ('success', 'saved') else INK
         self.baseline_message.config(text=message, fg=COLORS['red'] if getattr(self, 'baseline_command_message', '') else COLORS['yellow'] if self.baseline_pending else msg_color)
         live = data.get('live_delta')
@@ -2334,6 +2358,13 @@ class App:
     def refresh(self):
         supervisor = self.file_data(supervisor_state_file(self.directory))
         main = self.file_data(main_status_file(self.directory))
+        try:
+            supervisor_age = max(0, time.time() - supervisor_state_file(self.directory).stat().st_mtime)
+        except OSError:
+            supervisor_age = None
+        self._last_supervisor = supervisor
+        self._last_supervisor_age = supervisor_age
+        self._last_main = main
         from nest_clear.film_mode import may_change_mode, read_mode, tray_active
         try:
             enabled = read_mode(self.directory)
@@ -2369,10 +2400,6 @@ class App:
         )
         if page is not None:
             self.select_page(page)
-        try:
-            supervisor_age = max(0, time.time() - supervisor_state_file(self.directory).stat().st_mtime)
-        except OSError:
-            supervisor_age = None
         for name, (color, value) in status_indicators(supervisor, main, supervisor_age=supervisor_age).items():
             dot, label = self.lights[name]; dot.config(fg=COLORS[color]); label.config(text=str(value))
         for label, item in zip(self.bits, decode_status(supervisor.get('word'))):

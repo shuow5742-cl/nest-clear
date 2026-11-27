@@ -121,7 +121,7 @@ def test_paused_main_routes_preview_but_preserves_other_commands(tmp_path):
     app = Application.__new__(Application); app.events = events
     app.handle = SimpleNamespace(batch=SimpleNamespace(blackboard=Board(mode=Mode.PICKING)))
     gate = SimpleNamespace(beat=lambda: None, paused=lambda: True)
-    seq = send(tmp_path, 'baseline_start')
+    seq = send(tmp_path, 'tooloffset_abort')
     app.step(gate)
     assert events.command_reader.last_seq < seq
     send(tmp_path, 'tooltip_preview', {'camera': 'side', 'on': True})
