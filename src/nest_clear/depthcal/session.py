@@ -426,14 +426,14 @@ class Session:
             return None
         return np.array([float(cam_xy[0]), float(cam_xy[1])], dtype=float) + np.asarray(self.center_offset, dtype=float)
 
-    def _in_board_safe_zone(self, cam_xy):
+    def _in_board_safe_zone(self, cam_xy, *, tol_mm=0.05):
         if self.target_type != 'charuco' or self.board_outer_quad is None:
             return True
         mod_xy = self._camera_xy_to_module_xy(cam_xy)
         if mod_xy is None or not np.isfinite(mod_xy).all():
             return False
-        keepout = float(self.cfg.get('board_keepout_mm', 10.0))
-        return point_in_board_safe_zone(mod_xy, self.board_outer_quad, keepout)
+        keepout = float(self.cfg.get('board_keepout_mm', 5.0))
+        return point_in_board_safe_zone(mod_xy, self.board_outer_quad, keepout, tol_mm=tol_mm)
 
     def _is_valid_target(self, label):
         cam_xy = self._target_camera_xy(label)
@@ -614,7 +614,7 @@ class Session:
             0.5 * float(self.camcal_cfg['rows']) * float(self.camcal_cfg['square_mm']),
         )
         outer_quad = charuco_board_outer_quad(self.camcal_cfg, transform)
-        keepout_mm = float(self.cfg.get('board_keepout_mm', 10.0))
+        keepout_mm = float(self.cfg.get('board_keepout_mm', 5.0))
         safe_quad = charuco_safe_quad(outer_quad, keepout_mm)
         self.board_outer_quad = outer_quad
         fit_info['center_xy_mm'] = [float(v) for v in transform(board_center)]
@@ -769,7 +769,19 @@ class Session:
                 raise GuardError('DEPTH-CENTER', f'达到居中轮数上限，角点 {self.label} 仍偏离画面中心',
                                  self.where, '检查靶点、标定投影和 PLC 到位。')
             next_xy = (x + self.point_xy[0] - center_xy[0], y + self.point_xy[1] - center_xy[1])
-            if not self._in_board_safe_zone(next_xy):
+            px_dx = math.dist(center_xy, pixel_to_module(uv[0] + 1.0, uv[1], self.actual, self.board_cal)[:2])
+            px_dy = math.dist(center_xy, pixel_to_module(uv[0], uv[1] + 1.0, self.actual, self.board_cal)[:2])
+            px_scale_mm = 0.5 * (px_dx + px_dy)
+            center_tol_mm = (
+                float(self.cfg['center_tol_px']) * px_scale_mm
+                if math.isfinite(px_scale_mm) and px_scale_mm > 0.0 else 0.0
+            )
+            # 居中迭代阶段允许在严格安全区边距外额外放宽居中容差（max(0.05, center_tol_px 对应 mm × 1.5)）：
+            # 现场居中允许偏差 center_tol_px（约 0.37mm）叠加板位姿拟合误差，可能使实测角点相对理论位置略向板外偏移；
+            # 若仍按严格 0.05mm 判死会误杀正常居中微调，放宽后可容忍合理居中残差同时阻止明显出界；
+            # 移到计划测点的下发判定（locate）与规划阶段仍使用严格边距 tol_mm=0.05。
+            center_safe_tol = max(0.05, center_tol_mm * 1.5)
+            if not self._in_board_safe_zone(next_xy, tol_mm=center_safe_tol):
                 raise GuardError(
                     'DEPTH-SAFE-ZONE',
                     f'测点超出标定板安全区（{self.label} 居中目标）',

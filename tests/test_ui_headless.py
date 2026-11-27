@@ -1106,7 +1106,7 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
         assert 'ChArUco 标定板（厚 3.15mm）' in ui.depth_surface.options['text']
         assert '132 角点' in ui.depth_board_pose.options['text']
         assert '0.0009 mm' in ui.depth_board_pose.options['text']
-        assert '安全区：板内缩 10mm' in ui.depth_board_pose.options['text']
+        assert '安全区：板内缩 5mm' in ui.depth_board_pose.options['text']
         if cstate == 'charuco_fine':
             assert 'C278(右下)' in ui.depth_target.options['text']
         else:

@@ -802,8 +802,8 @@ def depthcal_board_fit_text(data):
         parts.append(f'最大 {float(mx):.4f} mm')
     if not parts:
         return ''
-    keepout = fit.get('board_keepout_mm', data.get('board_keepout_mm', 10.0))
-    keepout_str = f'{float(keepout):g}' if isinstance(keepout, (int, float)) else '10'
+    keepout = fit.get('board_keepout_mm', data.get('board_keepout_mm', 5.0))
+    keepout_str = f'{float(keepout):g}' if isinstance(keepout, (int, float)) else '5'
     return f"板位姿拟合：{' · '.join(parts)} · 安全区：板内缩 {keepout_str}mm"
 
 

@@ -184,7 +184,7 @@ def _travel_bounds(value: Any, path: str) -> tuple[tuple[float, float], ...]:
     return bounds
 
 
-def _depth_config(value, global_travel):
+def _depth_config(value, global_travel, square_mm: float = 5.0):
     path = "depth_calibration"
     if not isinstance(value, dict):
         _fail(path, "应为映射")
@@ -198,6 +198,12 @@ def _depth_config(value, global_travel):
             _fail(name, "须为正整数")
     if settings["board_keepout_mm"] < 0:
         _fail(f"{path}.board_keepout_mm", "不能为负数")
+    max_keepout = 2.0 * float(square_mm) - 2.0
+    if settings["board_keepout_mm"] > max_keepout:
+        _fail(
+            f"{path}.board_keepout_mm",
+            f"须不超过计划测点内缩距离（2×square_mm）减 2mm（当前上限 {max_keepout:g} mm，避免四角计划测点被安全区误判出界）",
+        )
     # 独立行程：配置 depth_calibration.travel 时校验每轴 [min<max] 与有限数；缺省回退全局 travel。
     if settings["travel"] is None:
         logger.info("配置项 depth_calibration.travel 未配置，下针深度标定将回退使用全局 travel %s", global_travel)
@@ -601,7 +607,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         p["write_readback"],
     )
     travel = _travel_bounds(root["travel"], "travel")
-    depth_calibration = _depth_config(root["depth_calibration"], travel)
+    depth_calibration = _depth_config(root["depth_calibration"], travel, square_mm=camcal.get("square_mm", 5.0))
     if start is not None and any(not lo <= value <= hi for value, (lo, hi) in zip(start, travel)):
         _fail("camera_calibration.start_xyz", "必须在 travel 范围内")
     scan_data = {"mode": "corners", "tray": {"origin_xy": [0, 0], "size_mm": [182.7, 171.8], "x_direction": -1, "y_direction": 1}, "fov_mm": None, "min_overlap_mm": 20, **root["scan"]}

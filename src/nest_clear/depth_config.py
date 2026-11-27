@@ -2,7 +2,7 @@
 
 DEFAULTS = {
     'target': 'auto',
-    'board_keepout_mm': 10.0,
+    'board_keepout_mm': 5.0,
     'camera_z_min_mm': None,
     # 独立行程 {x: [lo, hi], y: [lo, hi], z: [lo, hi]}；缺省（None）时回退使用全局 travel。
     'travel': None,

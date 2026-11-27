@@ -70,10 +70,10 @@ def _film_patch_image(size=(420, 420), target_id=2):
 
 
 def test_depth_target_config_validation(tmp_path):
-    """depth_calibration.target 默认为 auto，board_keepout_mm 默认 10.0 且校验 ≥0。"""
+    """depth_calibration.target 默认为 auto，board_keepout_mm 默认 5.0 且校验 0 ≤ 值 ≤ 2×square_mm−2。"""
     cfg = load_config('config/nest_clear.yaml')
     assert cfg.depth_calibration['target'] == 'auto'
-    assert cfg.depth_calibration['board_keepout_mm'] == 10.0
+    assert cfg.depth_calibration['board_keepout_mm'] == 5.0
 
     raw = yaml.safe_load(Path('config/nest_clear.yaml').read_text(encoding='utf-8'))
     for val in ('auto', 'film', 'charuco'):
@@ -82,18 +82,33 @@ def test_depth_target_config_validation(tmp_path):
         p.write_text(yaml.safe_dump(good), encoding='utf-8')
         assert load_config(p, require_tools=False).depth_calibration['target'] == val
 
-    for keepout in (0, 0.0, 12.5):
+    for keepout in (0, 0.0, 5.0, 8.0):
         good_k = {**raw, 'depth_calibration': {**raw['depth_calibration'], 'board_keepout_mm': keepout}}
         pk = tmp_path / f'k_{keepout}.yaml'
         pk.write_text(yaml.safe_dump(good_k), encoding='utf-8')
         assert load_config(pk, require_tools=False).depth_calibration['board_keepout_mm'] == float(keepout)
 
-    for bad_k in (-0.1, -5, True, 'ten'):
+    for bad_k in (-0.1, -5, 8.1, 10, 10.0, True, 'ten'):
         bad_doc = {**raw, 'depth_calibration': {**raw['depth_calibration'], 'board_keepout_mm': bad_k}}
         pbk = tmp_path / 'bad_k.yaml'
         pbk.write_text(yaml.safe_dump(bad_doc), encoding='utf-8')
         with pytest.raises(GuardError, match='depth_calibration.board_keepout_mm'):
             load_config(pbk, require_tools=False)
+
+    # square_mm 增大时上限按 2×square_mm−2 联动放宽
+    sq6_ok = {
+        **raw,
+        'camera_calibration': {**raw['camera_calibration'], 'square_mm': 6.0},
+        'depth_calibration': {**raw['depth_calibration'], 'board_keepout_mm': 10.0},
+    }
+    p_sq6 = tmp_path / 'sq6_ok.yaml'
+    p_sq6.write_text(yaml.safe_dump(sq6_ok), encoding='utf-8')
+    assert load_config(p_sq6, require_tools=False).depth_calibration['board_keepout_mm'] == 10.0
+    sq6_bad = {**sq6_ok, 'depth_calibration': {**sq6_ok['depth_calibration'], 'board_keepout_mm': 10.1}}
+    p_sq6_bad = tmp_path / 'sq6_bad.yaml'
+    p_sq6_bad.write_text(yaml.safe_dump(sq6_bad), encoding='utf-8')
+    with pytest.raises(GuardError, match='depth_calibration.board_keepout_mm'):
+        load_config(p_sq6_bad, require_tools=False)
 
     bad = {**raw, 'depth_calibration': {**raw['depth_calibration'], 'target': 'chessboard'}}
     p_bad = tmp_path / 'bad.yaml'
@@ -418,11 +433,11 @@ def test_charuco_safe_zone_rejects_out_of_board_plan_and_centering(tmp_path, mon
         **cfg.depth_calibration,
         'target': 'charuco',
         'camera_z_min_mm': -12.0,
-        'board_keepout_mm': 10.0,
+        'board_keepout_mm': 5.0,
         'travel': ((30.0, 170.0), (20.0, 160.0), (-12.0, 0.0)),
     })
 
-    # 1) 规划阶段：模拟板位姿外轮廓右上角内缩，使右上角点 C038 落在安全区外，规划直接换用安全区内的邻近点
+    # 1) 规划阶段：模拟板位姿外轮廓右上角内缩，使右上角点 C038 落在 5mm 安全区外，规划直接换用安全区内的邻近点
     orig_fit = sess_mod.fit_board_to_module
 
     def skewed_fit(board_pts, module_pts, *, allow_scale=True):
@@ -432,10 +447,10 @@ def test_charuco_safe_zone_rejects_out_of_board_plan_and_centering(tmp_path, mon
             out = np.asarray(base_tr(pts), dtype=float)
             single = out.ndim == 1
             arr = out.reshape(1, 2) if single else out.copy()
-            # 仅使右上计划点 C038 (95, 10) 偏出安全区（靠近右上外角），其余点与邻近点 C058 仍在安全区内
+            # 仅使右上计划点 C038 (95, 10) 偏出 5mm 安全区（距外边约 4mm < 5mm），其余点与邻近点 C058 仍在安全区内
             for i, raw_p in enumerate(np.asarray(pts, dtype=float).reshape(-1, 2)):
                 if abs(raw_p[0] - 95.0) < 1e-6 and abs(raw_p[1] - 10.0) < 1e-6:
-                    arr[i] += [3.0, 3.0]
+                    arr[i] += [6.0, 6.0]
             return arr[0] if single else arr
 
         return warped_tr, info
@@ -661,4 +676,100 @@ def test_charuco_e2e_tcp_160_to_161_normal_5_points(tmp_path):
     assert len(session.results) == 5
     assert session.failed_points == []
     assert set(session.plan) == {'C021', 'C038', 'C278', 'C261', 'C149'}
-    assert session.board_fit['board_keepout_mm'] == 10.0
+    assert session.board_fit['board_keepout_mm'] == 5.0
+
+
+def test_charuco_centering_tolerates_0_3mm_outward_residual_while_locate_stays_strict(tmp_path, monkeypatch):
+    """居中残差 0.3mm 偏向板外时不误判，过大出界仍拦截，locate 移到计划点仍用严格 0.05mm 边距。"""
+    import nest_clear.depthcal.session as sess_mod
+    from nest_clear.depthcal.layout import _inward_edge_normals
+
+    scene, cal, _, _ = _shifted_scene(shift=(95.0, 88.0, -105.0), yaw_rad=0.015)
+    cfg = load_config('config/nest_clear.yaml')
+    cfg = replace(cfg, depth_calibration={
+        **cfg.depth_calibration,
+        'target': 'charuco',
+        'camera_z_min_mm': -12.0,
+        'board_keepout_mm': 5.0,
+        'center_tol_px': 15.0,
+        'travel': ((30.0, 170.0), (20.0, 160.0), (-12.0, 0.0)),
+    })
+
+    sess = Session(cfg, cal, DepthRecord(EventRecorder(tmp_path / 'tol', run=True)))
+    sess.record.begin()
+    start_pose = (95.0, 88.0, -3.0)
+    sess.actual = start_pose
+    sess.arrived(start_pose)
+    cmd = sess.advance([scene.render(start_pose, focus_z=-3.0)])
+    assert cmd is not None and sess.phase == 'center'
+
+    # 构造恰好比 5.0mm 严格安全区向板外偏 0.30mm（即距板外边 4.70mm）的模组 XY
+    normals = _inward_edge_normals(sess.board_outer_quad)
+    edge_pt = sess.board_outer_quad[0]
+    edge_dir = sess.board_outer_quad[1] - sess.board_outer_quad[0]
+    edge_dir = edge_dir / np.linalg.norm(edge_dir)
+    mid_along_edge = edge_pt + edge_dir * 40.0
+    # 沿内法线向内 4.70mm（比 keepout=5.0mm 向外偏 0.30mm），再沿边中线保证远离其余三边
+    mod_03mm_out = mid_along_edge + normals[0] * 4.70
+    cam_03mm_out = tuple((mod_03mm_out - sess.center_offset).tolist())
+
+    # 严格边距判定（规划/locate）仍应判定出界
+    assert not sess._in_board_safe_zone(cam_03mm_out)
+
+    # 1) locate 移向计划测点仍使用严格边距：应拦截并不下发移动
+    strict_lbl = next(lbl for lbl in sess.plan if lbl not in (sess.label, sess.ref_label))
+    sess.layout[strict_lbl] = mod_03mm_out - sess.ref_xy + sess.layout[sess.ref_label]
+    sess.point_index = sess.plan.index(strict_lbl)
+    sess.locate(strict_lbl, -3.0)
+    assert any(f['label'] == strict_lbl and '测点超出标定板安全区' in f['reason'] for f in sess.failed_points)
+
+    # 2) 恢复正常会话测试居中迭代：残差 0.30mm 偏向板外时，居中阶段放宽容差 max(0.05, center_tol_mm * 1.5) ≈ 0.53mm，不得误判
+    sess2 = Session(cfg, cal, DepthRecord(EventRecorder(tmp_path / 'center_ok', run=True)))
+    sess2.record.begin()
+    sess2.actual = start_pose
+    sess2.arrived(start_pose)
+    cmd2 = sess2.advance([scene.render(start_pose, focus_z=-3.0)])
+    assert cmd2 is not None and sess2.phase == 'center'
+    active_lbl = sess2.label
+    active_id = charuco_corner_id(active_lbl)
+    sess2.actual = cmd2
+    sess2.arrived(cmd2)
+
+    # 让角点像素偏离中心 20 px（> center_tol_px=15，触发居中移动），且实测角点模组坐标落在距板边 4.70mm（偏向板外 0.30mm）
+    normals2 = _inward_edge_normals(sess2.board_outer_quad)
+    e0, e1 = sess2.board_outer_quad[0], sess2.board_outer_quad[1]
+    u_dir = (e1 - e0) / np.linalg.norm(e1 - e0)
+    mod_center_03mm_out = e0 + u_dir * 40.0 + normals2[0] * 4.70
+    monkeypatch.setattr(
+        sess_mod, 'detect_charuco_corners',
+        lambda img, det: (
+            np.array([[2031.5, 1517.5], [100.0, 100.0], [200.0, 100.0], [300.0, 100.0], [100.0, 200.0], [200.0, 200.0]]),
+            np.array([active_id, 0, 1, 2, 3, 4]),
+        ),
+    )
+    orig_p2m = sess_mod.pixel_to_module
+    monkeypatch.setattr(
+        sess_mod, 'pixel_to_module',
+        lambda u, v, pose, c: (
+            np.array([mod_center_03mm_out[0], mod_center_03mm_out[1], 0.0])
+            if abs(u - 2031.5) < 1e-6 and abs(v - 1517.5) < 1e-6 else orig_p2m(u, v, pose, c)
+        ),
+    )
+    move_ok = sess2.advance([scene.render(cmd2, focus_z=-3.0)])
+    assert sess2.phase == 'center' and sess2.center_round == 2
+    assert sess2.failed_points == []
+    assert move_ok[:2] == pytest.approx((mod_center_03mm_out - sess2.center_offset).tolist(), abs=1e-4)
+
+    # 3) 若居中目标偏出严格边距 1.00mm（超出放宽容差 ~0.53mm），仍应触发 DEPTH-SAFE-ZONE 拦截
+    mod_center_1mm_out = e0 + u_dir * 40.0 + normals2[0] * 4.00
+    monkeypatch.setattr(
+        sess_mod, 'pixel_to_module',
+        lambda u, v, pose, c: (
+            np.array([mod_center_1mm_out[0], mod_center_1mm_out[1], 0.0])
+            if abs(u - 2031.5) < 1e-6 and abs(v - 1517.5) < 1e-6 else orig_p2m(u, v, pose, c)
+        ),
+    )
+    sess2.actual = move_ok
+    sess2.arrived(move_ok)
+    sess2.advance([scene.render(move_ok, focus_z=-3.0)])
+    assert any(f['label'] == active_lbl and f['error_code'] == 'DEPTH-SAFE-ZONE' for f in sess2.failed_points)
