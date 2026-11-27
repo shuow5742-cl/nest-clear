@@ -19,8 +19,9 @@ from .focus import (
     measure_dof, next_auto_exposure, plan_fine_scan, roi_brightness, scores,
 )
 from .layout import (
-    charuco_corner_id, charuco_layout, corner_labels_for_plan, dof_summary,
-    film_layout, fit_board_to_module, fit_plane, repeatability,
+    charuco_board_outer_quad, charuco_corner_id, charuco_layout, charuco_safe_quad,
+    corner_labels_for_plan, dof_summary, film_layout, fit_board_to_module, fit_plane,
+    point_in_board_safe_zone, repeatability,
 )
 
 # 首两点连续失败提前终止规则开关（规则 a）：前两个计划点（含其补测）均失败时立即回 999。
@@ -36,6 +37,7 @@ SKIPPABLE_POINT_CODES = frozenset({
     'DEPTH-ROI',
     'DEPTH-DARK',
     'DEPTH-FINE-RANGE',
+    'DEPTH-SAFE-ZONE',
 })
 
 
@@ -73,6 +75,7 @@ class Session:
         self.last_sample = None
         self.samples, self.results = [], []
         self.board_fit = None
+        self.board_outer_quad = None
         self.point_positions = {}
         self._charuco_board = None
         self._charuco_detector = None
@@ -418,8 +421,26 @@ class Session:
         (x_lo, x_hi), (y_lo, y_hi) = self.travel[:2]
         return math.isfinite(x) and math.isfinite(y) and x_lo <= x <= x_hi and y_lo <= y <= y_hi
 
+    def _camera_xy_to_module_xy(self, cam_xy):
+        if cam_xy is None or getattr(self, 'center_offset', None) is None:
+            return None
+        return np.array([float(cam_xy[0]), float(cam_xy[1])], dtype=float) + np.asarray(self.center_offset, dtype=float)
+
+    def _in_board_safe_zone(self, cam_xy):
+        if self.target_type != 'charuco' or self.board_outer_quad is None:
+            return True
+        mod_xy = self._camera_xy_to_module_xy(cam_xy)
+        if mod_xy is None or not np.isfinite(mod_xy).all():
+            return False
+        keepout = float(self.cfg.get('board_keepout_mm', 10.0))
+        return point_in_board_safe_zone(mod_xy, self.board_outer_quad, keepout)
+
+    def _is_valid_target(self, label):
+        cam_xy = self._target_camera_xy(label)
+        return self._in_xy_travel(cam_xy) and self._in_board_safe_zone(cam_xy)
+
     def _select_backup_target(self, failed_label):
-        """选择离失败点最近、未测过/未计划且在 depth_calibration.travel 内的备用菲林靶点。"""
+        """选择离失败点最近、未测过/未计划且在 depth_calibration.travel 与安全区内的备用测点。"""
         if failed_label not in self.layout:
             return None
         queued = set(self.plan[self.point_index + 1:])
@@ -428,7 +449,7 @@ class Session:
             if cand != failed_label
             and cand not in self.attempted_labels
             and cand not in queued
-            and self._in_xy_travel(self._target_camera_xy(cand))
+            and self._is_valid_target(cand)
         ]
         if not candidates:
             return None
@@ -569,7 +590,7 @@ class Session:
             if cand != ref_label
             and cand not in self.attempted_labels
             and cand not in reserved
-            and self._in_xy_travel(self._target_camera_xy(cand))
+            and self._is_valid_target(cand)
         ]
         if not candidates:
             return None
@@ -592,7 +613,14 @@ class Session:
             0.5 * float(self.camcal_cfg['cols']) * float(self.camcal_cfg['square_mm']),
             0.5 * float(self.camcal_cfg['rows']) * float(self.camcal_cfg['square_mm']),
         )
+        outer_quad = charuco_board_outer_quad(self.camcal_cfg, transform)
+        keepout_mm = float(self.cfg.get('board_keepout_mm', 10.0))
+        safe_quad = charuco_safe_quad(outer_quad, keepout_mm)
+        self.board_outer_quad = outer_quad
         fit_info['center_xy_mm'] = [float(v) for v in transform(board_center)]
+        fit_info['board_keepout_mm'] = keepout_mm
+        fit_info['outer_corners_mm'] = [[float(c[0]), float(c[1])] for c in outer_quad]
+        fit_info['safe_corners_mm'] = [[float(c[0]), float(c[1])] for c in safe_quad] if safe_quad is not None else []
         self.board_fit = fit_info
 
         self.layout, primary, extra, self.point_positions = charuco_layout(
@@ -607,8 +635,8 @@ class Session:
             self.initial_z = z
 
         raw_corners = set(primary[:4])
-        # 若有计划点已在行程内且靠近当前画面中心，优先从该点开始测
-        in_travel_primary = [lbl for lbl in primary if self._in_xy_travel(self._target_camera_xy(lbl))]
+        # 若有计划点已在行程与安全区内且靠近当前画面中心，优先从该点开始测
+        in_travel_primary = [lbl for lbl in primary if self._is_valid_target(lbl)]
         ordered_primary = list(primary)
         if in_travel_primary:
             nearest_start = min(
@@ -627,7 +655,10 @@ class Session:
         remaining_extra = list(extra)
 
         for slot, lbl in enumerate(ordered_primary):
-            if self._in_xy_travel(self._target_camera_xy(lbl)):
+            cam_xy = self._target_camera_xy(lbl)
+            in_travel = self._in_xy_travel(cam_xy)
+            in_safe = self._in_board_safe_zone(cam_xy)
+            if in_travel and in_safe:
                 planned.append(lbl)
                 self.plan_slots[lbl] = slot
                 if lbl in raw_corners:
@@ -649,13 +680,15 @@ class Session:
             else:
                 self.slot_outcomes[slot] = 'failed'
 
+            err_code = 'DEPTH-SAFE-ZONE' if not in_safe else 'POSITION-TRAVEL'
+            err_reason = '测点超出标定板安全区' if not in_safe else '超出下针深度标定行程（depth_calibration.travel）'
             self.failed_points.append({
                 'label': lbl,
                 'position_name': self.point_positions.get(lbl),
                 'xy': [float(v) for v in self.layout[lbl]],
                 'status': 'failed',
-                'error_code': 'POSITION-TRAVEL',
-                'reason': '超出下针深度标定行程（depth_calibration.travel）',
+                'error_code': err_code,
+                'reason': err_reason,
                 'where': 'ChArUco 测点规划',
                 'phase': 'plan',
                 'is_corner': lbl in raw_corners,
@@ -670,7 +703,7 @@ class Session:
 
         final_extra = []
         for e_lbl in remaining_extra:
-            if e_lbl not in reserved and self._in_xy_travel(self._target_camera_xy(e_lbl)):
+            if e_lbl not in reserved and self._is_valid_target(e_lbl):
                 final_extra.append(e_lbl)
                 reserved.add(e_lbl)
             else:
@@ -689,9 +722,9 @@ class Session:
         if len(self.plan) < self.cfg['min_valid_points']:
             raise GuardError(
                 'DEPTH-INSUFFICIENT-POINTS',
-                f'行程内可用 ChArUco 测点数 {len(self.plan)} < min_valid_points({self.cfg["min_valid_points"]})',
+                f'行程与安全区内可用 ChArUco 测点数 {len(self.plan)} < min_valid_points({self.cfg["min_valid_points"]})',
                 'ChArUco 测点规划',
-                '请将标定板移入 depth_calibration.travel 行程范围内后重试。',
+                '请将标定板移入 depth_calibration.travel 行程范围内或调整 board_keepout_mm 后重试。',
             )
 
         first_lbl = self.plan[0]
@@ -718,10 +751,10 @@ class Session:
         pts, ids = detect_charuco_corners(frame, self._charuco_detector)
         target_id = charuco_corner_id(self.label)
         matches = np.flatnonzero(ids == target_id) if target_id is not None else np.empty(0, int)
-        if len(matches) == 0:
+        if len(ids) < 6 or len(matches) == 0:
             raise GuardError(
                 'DEPTH-TARGET',
-                f'未识别到 ChArUco 目标角点 {self.label}（画面检出 {len(ids)} 个角点）',
+                f'画面中未见目标角点/标定板（目标 {self.label}，检出 {len(ids)} 个角点，需 ≥ 6 个）',
                 self.where,
                 '检查该角点附近标定板表面、照明、行程及相机焦距。',
             )
@@ -735,8 +768,16 @@ class Session:
             if self.center_round >= self.cfg['center_max_iter']:
                 raise GuardError('DEPTH-CENTER', f'达到居中轮数上限，角点 {self.label} 仍偏离画面中心',
                                  self.where, '检查靶点、标定投影和 PLC 到位。')
+            next_xy = (x + self.point_xy[0] - center_xy[0], y + self.point_xy[1] - center_xy[1])
+            if not self._in_board_safe_zone(next_xy):
+                raise GuardError(
+                    'DEPTH-SAFE-ZONE',
+                    f'测点超出标定板安全区（{self.label} 居中目标）',
+                    self.where,
+                    '检查标定板位置、角点识别结果与 board_keepout_mm 安全区配置。',
+                )
             self.center_round += 1
-            return self.move((x + self.point_xy[0] - center_xy[0], y + self.point_xy[1] - center_xy[1], z))
+            return self.move((*next_xy, z))
         return self._finish_center_roi(frame, corner_uv, w, h, x, y, z, exposure_us)
 
     def _finish_center_roi(self, frame, center_uv, w, h, x, y, z, exposure_us):
@@ -936,6 +977,13 @@ class Session:
         self.label = label
         self.current_retest_of = self.retest_parent.get(label)
         self.attempted_labels.add(label)
+        if self.target_type == 'charuco' and not self._in_board_safe_zone((x, y)):
+            return self._handle_point_failure(GuardError(
+                'DEPTH-SAFE-ZONE',
+                f'测点超出标定板安全区（{label}）',
+                self.where,
+                '检查标定板位姿拟合与安全区边距 board_keepout_mm。',
+            ))
         return self.move((x, y, z))
 
     def next_step(self):
@@ -1270,7 +1318,7 @@ class Session:
         tol = self.cfg['plane_tol_mm']
         avail_extra = [
             lbl for lbl in self.extra
-            if lbl not in self.attempted_labels and self._in_xy_travel(self._target_camera_xy(lbl))
+            if lbl not in self.attempted_labels and self._is_valid_target(lbl)
         ]
         slots = max(0, self.cfg['max_points'] - len(self.results))
         if self.initial_plane is None:

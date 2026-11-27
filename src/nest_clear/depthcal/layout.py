@@ -67,6 +67,75 @@ def fit_board_to_module(board_xy, module_xy, *, allow_scale=True):
     return transform, fit_info
 
 
+def charuco_board_outer_quad(camcal_cfg, transform):
+    """用拟合位姿变换求 ChArUco 板四个外角在模组坐标中的四边形顶点。"""
+    width = float(camcal_cfg['cols']) * float(camcal_cfg['square_mm'])
+    height = float(camcal_cfg['rows']) * float(camcal_cfg['square_mm'])
+    outer_board = np.array([
+        [0.0, 0.0],
+        [width, 0.0],
+        [width, height],
+        [0.0, height],
+    ], dtype=float)
+    return np.asarray(transform(outer_board), dtype=float)
+
+
+def _inward_edge_normals(quad):
+    """返回凸四边形各条边的单位内法向量（与顶点顺序无关）。"""
+    q = np.asarray(quad, dtype=float)
+    if q.shape != (4, 2) or not np.isfinite(q).all():
+        return None
+    centroid = q.mean(axis=0)
+    normals = []
+    for i in range(4):
+        a = q[i]
+        b = q[(i + 1) % 4]
+        ab = b - a
+        length = float(math.hypot(ab[0], ab[1]))
+        if length < 1e-9:
+            return None
+        n = np.array([-ab[1] / length, ab[0] / length], dtype=float)
+        if float(np.dot(centroid - a, n)) < 0.0:
+            n = -n
+        normals.append(n)
+    return normals
+
+
+def charuco_safe_quad(outer_quad, keepout_mm):
+    """将板外轮廓四边形各边向内缩 keepout_mm，返回允许区顶点（退化为空时返回 None）。"""
+    q = np.asarray(outer_quad, dtype=float)
+    normals = _inward_edge_normals(q)
+    if normals is None:
+        return None
+    d = float(keepout_mm)
+    offsets = [float(np.dot(normals[i], q[i])) + d for i in range(4)]
+    verts = []
+    for i in range(4):
+        j = (i + 1) % 4
+        mat = np.vstack((normals[i], normals[j]))
+        if abs(float(np.linalg.det(mat))) < 1e-9:
+            return None
+        verts.append(np.linalg.solve(mat, np.array([offsets[i], offsets[j]], dtype=float)))
+    verts_arr = np.array(verts, dtype=float)
+    for i in range(4):
+        if np.any(verts_arr @ normals[i] < offsets[i] - 1e-6):
+            return None
+    return verts_arr
+
+
+def point_in_board_safe_zone(point_xy, outer_quad, keepout_mm, *, tol_mm=0.05):
+    """判断模组 XY 点是否落在板外轮廓向内缩 keepout_mm 的允许区内。"""
+    p = np.asarray(point_xy, dtype=float)
+    if p.shape != (2,) or not np.isfinite(p).all():
+        return False
+    q = np.asarray(outer_quad, dtype=float)
+    normals = _inward_edge_normals(q)
+    if normals is None:
+        return False
+    d = float(keepout_mm) - float(tol_mm)
+    return all(float(np.dot(p - q[i], normals[i])) >= d for i in range(4))
+
+
 def charuco_layout(camcal_cfg, board_points, transform):
     """生成 ChArUco 板内角点模组坐标布局、5 主测点、4 加测点与模组方位名称。"""
     cols = int(camcal_cfg['cols'])

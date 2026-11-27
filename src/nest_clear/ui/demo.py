@@ -305,6 +305,7 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             'rms_residual_mm': 0.0009,
             'max_residual_mm': 0.0018,
             'det': -1.0,
+            'board_keepout_mm': 10.0,
         }
         base.update({
             'target_type': 'charuco',

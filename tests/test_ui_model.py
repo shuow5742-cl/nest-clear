@@ -555,8 +555,9 @@ def test_depthcal_charuco_model_helpers():
     assert depthcal_board_fit_text({}) == ''
     fit_txt = depthcal_board_fit_text({'board_fit': {
         'corner_count': 120, 'angle_deg': 0.57, 'rms_residual_mm': 0.0009, 'max_residual_mm': 0.0018,
+        'board_keepout_mm': 10.0,
     }})
-    assert '120 角点' in fit_txt and '0.0009 mm' in fit_txt
+    assert '120 角点' in fit_txt and '0.0009 mm' in fit_txt and '安全区：板内缩 10mm' in fit_txt
     assert depthcal_point_position('C021', {'point_positions': {'C021': '左上'}}) == '左上'
 
     for res_val, expected_verdict, expected_bg in (

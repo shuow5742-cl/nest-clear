@@ -783,7 +783,7 @@ def depthcal_surface_text(data):
 
 
 def depthcal_board_fit_text(data):
-    """格式化 ChArUco 板二维位姿拟合残差文本；非 ChArUco 模式返回空串。"""
+    """格式化 ChArUco 板二维位姿拟合残差与安全区文本；非 ChArUco 模式返回空串。"""
     fit = data.get('board_fit')
     if not isinstance(fit, dict) or not fit:
         return ''
@@ -800,7 +800,11 @@ def depthcal_board_fit_text(data):
         parts.append(f'RMS {float(rms):.4f} mm')
     if isinstance(mx, (int, float)):
         parts.append(f'最大 {float(mx):.4f} mm')
-    return ('板位姿拟合：' + ' · '.join(parts)) if parts else ''
+    if not parts:
+        return ''
+    keepout = fit.get('board_keepout_mm', data.get('board_keepout_mm', 10.0))
+    keepout_str = f'{float(keepout):g}' if isinstance(keepout, (int, float)) else '10'
+    return f"板位姿拟合：{' · '.join(parts)} · 安全区：板内缩 {keepout_str}mm"
 
 
 def depthcal_point_position(label, data=None, item=None):

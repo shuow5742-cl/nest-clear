@@ -16,7 +16,9 @@ from autoweaver.worker.clock import BTClock
 from nest_clear.camcal.session import _board
 from nest_clear.comm import Handshake, PLCClient
 from nest_clear.config import load_config
-from nest_clear.depthcal.layout import charuco_corner_id
+from nest_clear.depthcal.layout import (
+    charuco_board_outer_quad, charuco_corner_id, charuco_safe_quad, point_in_board_safe_zone,
+)
 from nest_clear.depthcal.record import DepthRecord
 from nest_clear.depthcal.session import Session
 from nest_clear.flow.batch import build_batch
@@ -68,9 +70,10 @@ def _film_patch_image(size=(420, 420), target_id=2):
 
 
 def test_depth_target_config_validation(tmp_path):
-    """depth_calibration.target 默认为 auto，支持 auto/film/charuco 并拒绝非法值。"""
+    """depth_calibration.target 默认为 auto，board_keepout_mm 默认 10.0 且校验 ≥0。"""
     cfg = load_config('config/nest_clear.yaml')
     assert cfg.depth_calibration['target'] == 'auto'
+    assert cfg.depth_calibration['board_keepout_mm'] == 10.0
 
     raw = yaml.safe_load(Path('config/nest_clear.yaml').read_text(encoding='utf-8'))
     for val in ('auto', 'film', 'charuco'):
@@ -79,11 +82,42 @@ def test_depth_target_config_validation(tmp_path):
         p.write_text(yaml.safe_dump(good), encoding='utf-8')
         assert load_config(p, require_tools=False).depth_calibration['target'] == val
 
+    for keepout in (0, 0.0, 12.5):
+        good_k = {**raw, 'depth_calibration': {**raw['depth_calibration'], 'board_keepout_mm': keepout}}
+        pk = tmp_path / f'k_{keepout}.yaml'
+        pk.write_text(yaml.safe_dump(good_k), encoding='utf-8')
+        assert load_config(pk, require_tools=False).depth_calibration['board_keepout_mm'] == float(keepout)
+
+    for bad_k in (-0.1, -5, True, 'ten'):
+        bad_doc = {**raw, 'depth_calibration': {**raw['depth_calibration'], 'board_keepout_mm': bad_k}}
+        pbk = tmp_path / 'bad_k.yaml'
+        pbk.write_text(yaml.safe_dump(bad_doc), encoding='utf-8')
+        with pytest.raises(GuardError, match='depth_calibration.board_keepout_mm'):
+            load_config(pbk, require_tools=False)
+
     bad = {**raw, 'depth_calibration': {**raw['depth_calibration'], 'target': 'chessboard'}}
     p_bad = tmp_path / 'bad.yaml'
     p_bad.write_text(yaml.safe_dump(bad), encoding='utf-8')
     with pytest.raises(GuardError, match='depth_calibration.target'):
         load_config(p_bad, require_tools=False)
+
+
+def test_charuco_safe_zone_geometry():
+    """板外轮廓内缩 board_keepout_mm 与允许区包含判定在正反旋向下均正确。"""
+    camcal_cfg = {'cols': 21, 'rows': 16, 'square_mm': 5.0}
+    # 含反射与平移的刚体变换（cols*square=105, rows*square=80）
+    quad = charuco_board_outer_quad(camcal_cfg, lambda pts: np.asarray(pts, float) * [1.0, -1.0] + [40.0, 130.0])
+    assert quad.shape == (4, 2)
+    safe = charuco_safe_quad(quad, 10.0)
+    assert safe is not None
+    assert point_in_board_safe_zone((50.0, 120.0), quad, 10.0)
+    assert point_in_board_safe_zone((135.0, 60.0), quad, 10.0)
+    assert not point_in_board_safe_zone((48.5, 120.0), quad, 10.0)
+    assert not point_in_board_safe_zone((92.5, 125.0), quad, 10.0)
+    assert point_in_board_safe_zone((40.0, 130.0), quad, 0.0)
+    assert not point_in_board_safe_zone((39.5, 130.0), quad, 0.0)
+    assert charuco_safe_quad(quad, 45.0) is None
+    assert not point_in_board_safe_zone((92.5, 90.0), quad, 45.0)
 
 
 def test_charuco_scene_partial_view_pose_plan_center_and_roi(tmp_path):
@@ -372,3 +406,259 @@ def test_charuco_e2e_tcp_160_to_161_and_out_of_travel_retest(tmp_path):
     assert '板面平面（板厚 3.15mm，盘底 = 板面 − 板厚方向换算，暂不用于生产）' in plane_doc['final']['plane_note']
     assert status_depth['phase'] == 'done'
     assert live_image_file(tmp_path, 'depthcal_roi').is_file()
+
+
+def test_charuco_safe_zone_rejects_out_of_board_plan_and_centering(tmp_path, monkeypatch):
+    """模拟板位姿使计划点或居中目标落在安全区外：不下发该移动、记原因并换邻近安全区内测点。"""
+    import nest_clear.depthcal.session as sess_mod
+
+    scene, cal, _, _ = _shifted_scene(shift=(95.0, 88.0, -105.0), yaw_rad=0.015)
+    cfg = load_config('config/nest_clear.yaml')
+    cfg = replace(cfg, depth_calibration={
+        **cfg.depth_calibration,
+        'target': 'charuco',
+        'camera_z_min_mm': -12.0,
+        'board_keepout_mm': 10.0,
+        'travel': ((30.0, 170.0), (20.0, 160.0), (-12.0, 0.0)),
+    })
+
+    # 1) 规划阶段：模拟板位姿外轮廓右上角内缩，使右上角点 C038 落在安全区外，规划直接换用安全区内的邻近点
+    orig_fit = sess_mod.fit_board_to_module
+
+    def skewed_fit(board_pts, module_pts, *, allow_scale=True):
+        base_tr, info = orig_fit(board_pts, module_pts, allow_scale=allow_scale)
+
+        def warped_tr(pts):
+            out = np.asarray(base_tr(pts), dtype=float)
+            single = out.ndim == 1
+            arr = out.reshape(1, 2) if single else out.copy()
+            # 仅使右上计划点 C038 (95, 10) 偏出安全区（靠近右上外角），其余点与邻近点 C058 仍在安全区内
+            for i, raw_p in enumerate(np.asarray(pts, dtype=float).reshape(-1, 2)):
+                if abs(raw_p[0] - 95.0) < 1e-6 and abs(raw_p[1] - 10.0) < 1e-6:
+                    arr[i] += [3.0, 3.0]
+            return arr[0] if single else arr
+
+        return warped_tr, info
+
+    monkeypatch.setattr(sess_mod, 'fit_board_to_module', skewed_fit)
+    s_plan = Session(cfg, cal, DepthRecord(EventRecorder(tmp_path / 'plan', run=True)))
+    s_plan.record.begin()
+    start_pose = (95.0, 88.0, -3.0)
+    s_plan.actual = start_pose
+    s_plan.arrived(start_pose)
+    issued_moves = []
+    orig_move = s_plan.move
+    monkeypatch.setattr(s_plan, 'move', lambda xyz: (issued_moves.append(tuple(xyz)), orig_move(xyz))[1])
+
+    first_cmd = s_plan.advance([scene.render(start_pose, focus_z=-3.0)])
+    assert first_cmd is not None
+    assert 'C038' not in s_plan.plan
+    assert all(s_plan._in_board_safe_zone(s_plan._target_camera_xy(lbl)) for lbl in s_plan.plan)
+    assert all(s_plan._in_board_safe_zone(s_plan._target_camera_xy(lbl)) for lbl in s_plan.extra)
+    assert len(s_plan.failed_points) == 1
+    fp = s_plan.failed_points[0]
+    assert fp['label'] == 'C038'
+    assert fp['reason'] == '测点超出标定板安全区'
+    assert fp['retest_label'] and fp['retest_label'] != 'C038'
+    c038_cam = s_plan._target_camera_xy('C038')
+    assert all(math.hypot(m[0] - c038_cam[0], m[1] - c038_cam[1]) > 1.0 for m in issued_moves)
+
+    # 2) 运行中 locate & 居中迭代阶段：恢复正常拟合后，强行让某计划点/居中目标超出安全区，均不得下发该移动
+    monkeypatch.undo()
+    s_run = Session(cfg, cal, DepthRecord(EventRecorder(tmp_path / 'run', run=True)))
+    s_run.record.begin()
+    s_run.actual = start_pose
+    s_run.arrived(start_pose)
+    run_moves = []
+    orig_run_move = s_run.move
+    monkeypatch.setattr(s_run, 'move', lambda xyz: (run_moves.append(tuple(xyz)), orig_run_move(xyz))[1])
+
+    s_run.advance([scene.render(start_pose, focus_z=-3.0)])
+    cur_lbl = s_run.label
+    # 模拟下一个计划点突然因安全区变化落到安全区外 -> locate 不得下发该点移动，改切邻近安全点
+    next_idx = next(i for i in range(s_run.point_index + 1, len(s_run.plan)) if s_run.plan[i] != s_run.ref_label)
+    next_slot_lbl = s_run.plan[next_idx]
+    bad_xy = s_run._target_camera_xy(next_slot_lbl)
+    s_run.layout[next_slot_lbl] = s_run.board_outer_quad[0] + np.array([-2.0, 2.0])
+    s_run.point_index = next_idx
+    backup_move = s_run.locate(next_slot_lbl, -3.0)
+    assert backup_move is not None
+    assert s_run.label != next_slot_lbl
+    assert s_run._in_board_safe_zone(backup_move[:2])
+    assert any(f['label'] == next_slot_lbl and '测点超出标定板安全区' in f['reason'] for f in s_run.failed_points)
+    assert all(math.hypot(m[0] - bad_xy[0], m[1] - bad_xy[1]) > 0.5 for m in run_moves if s_run.label != next_slot_lbl)
+
+    # 3) 居中迭代时测得目标偏出安全区 -> 不下发该移动，该点失败并换补测点
+    active_lbl = s_run.label
+    s_run.actual = backup_move
+    s_run.arrived(backup_move)
+    monkeypatch.setattr(
+        sess_mod, 'detect_charuco_corners',
+        lambda img, det: (
+            np.array([[2011.5, 1517.5], [100.0, 100.0], [200.0, 100.0], [300.0, 100.0], [100.0, 200.0], [200.0, 200.0]]),
+            np.array([charuco_corner_id(active_lbl), 0, 1, 2, 3, 4]),
+        ),
+    )
+    # 人为将 pixel_to_module 返回的角点坐标拉到板外（超过安全区），而画面中心仍在当前实际位姿附近
+    orig_p2m = sess_mod.pixel_to_module
+    monkeypatch.setattr(
+        sess_mod, 'pixel_to_module',
+        lambda u, v, pose, c: (np.array([500.0, 500.0, 0.0]) if abs(u - 2011.5) < 1e-6 and abs(v - 1517.5) < 1e-6
+                               else orig_p2m(u, v, pose, c)),
+    )
+    # 触发居中迭代（令 tol 极小确保需要移动）
+    s_run.cfg['center_tol_px'] = 0.0
+    # 使 corner_uv 略偏离 center_uv
+    monkeypatch.setattr(
+        sess_mod, 'detect_charuco_corners',
+        lambda img, det: (
+            np.array([[2030.0, 1530.0], [100.0, 100.0], [200.0, 100.0], [300.0, 100.0], [100.0, 200.0], [200.0, 200.0]]),
+            np.array([charuco_corner_id(active_lbl), 0, 1, 2, 3, 4]),
+        ),
+    )
+    monkeypatch.setattr(
+        sess_mod, 'pixel_to_module',
+        lambda u, v, pose, c: (np.array([s_run.board_outer_quad[0][0] - 50.0, s_run.board_outer_quad[0][1] + 50.0, 0.0])
+                               if abs(u - 2030.0) < 1e-6 else orig_p2m(u, v, pose, c)),
+    )
+    moves_before = len(run_moves)
+    after_center_fail = s_run.advance([scene.render(backup_move, focus_z=-3.0)])
+    assert after_center_fail is not None
+    assert any(f['label'] == active_lbl and '测点超出标定板安全区' in f['reason'] for f in s_run.failed_points)
+    # 下发的移动是下一个安全测点，而不是 500mm 外的出界移动
+    assert s_run._in_board_safe_zone(run_moves[-1][:2])
+    assert len(run_moves) == moves_before + 1
+
+
+def test_charuco_centering_missing_id_or_too_few_corners_retests(tmp_path, monkeypatch):
+    """居中时目标角点 ID 丢失或检出 ChArUco 角点数 < 6：不下发该点移动，记原因并走补测。"""
+    import nest_clear.depthcal.session as sess_mod
+
+    scene, cal, _, _ = _shifted_scene(shift=(95.0, 88.0, -105.0), yaw_rad=0.015)
+    cfg = load_config('config/nest_clear.yaml')
+    cfg = replace(cfg, depth_calibration={
+        **cfg.depth_calibration,
+        'target': 'charuco',
+        'camera_z_min_mm': -12.0,
+        'travel': ((30.0, 170.0), (20.0, 160.0), (-12.0, 0.0)),
+    })
+
+    for mode in ('missing_id', 'too_few_corners'):
+        sess = Session(cfg, cal, DepthRecord(EventRecorder(tmp_path / mode, run=True)))
+        sess.record.begin()
+        start_pose = (118.0, 74.0, -3.0)
+        sess.actual = start_pose
+        sess.arrived(start_pose)
+        first_cmd = sess.advance([scene.render(start_pose, focus_z=-3.0)])
+        assert first_cmd is not None and sess.phase == 'center'
+        failed_lbl = sess.label
+        target_id = charuco_corner_id(failed_lbl)
+
+        sess.actual = first_cmd
+        sess.arrived(first_cmd)
+        moves = []
+        orig_move = sess.move
+        monkeypatch.setattr(sess, 'move', lambda xyz: (moves.append(tuple(xyz)), orig_move(xyz))[1])
+
+        if mode == 'missing_id':
+            # 检出 >= 6 个角点，但缺少当前目标角点 ID
+            fake_pts = np.array([[100.0 + 20.0 * i, 100.0] for i in range(8)], dtype=float)
+            fake_ids = np.array([i for i in range(20, 28) if i != target_id][:8], dtype=int)
+        else:
+            # 包含目标角点 ID，但总角点数 < 6（仅 4 个）
+            fake_pts = np.array([[2011.5, 1517.5], [100.0, 100.0], [200.0, 100.0], [300.0, 100.0]], dtype=float)
+            fake_ids = np.array([target_id, 0, 1, 2], dtype=int)
+
+        monkeypatch.setattr(sess_mod, 'detect_charuco_corners', lambda img, det, p=fake_pts, ids=fake_ids: (p, ids))
+        backup_cmd = sess.advance([scene.render(first_cmd, focus_z=-3.0)])
+        assert backup_cmd is not None
+        assert len(sess.failed_points) == 1
+        fp = sess.failed_points[0]
+        assert fp['label'] == failed_lbl
+        assert fp['error_code'] == 'DEPTH-TARGET'
+        assert '画面中未见目标角点/标定板' in fp['reason']
+        assert fp['retest_status'] == 'pending'
+        assert sess.label == fp['retest_label'] and sess.label != failed_lbl
+        assert len(moves) == 1
+        assert moves[0][:2] == pytest.approx(sess._target_camera_xy(sess.label), abs=1e-3)
+        monkeypatch.undo()
+
+
+def test_charuco_e2e_tcp_160_to_161_normal_5_points(tmp_path):
+    """正常 5 点 ChArUco 流程不受安全区保护影响：全部 5 点完成并回 161，无误报跳过。"""
+    import time
+
+    scene, cal, board_origin, board_rot = _shifted_scene(shift=(95.0, 88.0, -105.0), yaw_rad=0.015)
+    camera = SimCharucoDepthCamera(scene, board_origin, board_rot, start_xyz=(95.0, 88.0, -3.0))
+
+    cfg = load_config('config/nest_clear.yaml')
+    travel = ((32.0, 170.0), (20.0, 160.0), (-12.0, 0.0))
+    settings = {
+        **cfg.depth_calibration,
+        'target': 'auto',
+        'camera_z_min_mm': -9.0,
+        'travel': travel,
+        'coarse_step_mm': 1.0,
+        'overshoot_mm': 0.2,
+        'repeats_per_point': 2,
+        'frames_per_step': 1,
+        'fine_steps_target': 14,
+        'settle_window_s': 0.0001,
+        'arrival_timeout_s': 0.05,
+    }
+    cfg = replace(
+        cfg,
+        depth_calibration=settings,
+        travel=travel,
+        camera_calibration={**cfg.camera_calibration, 'board_thickness_mm': 3.15},
+    )
+    events = EventRecorder(tmp_path, run=True)
+
+    with FakePLC() as plc:
+        io = PLCClient('127.0.0.1', plc.port, 1, plc.contract)
+        board = WorldBoard()
+        clock = BTClock(board)
+        plc_worker = PlcWorker(Handshake(io, plc.contract, events=events))
+        for worker in (plc_worker, camera):
+            clock.attach_worker(worker)
+        batch = build_batch(board, cfg, [], RequestTracker(0), events, calibration=cal)
+        clock.submit(batch)
+
+        def exchange(xyz=None):
+            if xyz is not None:
+                camera.actual = tuple(xyz)
+            plc.set_actual_xyz(camera.actual)
+            task = plc.request(160, tool_id=65535)
+            deadline = time.monotonic() + 8.0
+            while batch.blackboard.read('committed_func') is None or events.request_pending or plc.io.read('result_id') != task:
+                clock.tick_once()
+                if time.monotonic() > deadline:
+                    pytest.fail(f'未收到 Task_ID={task} 应答')
+                time.sleep(0.0002)
+            code = plc.io.read('reply_func')
+            coords = plc.io.read_real32_block(40942, 3) if code == 160 else None
+            return code, coords
+
+        try:
+            target = None
+            session = None
+            for _ in range(1200):
+                code, target = exchange(target)
+                if code == 161:
+                    break
+                assert code == 160, events.status.data.get('depthcal')
+                session = batch.blackboard.read('depth_session')
+                assert target is not None
+                assert session._in_board_safe_zone(target[:2])
+            else:
+                pytest.fail('正常 5 点 ChArUco 160 会话未完成')
+        finally:
+            clock.shutdown()
+            io.close()
+
+    assert batch.blackboard.read('mode') == Mode.IDLE
+    assert session is not None
+    assert len(session.results) == 5
+    assert session.failed_points == []
+    assert set(session.plan) == {'C021', 'C038', 'C278', 'C261', 'C149'}
+    assert session.board_fit['board_keepout_mm'] == 10.0

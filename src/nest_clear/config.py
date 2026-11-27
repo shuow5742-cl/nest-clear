@@ -193,9 +193,11 @@ def _depth_config(value, global_travel):
         name = f"{path}.{key}"
         item = settings[key]
         if type(default) is float:
-            settings[key] = _number(item, name, True)
+            settings[key] = _number(item, name, key != "board_keepout_mm")
         if type(default) is int and (type(item) is not int or item < 1):
             _fail(name, "须为正整数")
+    if settings["board_keepout_mm"] < 0:
+        _fail(f"{path}.board_keepout_mm", "不能为负数")
     # 独立行程：配置 depth_calibration.travel 时校验每轴 [min<max] 与有限数；缺省回退全局 travel。
     if settings["travel"] is None:
         logger.info("配置项 depth_calibration.travel 未配置，下针深度标定将回退使用全局 travel %s", global_travel)
