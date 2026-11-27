@@ -6,6 +6,7 @@ from nest_clear.ui.model import decode_status, status_indicators, classify_event
 
 @pytest.mark.parametrize('mode,page', [
     ('相机标定中', '相机标定'), ('工具偏移标定中', '工具偏移标定'),
+    ('下针深度标定中', '下针深度标定'),
     ('挑取精度标定中', '挑取精度标定'), ('对刀基准建立中', '对刀基准建立'),
     ('对刀中(工具1)', '换针对刀'), ('对刀中(工具2)', '换针对刀'),
     ('挑毛中', '主页'), ('空闲', None), ('未知', None), (None, None),
@@ -327,3 +328,34 @@ def test_main_preview_controls_use_mode_and_hosted_focus_state():
     status['preview'] = {'on': False}
     assert preview_controls(status, 0, '对刀基准建立中')['preview_enabled']
     assert not preview_controls(status, 0, '空闲')['white_balance_enabled']
+
+
+def test_depthcal_model_helpers_and_status(tmp_path):
+    from nest_clear.ui.model import depthcal_stage_info, depthcal_feasibility_text, depthcal_subplot_layout
+    from nest_clear.ui.status import MainStatus
+    assert depthcal_stage_info({'phase': 'idle'})[0] == '阶段：空闲（等待 PLC 160）'
+    assert depthcal_stage_info({'phase': 'done'})[0] == '阶段：完成（已回 161）'
+    assert depthcal_stage_info({'phase': 'failed'})[0] == '阶段：失败（已回 999）'
+    assert depthcal_stage_info({'phase': 'fine', 'message': '细扫 第 2/3 次'})[0] == '阶段：细扫 第 2/3 次'
+
+    ok_text, ok_bg, _ = depthcal_feasibility_text({'feasibility': {'max_range': 0.004, 'max_std': 0.002, 'threshold': 0.02, 'met': True}})
+    assert '满足下针深度标定误差预算' in ok_text and ok_bg == '#ecfdf3'
+    bad_text, bad_bg, _ = depthcal_feasibility_text({'feasibility': {'max_range': 0.035, 'max_std': 0.018, 'threshold': 0.02, 'met': False}})
+    assert '不满足下针深度标定误差预算' in bad_text and bad_bg == '#fff1f0'
+
+    boxes = depthcal_subplot_layout(['T02', 'T05', 'T29', 'T26', 'T12'], 900, 400)
+    assert len(boxes) == 5
+    for _, (x0, y0, x1, y1) in boxes:
+        assert 0 <= x0 < x1 <= 900 and 24 <= y0 < y1 <= 400
+
+    st = MainStatus(tmp_path)
+    st.observe({'event': 'depthcal_state', 'session': 's1', 'phase': 'coarse', 'metric': 'tenengrad',
+                'sample': {'label': 'T02', 'pass': 'coarse', 'z_actual': -5.0, 'tenengrad': 0.5}})
+    st.observe({'event': 'depthcal_state', 'session': 's1', 'phase': 'fine', 'metric': 'tenengrad',
+                'sample': {'label': 'T02', 'pass': 1, 'z_actual': -5.02, 'tenengrad': 0.8}})
+    st.observe({'event': 'depthcal_abort_requested'})
+    assert st.data['depthcal']['curves']['T02']['coarse'] == [[-5.0, 0.5]]
+    assert st.data['depthcal']['curves']['T02']['1'] == [[-5.02, 0.8]]
+    assert st.data['depthcal']['abort_requested'] is True
+    if st.timer:
+        st.timer.cancel()

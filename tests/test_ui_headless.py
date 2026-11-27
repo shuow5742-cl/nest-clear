@@ -551,7 +551,11 @@ def test_reply_legacy_fallback_and_cache():
     assert not ui.reply_table.rows
 
 
-@pytest.mark.parametrize('alias,index', [('main',0),('home',0),('camcal',1),('camera',1),('offset',2),('tool-offset',2),('pickacc',3),('pick-accuracy',3),('baseline',4),('toolcal',5),('tooltip',5)])
+@pytest.mark.parametrize('alias,index', [
+    ('main', 0), ('home', 0), ('camcal', 1), ('camera', 1), ('offset', 2), ('tool-offset', 2),
+    ('pickacc', 3), ('pick-accuracy', 3), ('baseline', 4), ('toolcal', 5), ('tooltip', 5),
+    ('depth', 6), ('depthcal', 6), ('depth-calib', 6),
+])
 def test_page_aliases(alias,index):
     from nest_clear.ui.app import App
     ui = object.__new__(App); ui.tabs = Widget(); ui.select_page(alias)
@@ -650,7 +654,7 @@ def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
         'latest', 'camcal_latest', 'preview_latest',
         'tooloffset_tri_1', 'tooloffset_tri_2', 'tooloffset_tri_3', 'tooloffset_tri_4', 'tooloffset_tri_5',
         'tooloffset_front_latest', 'tooloffset_side_latest',
-        'pickacc_latest', 'pickacc_crop', 'baseline_front', 'baseline_side',
+        'pickacc_latest', 'pickacc_crop', 'depthcal_roi', 'baseline_front', 'baseline_side',
         'calib_front_latest', 'calib_side_latest',
     )
     old_ns = time.time_ns() - 60_000_000_000
@@ -926,3 +930,57 @@ def test_pick_z_banner_warns_when_uncalibrated(tmp_path, monkeypatch):
     ui.file_data = lambda path: ({'mode':'空闲','pickacc':{'existing':{'tool1':{'type':'constant','z_type':'constant','z_mm':-10.0,'z_calibrated':True},'tool2':{'type':'constant','z_type':'constant','z_mm':-10.0,'z_calibrated':True}}}} if path.name == 'main_status.json' else original_fd(path))
     ui.refresh()
     assert not ui.pick_z_banner.visible
+
+
+def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
+    import sys
+    for module in ('cv2', 'numpy', 'yaml'):
+        monkeypatch.setitem(sys.modules, module, None)
+    from nest_clear.ui import app
+    from nest_clear.ui.demo import depthcal_demo
+    write_demo(tmp_path, initial=True, depthcal_state='done')
+    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
+        monkeypatch.setattr(app.tk, name, Widget)
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox', 'Spinbox'):
+        monkeypatch.setattr(app.ttk, name, Widget)
+    monkeypatch.setattr(app.ttk, 'Style', Style)
+    monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
+    class FakeCard(Widget):
+        def __init__(self, parent, title, theme):
+            super().__init__(parent); self.body = Widget(self); self.title_label = Widget(self)
+    class FakePicture(Widget):
+        def __init__(self, parent, path, theme):
+            super().__init__(parent); self.image = None
+        def poll(self): pass
+    class FakeKeyValueGrid(Widget):
+        def __init__(self, parent, keys, theme): super().__init__(parent); self.values_data = {}
+        def set(self, values): self.values_data = values
+    monkeypatch.setattr(app, 'Card', FakeCard)
+    monkeypatch.setattr(app, 'Picture', FakePicture)
+    monkeypatch.setattr(app, 'KeyValueGrid', FakeKeyValueGrid)
+
+    ui = app.App(tmp_path, page='depthcal', ignore_before_ns=0)
+    assert ui.tabs.selected == 6
+
+    for state in ('coarse', 'fine', 'done', 'failed'):
+        data, _, _ = depthcal_demo(state)
+        ui.update_depthcal({'mode': '空闲' if state in ('done', 'failed') else '下针深度标定中', 'depthcal': data})
+        if state == 'done':
+            assert len(ui.depth_table.rows) == 5
+            assert '满足下针深度标定误差预算' in ui.depth_feasibility.options['text']
+            assert '0.0502 mm/100mm' in ui.depth_plane_grid.values_data['最大 |残差| / 倾斜']
+            assert ui.depth_abort.options['state'] == 'disabled'
+        elif state == 'fine':
+            assert ui.depth_abort.options['state'] == 'normal'
+            assert len(ui.depth_table.rows) == 2
+        elif state == 'failed':
+            assert ui.depth_failure_detail.visible
+            assert 'DEPTH-PEAK-BOUNDARY' in ui.depth_failure_detail.options['text']
+
+    # 点击放弃按钮写入 depthcal_abort 命令
+    sent = []
+    monkeypatch.setattr('nest_clear.tooloffset.commands.send', lambda d, n, p=None, acknowledged=0: sent.append((n, p)) or 1)
+    ui.depth_command('depthcal_abort')
+    assert sent == [('depthcal_abort', None)]
+    assert ui.depth_pending == 1
+    ui.root.destroy()

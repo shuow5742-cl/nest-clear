@@ -160,7 +160,7 @@ def test_ui_smoke(tmp_path, monkeypatch):
     try:
         for i in range(app.tabs.index('end')):
             app.tabs.select(i); app.refresh(); app.root.update()
-        assert app.tabs.index('end') == 6
+        assert app.tabs.index('end') == 7
         class Screenshot:
             def save(self, path): path.write_bytes(b'png')
         monkeypatch.setattr('nest_clear.ui.app.ImageGrab.grab', lambda **kwargs: Screenshot())

@@ -2,7 +2,7 @@ import argparse
 from .app import App
 
 def add_view_arguments(parser):
-    parser.add_argument('--page', default=None, help='页面名称或 main/home、camcal/camera、offset/tool-offset、pickacc/pick-accuracy、baseline、toolcal/tooltip')
+    parser.add_argument('--page', default=None, help='页面名称或 main/home、camcal/camera、offset/tool-offset、pickacc/pick-accuracy、baseline、toolcal/tooltip、depthcal/depth-calib')
     parser.add_argument('--geometry', help='窗口尺寸，例如 1920x1080')
     parser.add_argument('--screenshot', '--screenshot-path', dest='screenshot', help='截图输出文件，例如 reports/ui/home.png')
     parser.add_argument('--screenshot-after-ms', '--screenshot-delay-ms', dest='screenshot_after_ms', type=int, help='启动后等待多少毫秒截图并退出')

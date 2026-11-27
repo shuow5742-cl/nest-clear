@@ -100,6 +100,7 @@ def page_for_mode(status):
     return {
         '相机标定中': '相机标定',
         '工具偏移标定中': '工具偏移标定',
+        '下针深度标定中': '下针深度标定',
         '挑取精度标定中': '挑取精度标定',
         '对刀基准建立中': '对刀基准建立',
         '对刀中(工具1)': '换针对刀',
@@ -466,3 +467,74 @@ def supervisor_tooltip_main(main, supervisor, tooltip, *, supervisor_age=None, n
         result['baseline'] = {'phase': 'unknown', 'message': '对刀状态未知或已过期', 'preview': {}}
         result['command_seq'] = 0
     return _with_baseline_detector_warning(result)
+
+
+def depthcal_stage_info(data):
+    """格式化下针深度标定阶段徽标文本与配色。"""
+    phase = data.get('phase') or 'idle'
+    message = data.get('message') or ''
+    if phase == 'idle':
+        return '阶段：空闲（等待 PLC 160）', '#eef2f6', '#1d2939'
+    if phase == 'done':
+        return '阶段：完成（已回 161）', '#dcfce7', '#166534'
+    if phase == 'failed':
+        return '阶段：失败（已回 999）', '#fee2e2', '#b91c1c'
+    if phase == 'plane':
+        return '阶段：平面判定', '#e0f2fe', '#0369a1'
+    if phase in ('center', 'coarse', 'overshoot', 'fine', 'peak'):
+        detail = message or {
+            'center': '居中',
+            'coarse': '粗扫',
+            'overshoot': '细扫 · 抬升',
+            'fine': '细扫',
+            'peak': '峰位采图',
+        }[phase]
+        return f'阶段：{detail}', '#dbeafe', '#1d4ed8'
+    return f'阶段：{phase}', '#eef2f6', '#1d2939'
+
+
+def depthcal_feasibility_text(data):
+    """格式化对焦重复性可行性结论栏文本及颜色。"""
+    feas = data.get('feasibility') or {}
+    if feas and feas.get('max_range') is not None:
+        max_range = float(feas['max_range'])
+        max_std = feas.get('max_std')
+        std_text = f'{float(max_std):.4f}' if isinstance(max_std, (int, float)) else '—'
+        threshold = float(feas.get('threshold', 0.02))
+        met = bool(feas.get('met'))
+        verdict = '满足' if met else '不满足'
+        text = (
+            f'可行性结论：最大极差 {max_range:.4f} mm / 最大标准差 {std_text} mm'
+            f'（门限 {threshold:.3f} mm）→ 对焦重复性{verdict}下针深度标定误差预算（总 0.05mm，对焦环节约 0.02mm）'
+        )
+        return (text, '#ecfdf3', '#168448') if met else (text, '#fff1f0', '#b42318')
+    results = data.get('results') or []
+    if results:
+        ranges = [float(r['range']) for r in results if isinstance(r.get('range'), (int, float))]
+        stds = [float(r['std']) for r in results if isinstance(r.get('std'), (int, float))]
+        if ranges:
+            std_text = f'{max(stds):.4f}' if stds else '—'
+            return (
+                f'可行性结论：已完成 {len(results)} 点，当前最大极差 {max(ranges):.4f} mm / 最大标准差 {std_text} mm'
+                '（待全部测点完成后判定，误差预算：总 0.05mm，对焦环节约 0.02mm）',
+                '#f8fafc', '#475467',
+            )
+    return '可行性结论：等待测点完成后评估（总误差预算 0.05mm，对焦环节约 0.02mm）', '#f8fafc', '#667085'
+
+
+def depthcal_subplot_layout(labels, width, height):
+    """计算多测点清晰度曲线子图的网格列数、行数与像素区域。"""
+    count = max(1, len(labels))
+    cols = 3 if count > 4 else 2 if count > 1 else 1
+    rows = max(1, math.ceil(count / cols))
+    top_pad = 24
+    pad = 8
+    cell_w = max(80, (width - pad * (cols + 1)) / cols)
+    cell_h = max(60, (height - top_pad - pad * (rows + 1)) / rows)
+    boxes = []
+    for idx, label in enumerate(labels):
+        r, c = divmod(idx, cols)
+        x0 = pad + c * (cell_w + pad)
+        y0 = top_pad + pad + r * (cell_h + pad)
+        boxes.append((label, (x0, y0, x0 + cell_w, y0 + cell_h)))
+    return boxes

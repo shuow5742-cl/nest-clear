@@ -187,7 +187,159 @@ def _draw_offset_demo_images(root: Path, offset_state: str, step: int = 0) -> No
         os.replace(tmp, path)
 
 
-def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None, focus_state=None, camcal_state=None, wb_state=None, temporary_exposure=False, film_mode=False):
+def _draw_depthcal_demo_roi(root: Path, depthcal_state: str, z_val: float, label: str) -> None:
+    """用纯 PIL 绘制下针深度标定 ROI 实时缩略图（无 cv2/numpy 依赖）。"""
+    path = live_image_file(root, 'depthcal_roi')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new('RGB', (280, 280), (226, 230, 236))
+    draw = ImageDraw.Draw(img)
+    ring_color = (28, 32, 38) if depthcal_state in ('fine', 'done') else (85, 92, 102)
+    draw.ellipse((96, 96, 184, 184), outline=ring_color, width=6)
+    draw.line((55, 140, 225, 140), fill=ring_color, width=2)
+    draw.line((140, 55, 140, 225), fill=ring_color, width=2)
+    draw.rectangle((4, 4, 276, 30), fill=(255, 255, 255), outline=(200, 210, 220))
+    draw.text((10, 10), f'{label}  Z={z_val:.3f}mm  {depthcal_state}', fill=(20, 40, 80))
+    tmp = path.with_suffix('.tmp')
+    img.save(tmp, format='JPEG')
+    os.replace(tmp, path)
+
+
+def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
+    """生成下针深度标定页演示状态（粗扫中/细扫中/完成/失败）。"""
+    plan = ['T02', 'T05', 'T29', 'T26', 'T12']
+    coords = {
+        'T02': [96.0, 25.0],
+        'T05': [96.0, 115.0],
+        'T29': [164.0, 115.0],
+        'T26': [164.0, 25.0],
+        'T12': [130.0, 70.0],
+    }
+    true_peaks = {
+        'T02': -5.032,
+        'T05': -5.028,
+        'T29': -4.994,
+        'T26': -4.998,
+        'T12': -5.013,
+    }
+
+    def curve_val(z: float, z0: float, amp: float = 0.85, sigma: float = 0.24) -> float:
+        return round(0.04 + amp * math.exp(-0.5 * ((z - z0) / sigma) ** 2), 4)
+
+    def make_coarse(lbl: str, limit: int | None = None):
+        z0 = true_peaks[lbl]
+        zs = [-2.0 - 0.2 * i for i in range(24)]
+        if limit is not None:
+            zs = zs[:limit]
+        return [[round(z, 3), curve_val(z, z0, amp=0.82, sigma=0.35)] for z in zs]
+
+    def make_fine(lbl: str, offset: float, limit: int | None = None):
+        z0 = true_peaks[lbl] + offset
+        zs = [round(true_peaks[lbl] + 0.50 - 0.02 * i, 3) for i in range(51)]
+        if limit is not None:
+            zs = zs[:limit]
+        return [[z, curve_val(z, z0, amp=0.92, sigma=0.20)] for z in zs]
+
+    def make_result(lbl: str):
+        offsets = (-0.0018, 0.0012, 0.0005)
+        peaks = [round(true_peaks[lbl] + off, 5) for off in offsets]
+        mean_pk = sum(peaks) / len(peaks)
+        rng = max(peaks) - min(peaks)
+        var = sum((p - mean_pk) ** 2 for p in peaks) / (len(peaks) - 1)
+        fits = [{'repeat': i + 1, 'z_peak': p, 'fwhm': 0.472 + i * 0.002, 'r2': 0.9968 - i * 0.0004}
+                for i, p in enumerate(peaks)]
+        return {'label': lbl, 'xy': coords[lbl], 'fits': fits, 'z_peak': mean_pk,
+                'range': rng, 'std': math.sqrt(var)}
+
+    curves = {}
+    results = []
+    plane = None
+    initial_plane = None
+    feasibility = None
+
+    if state == 'coarse':
+        lbl = 'T02'
+        curves[lbl] = {'coarse': make_coarse(lbl, limit=14)}
+        z_cur = curves[lbl]['coarse'][-1][0]
+        return ({
+            'phase': 'coarse', 'message': 'T02 粗扫中（Z 向下步进 0.20 mm）',
+            'label': lbl, 'z': z_cur, 'point': 1, 'total': 5, 'plan': plan,
+            'plane': None, 'initial_plane': None, 'results': [], 'feasibility': None,
+            'metric': 'tenengrad', 'method': 'gauss', 'session': 'demo_depthcal',
+            'curves': curves, 'abort_requested': False,
+        }, z_cur, lbl)
+
+    if state == 'fine':
+        for done_lbl in ('T02', 'T05'):
+            curves[done_lbl] = {
+                'coarse': make_coarse(done_lbl),
+                '1': make_fine(done_lbl, -0.0018),
+                '2': make_fine(done_lbl, 0.0012),
+                '3': make_fine(done_lbl, 0.0005),
+            }
+            results.append(make_result(done_lbl))
+        lbl = 'T29'
+        curves[lbl] = {
+            'coarse': make_coarse(lbl),
+            '1': make_fine(lbl, -0.0014),
+            '2': make_fine(lbl, 0.0011, limit=31),
+        }
+        z_cur = curves[lbl]['2'][-1][0]
+        return ({
+            'phase': 'fine', 'message': 'T29 细扫 第 2/3 次（单向向下 0.02 mm）',
+            'label': lbl, 'z': z_cur, 'point': 3, 'total': 5, 'plan': plan,
+            'plane': None, 'initial_plane': None, 'results': results, 'feasibility': None,
+            'metric': 'tenengrad', 'method': 'gauss', 'session': 'demo_depthcal',
+            'curves': curves, 'abort_requested': False,
+        }, z_cur, lbl)
+
+    if state == 'done':
+        for lbl in plan:
+            curves[lbl] = {
+                'coarse': make_coarse(lbl),
+                '1': make_fine(lbl, -0.0018),
+                '2': make_fine(lbl, 0.0012),
+                '3': make_fine(lbl, 0.0005),
+            }
+            results.append(make_result(lbl))
+        residuals = {'T02': -0.0012, 'T05': 0.0015, 'T29': -0.0009, 'T26': 0.0011, 'T12': -0.0005}
+        plane = {'a': 0.00050, 'b': 0.00004, 'c': -5.0808, 'residuals': residuals,
+                 'max_residual': 0.0015, 'tilt_mm_per_100mm': 0.0502}
+        initial_plane = plane
+        feasibility = {'max_range': 0.0030, 'max_std': 0.0016, 'threshold': 0.02, 'met': True}
+        z_cur = results[-1]['z_peak']
+        return ({
+            'phase': 'done', 'message': '料盘多点对焦测试完成（已回 161）',
+            'label': 'T12', 'z': z_cur, 'point': 5, 'total': 5, 'plan': plan,
+            'plane': plane, 'initial_plane': initial_plane, 'results': results, 'feasibility': feasibility,
+            'metric': 'tenengrad', 'method': 'gauss', 'session': 'demo_depthcal',
+            'curves': curves, 'abort_requested': False,
+        }, z_cur, 'T12')
+
+    # failed
+    curves['T02'] = {
+        'coarse': make_coarse('T02'),
+        '1': make_fine('T02', -0.0018),
+        '2': make_fine('T02', 0.0012),
+        '3': make_fine('T02', 0.0005),
+    }
+    results.append(make_result('T02'))
+    curves['T05'] = {'coarse': [[round(-8.0 - 0.2 * i, 3), round(0.12 + 0.03 * i, 4)] for i in range(21)]}
+    z_cur = -12.0
+    return ({
+        'phase': 'failed',
+        'message': '对焦峰不在扫描范围内，最大清晰度在 Z−（向下）边界 Z=-12.0000 mm',
+        'reason_code': 'DEPTH-PEAK-BOUNDARY',
+        'what': '对焦峰不在扫描范围内，最大清晰度在 Z−（向下）边界 Z=-12.0000 mm',
+        'where': 'T05 粗扫',
+        'hint': '核查工具间隙及安全 Z 下限，再评估是否扩大向下的可用扫描范围。',
+        'label': 'T05', 'z': z_cur, 'point': 2, 'total': 5, 'plan': plan,
+        'plane': None, 'initial_plane': None, 'results': results, 'feasibility': None,
+        'metric': 'tenengrad', 'method': 'gauss', 'session': 'demo_depthcal',
+        'curves': curves, 'abort_requested': False,
+    }, z_cur, 'T05')
+
+
+def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=None, pickacc_state=None, baseline_state=None, tooltip_state=None, focus_state=None, camcal_state=None, depthcal_state=None, wb_state=None, temporary_exposure=False, film_mode=False):
     root = Path(root)
     from nest_clear.film_mode import write_mode
     write_mode(root, film_mode)
@@ -378,6 +530,14 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
             data['tooltip']['plc_tool_id'] = 2
         data['mode'] = '空闲' if tooltip_state in ('idle', 'done', 'fail') else '对刀中(工具1)'
         atomic(path, data)
+    if depthcal_state:
+        path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
+        depth_data, z_val, lbl = depthcal_demo(depthcal_state, step)
+        data['depthcal'] = depth_data
+        data['mode'] = '空闲' if depthcal_state in ('done', 'failed') else '下针深度标定中'
+        atomic(path, data)
+        if initial:
+            _draw_depthcal_demo_roi(root, depthcal_state, z_val, lbl)
     names = ('latest', 'camcal_latest', 'preview_latest', 'calib_front_latest', 'calib_side_latest')
     if tooltip_state: names = tuple(n for n in names if not n.startswith('calib_'))
     if not offset_state: names += ('tooloffset_latest', 'tooloffset_crop')
@@ -471,22 +631,25 @@ def main():
     parser.add_argument('--wb-state', choices=('running','success','fail'), default=None)
     parser.add_argument('--focus-state', choices=('off','live','exposure'), default=None)
     parser.add_argument('--camcal-state', choices=('running', 'failed', 'preview'), default=None)
+    parser.add_argument('--depthcal-state', choices=('coarse', 'fine', 'done', 'failed'), default=None)
     args = parser.parse_args(); validate_view_arguments(parser, args)
     if args.camcal_state:
         args.preview_state = 'on' if args.camcal_state == 'preview' else 'blocked'
     if args.offset_state is None and args.page in ('offset', 'tool-offset', '工具偏移标定', '工具偏移标定页'):
         args.offset_state = 'align'
+    if args.depthcal_state is None and args.page in ('depth', 'depthcal', 'depth-calib', '下针深度标定', '下针深度标定页'):
+        args.depthcal_state = 'done'
     if args.wb_state: args.focus_state = 'live'
     if args.focus_state == 'off':
         args.preview_state = 'off'
     elif args.focus_state in ('live', 'exposure'):
         args.preview_state = 'on'
     # 先同步生成第一帧，让短延迟截图也有完整内容。
-    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state, wb_state=args.wb_state, temporary_exposure=args.temporary_exposure, film_mode=args.film_mode)
+    write_demo(args.root, initial=True, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state, depthcal_state=args.depthcal_state, wb_state=args.wb_state, temporary_exposure=args.temporary_exposure, film_mode=args.film_mode)
     def update():
         step = 1
         while True:
-            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state, wb_state=args.wb_state, temporary_exposure=args.temporary_exposure, film_mode=args.film_mode); step += 1
+            time.sleep(1); write_demo(args.root, step, preview_state=args.preview_state, offset_state=args.offset_state, pickacc_state=args.pickacc_state, baseline_state=args.baseline_state, tooltip_state=args.tooltip_state, focus_state=args.focus_state, camcal_state=args.camcal_state, depthcal_state=args.depthcal_state, wb_state=args.wb_state, temporary_exposure=args.temporary_exposure, film_mode=args.film_mode); step += 1
     threading.Thread(target=update, daemon=True).start()
     from .app import App
     app = App(args.root, page=args.page or '主页', screenshot=args.screenshot, screenshot_after_ms=args.screenshot_after_ms, ignore_before_ns=0)

@@ -20,7 +20,8 @@ from .model import (EventTail, camcal_progress, decode_status, display_time, dur
                     pickacc_tray_geometry, pickacc_type, pickacc_z_type, pickacc_z_summary_text, pickacc_z_missing_tools,
                     pickacc_stage, pickacc_note, pickacc_infield,
                     tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time, page_for_mode,
-                    baseline_preview_display, extract_tooltip_preview)
+                    baseline_preview_display, extract_tooltip_preview,
+                    depthcal_stage_info, depthcal_feasibility_text, depthcal_subplot_layout)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -298,11 +299,12 @@ def resize_home_picture(container, body, picture):
 
 
 class App:
-    PAGE_NAMES = ('主页', '相机标定', '工具偏移标定', '挑取精度标定', '对刀基准建立', '换针对刀')
+    PAGE_NAMES = ('主页', '相机标定', '工具偏移标定', '挑取精度标定', '对刀基准建立', '换针对刀', '下针深度标定')
     PAGE_ALIASES = {'home': '主页', 'main': '主页', 'camera': '相机标定', 'camcal': '相机标定',
                     'offset': '工具偏移标定', 'tool-offset': '工具偏移标定',
                     'pickacc': '挑取精度标定', 'pick-accuracy': '挑取精度标定',
-                    'baseline': '对刀基准建立', 'toolcal': '换针对刀', 'tooltip': '换针对刀'}
+                    'baseline': '对刀基准建立', 'toolcal': '换针对刀', 'tooltip': '换针对刀',
+                    'depth': '下针深度标定', 'depthcal': '下针深度标定', 'depth-calib': '下针深度标定'}
 
     def __init__(self, root, refresh_ms=300, fullscreen=False, page=None, screenshot=None, screenshot_after_ms=None, ignore_before_ns=None):
         self.directory = Path(root); self.interval = refresh_ms
@@ -340,6 +342,7 @@ class App:
         self.pickacc = self.new_page('挑取精度标定'); self.build_pickacc()
         self.baseline = self.new_page('对刀基准建立'); self.build_baseline()
         self.tip = self.new_page('换针对刀'); self.build_tip()
+        self.depth = self.new_page('下针深度标定'); self.build_depth()
         self.select_page(page if page is not None else '主页')
         self.root.after(50, self.refresh)
         self.root.after(50, self.poll_pictures)
@@ -1723,6 +1726,279 @@ class App:
     def tip_command(self, name):
         self._send_page_command('tip', name)
 
+    def build_depth(self):
+        self.depth_pending = 0
+        self.depth_ack = 0
+        self.depth.columnconfigure(0, weight=64, uniform='depthcols')
+        self.depth.columnconfigure(1, weight=36, uniform='depthcols')
+        self.depth.rowconfigure(1, weight=3, uniform='depthrows')
+        self.depth.rowconfigure(2, weight=2, uniform='depthrows')
+
+        head = self.card(self.depth, '下针深度标定 · 料盘多点对焦测试', 0, 0, columnspan=2)
+        head.columnconfigure(0, weight=1)
+        bar = tk.Frame(head, bg=WHITE)
+        bar.grid(row=0, column=0, sticky='ew')
+        bar.columnconfigure(4, weight=1)
+        self.depth_stage = tk.Label(bar, text='阶段：空闲（等待 PLC 160）', bg='#eef2f6', fg=INK,
+                                    font=(self.theme.title[0], 13, 'bold'), padx=12, pady=3)
+        self.depth_stage.grid(row=0, column=0, sticky='w', padx=(0, 10))
+        self.depth_target = tk.Label(bar, text='靶点：—', bg='#eef2f6', fg=INK, font=self.theme.mono, padx=10, pady=3)
+        self.depth_target.grid(row=0, column=1, sticky='w', padx=(0, 10))
+        self.depth_z = tk.Label(bar, text='PLC Z：— mm', bg='#eef2f6', fg=INK, font=self.theme.mono, padx=10, pady=3)
+        self.depth_z.grid(row=0, column=2, sticky='w', padx=(0, 10))
+        self.depth_metric = tk.Label(bar, text='指标：tenengrad · gauss', bg=WHITE, fg=MUTED, font=self.theme.body)
+        self.depth_metric.grid(row=0, column=3, sticky='w')
+        self.depth_abort = ttk.Button(bar, text='放弃本次标定', command=lambda: self.depth_command('depthcal_abort'))
+        self.depth_abort.grid(row=0, column=5, sticky='e', padx=4)
+
+        self.depth_message = tk.Label(head, text='等待 PLC 160 发起料盘多点对焦测试', bg=WHITE, fg=INK,
+                                      font=(self.theme.title[0], 13), anchor='w', justify='left', wraplength=1360)
+        self.depth_message.grid(row=1, column=0, sticky='ew', pady=(4, 2))
+        self.depth_failure_detail = tk.Label(head, text='', bg='#fff1f0', fg=COLORS['red'],
+                                             font=self.theme.body, anchor='w', justify='left', padx=8, pady=4, wraplength=1360)
+        self.depth_failure_detail.grid(row=2, column=0, sticky='ew', pady=(0, 2))
+        self.depth_failure_detail.grid_remove()
+        self.depth_feasibility = tk.Label(head, text='可行性结论：等待测点完成后评估（总误差预算 0.05mm，对焦环节约 0.02mm）',
+                                          bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 11, 'bold'),
+                                          anchor='w', justify='left', padx=8, pady=4, wraplength=1360)
+        self.depth_feasibility.grid(row=3, column=0, sticky='ew')
+
+        curves_body = self.card(self.depth, '清晰度曲线（粗扫灰线 · 细扫彩线 · 竖线=峰位）', 1, 0)
+        curves_body.grid_propagate(False)
+        self.depth_curves = tk.Canvas(curves_body, bg=WHITE, highlightthickness=0)
+        self.depth_curves.grid(row=0, column=0, sticky='nsew')
+
+        right = tk.Frame(self.depth, bg=BG)
+        right.grid(row=1, column=1, sticky='nsew')
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=1)
+        right.rowconfigure(1, weight=0)
+
+        roi_body = self.card(right, 'ROI 实时缩略图 · 点击放大', 0, 0)
+        roi_body.grid_propagate(False)
+        self.depth_roi_pic = self.picture(roi_body, 'depthcal_roi')
+
+        plane_body = self.card(right, '平面拟合结果', 1, 0)
+        self.depth_plane_grid = KeyValueGrid(
+            plane_body,
+            ('平面方程', '最大 |残差| / 倾斜', '加测判定', '各点残差 (mm)'),
+            self.theme,
+        )
+        self.depth_plane_grid.grid(row=0, column=0, sticky='nsew')
+        for widget in getattr(self.depth_plane_grid, 'winfo_children', lambda: ())():
+            widget.configure(font=(self.theme.body[0], 10), pady=1)
+            widget.grid_configure(pady=0)
+
+        table_body = self.card(self.depth, '各测点对焦重复性结果', 2, 0, columnspan=2)
+        cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'R²')
+        widths = (65, 175, 115, 115, 115, 125, 100, 100, 100, 90)
+        self.depth_table = self.table_widget(table_body, cols, widths, stretch=('模组 XY (mm)', '均值 Z_peak'), height=5)
+        depth_scroll = ttk.Scrollbar(table_body, orient='vertical', command=self.depth_table.yview)
+        depth_scroll.grid(row=0, column=1, sticky='ns')
+        self.depth_table.configure(yscrollcommand=depth_scroll.set)
+
+    def depth_command(self, name, params=None):
+        self._send_page_command('depth', name, params)
+
+    def update_depthcal(self, main):
+        data = main.get('depthcal') or {}
+        phase = data.get('phase') or 'idle'
+        self.depth_ack = main.get('command_seq', 0)
+        self._check_page_command('depth', self.depth_ack)
+
+        stage_text, stage_bg, stage_fg = depthcal_stage_info(data)
+        self.depth_stage.config(text=stage_text, bg=stage_bg, fg=stage_fg)
+
+        label = data.get('label')
+        point = data.get('point')
+        total = data.get('total')
+        target_text = f"靶点：{label or '—'}" + (f" ({point}/{total})" if point and total else '')
+        self.depth_target.config(text=target_text)
+
+        z_val = data.get('z')
+        self.depth_z.config(text=f"PLC Z：{z_val:.4f} mm" if isinstance(z_val, (int, float)) else 'PLC Z：— mm')
+
+        metric = data.get('metric') or 'tenengrad'
+        method = data.get('method') or 'gauss'
+        self.depth_metric.config(text=f'指标：{metric} · {method}')
+
+        active = phase in ('center', 'coarse', 'overshoot', 'fine', 'peak', 'plane') and not self.depth_pending and not data.get('abort_requested')
+        self.depth_abort.config(state='normal' if active else 'disabled')
+
+        default_msg = {
+            'idle': '等待 PLC 160 发起料盘多点对焦测试',
+            'done': '料盘多点对焦测试完成（已回 161）',
+        }.get(phase, stage_text.replace('阶段：', ''))
+        msg = getattr(self, 'depth_command_message', '') or ('上一条命令处理中' if self.depth_pending else data.get('message')) or default_msg
+        if phase == 'done' and data.get('feasibility'):
+            msg = '料盘多点对焦测试完成（已回 161）'
+        msg_fg = COLORS['red'] if getattr(self, 'depth_command_message', '') or phase == 'failed' else COLORS['green'] if phase == 'done' else INK
+        self.depth_message.config(text=msg, fg=msg_fg)
+
+        if phase == 'failed' and any(data.get(k) for k in ('reason_code', 'what', 'where', 'hint')):
+            lines = [f"错误码：{data.get('reason_code') or 'DEPTH-FAILED'}    位置：{data.get('where') or '下针深度标定'}"]
+            lines.append(f"现象：{data.get('what') or data.get('message') or '—'}")
+            lines.append(f"建议：{data.get('hint') or '检查菲林、相机和 PLC 实时坐标。'}")
+            self.depth_failure_detail.config(text='\n'.join(lines))
+            self.depth_failure_detail.grid()
+        else:
+            self.depth_failure_detail.config(text='')
+            self.depth_failure_detail.grid_remove()
+
+        feas_text, feas_bg, feas_fg = depthcal_feasibility_text(data)
+        self.depth_feasibility.config(text=feas_text, bg=feas_bg, fg=feas_fg)
+
+        plane = data.get('plane') or {}
+        initial_plane = data.get('initial_plane') or {}
+        if plane and 'a' in plane:
+            eq_text = f"z = {plane['a']:+.5f}x {plane['b']:+.5f}y {plane['c']:+.4f}"
+            res_tilt = f"{plane.get('max_residual', 0):.4f} mm  /  倾斜 {plane.get('tilt_mm_per_100mm', 0):.4f} mm/100mm"
+            if plane.get('after_extra') and initial_plane:
+                extra_text = f"{plane['after_extra']}（{initial_plane.get('max_residual', 0):.4f} → {plane.get('max_residual', 0):.4f} mm）"
+            else:
+                extra_text = '未触发加测（≤ 0.02 mm）'
+            residuals = plane.get('residuals') or {}
+            res_text = '  '.join(f'{k}:{v:+.4f}' for k, v in residuals.items()) or '—'
+        else:
+            eq_text = res_tilt = extra_text = res_text = '—'
+        self.depth_plane_grid.set({
+            '平面方程': eq_text,
+            '最大 |残差| / 倾斜': res_tilt,
+            '加测判定': extra_text,
+            '各点残差 (mm)': res_text,
+        })
+
+        results = data.get('results') or []
+        table_key = json.dumps(results, ensure_ascii=False, default=str)
+        if table_key != self.cache.get('depth_table'):
+            self.cache['depth_table'] = table_key
+            self.depth_table.delete(*self.depth_table.get_children())
+            for item in results:
+                xy = item.get('xy') or []
+                xy_text = f'({xy[0]:.2f}, {xy[1]:.2f})' if len(xy) >= 2 else '—'
+                fits = item.get('fits') or []
+                p_vals = [f"{fits[i]['z_peak']:.4f}" if i < len(fits) and isinstance(fits[i].get('z_peak'), (int, float)) else '—' for i in range(3)]
+                if len(fits) > 3:
+                    p_vals[2] += f' (+{len(fits) - 3})'
+                fwhms = [f['fwhm'] for f in fits if isinstance(f.get('fwhm'), (int, float))]
+                r2s = [f['r2'] for f in fits if isinstance(f.get('r2'), (int, float))]
+                z_mean = item.get('z_peak')
+                z_rng = item.get('range')
+                z_std = item.get('std')
+                self.depth_table.insert('', 'end', values=(
+                    item.get('label') or '—',
+                    xy_text,
+                    *p_vals,
+                    f'{z_mean:.4f}' if isinstance(z_mean, (int, float)) else '—',
+                    f'{z_rng:.4f}' if isinstance(z_rng, (int, float)) else '—',
+                    f'{z_std:.4f}' if isinstance(z_std, (int, float)) else '—',
+                    f'{sum(fwhms)/len(fwhms):.3f}' if fwhms else '—',
+                    f'{sum(r2s)/len(r2s):.4f}' if r2s else '—',
+                ))
+
+        self.draw_depthcal_curves(data)
+
+    def draw_depthcal_curves(self, data):
+        c = self.depth_curves
+        w = max(240, c.winfo_width())
+        h = max(160, c.winfo_height())
+        curves = data.get('curves') or {}
+        plan = list(data.get('plan') or [])
+        for lbl in curves:
+            if lbl not in plan:
+                plan.append(lbl)
+        results_by_label = {r.get('label'): r for r in (data.get('results') or []) if r.get('label')}
+        current_label = data.get('label')
+        key = (json.dumps([curves, plan, current_label, data.get('results')], ensure_ascii=False, default=str), w, h)
+        if self.cache.get('depth_curves') == key:
+            return
+        self.cache['depth_curves'] = key
+        c.delete('all')
+
+        # 顶部图例
+        legend_items = [('粗扫(灰)', '#98a2b3'), ('细扫1', '#2563eb'), ('细扫2', '#168448'),
+                        ('细扫3', '#d97706'), ('峰位(竖线)', '#b42318')]
+        lx = 12
+        for text, color in legend_items:
+            c.create_line(lx, 12, lx + 16, 12, fill=color, width=2, dash=(4, 2) if '竖线' in text else ())
+            c.create_text(lx + 20, 12, text=text, anchor='w', fill=INK, font=(self.theme.body[0], 9))
+            lx += 88 if '粗扫' in text else 96 if '竖线' in text else 66
+
+        if not plan:
+            c.create_text(w / 2, h / 2, text='暂无清晰度扫描曲线，等待 PLC 160 发起测试',
+                          fill=MUTED, font=self.theme.body)
+            return
+
+        pass_colors = {'1': '#2563eb', '2': '#168448', '3': '#d97706', '4': '#7c3aed', '5': '#0891b2'}
+        for label, (x0, y0, x1, y1) in depthcal_subplot_layout(plan, w, h):
+            is_current = (label == current_label) and data.get('phase') not in ('idle', 'done', 'failed')
+            border = '#2563eb' if is_current else BORDER
+            c.create_rectangle(x0, y0, x1, y1, outline=border, width=2 if is_current else 1, fill='#fcfcfd')
+            res = results_by_label.get(label)
+            title = f'{label}'
+            if res and isinstance(res.get('z_peak'), (int, float)):
+                title += f"  峰={res['z_peak']:.4f}mm  Δ={res.get('range', 0):.4f}"
+            elif is_current:
+                title += '  (扫描中)'
+            c.create_text(x0 + 8, y0 + 5, text=title, anchor='nw',
+                          fill='#1d4ed8' if is_current else INK, font=(self.theme.body[0], 9, 'bold'))
+
+            series = curves.get(label) or {}
+            all_pts = [pt for pts in series.values() for pt in pts if len(pt) >= 2]
+            if not all_pts:
+                c.create_text((x0 + x1) / 2, (y0 + y1) / 2 + 6, text='等待扫描', fill=MUTED, font=(self.theme.body[0], 9))
+                continue
+
+            px0, py0, px1, py1 = x0 + 36, y0 + 24, x1 - 10, y1 - 20
+            if px1 <= px0 + 10 or py1 <= py0 + 10:
+                continue
+            zs = [pt[0] for pt in all_pts]
+            ys = [pt[1] for pt in all_pts]
+            z_lo, z_hi = min(zs), max(zs)
+            if z_hi - z_lo < 1e-6:
+                z_lo -= 0.1
+                z_hi += 0.1
+            y_lo, y_hi = 0.0, max(max(ys) * 1.08, 1e-9)
+
+            def to_px(zv, yv):
+                sx = px0 + (px1 - px0) * (zv - z_lo) / (z_hi - z_lo)
+                sy = py1 - (py1 - py0) * (yv - y_lo) / (y_hi - y_lo)
+                return sx, sy
+
+            c.create_line(px0, py0, px0, py1, fill='#cbd5e1')
+            c.create_line(px0, py1, px1, py1, fill='#cbd5e1')
+            c.create_text(px0 - 3, py0, text=f'{y_hi:.2f}', anchor='ne', fill=MUTED, font=(self.theme.body[0], 8))
+            c.create_text(px0 - 3, py1, text='0', anchor='se', fill=MUTED, font=(self.theme.body[0], 8))
+            c.create_text(px0, py1 + 3, text=f'{z_lo:.2f}', anchor='nw', fill=MUTED, font=(self.theme.body[0], 8))
+            c.create_text(px1, py1 + 3, text=f'{z_hi:.2f}', anchor='ne', fill=MUTED, font=(self.theme.body[0], 8))
+
+            ordered_passes = ['coarse'] + sorted([k for k in series if k != 'coarse'])
+            for p_name in ordered_passes:
+                pts = sorted((pt for pt in series.get(p_name, []) if len(pt) >= 2), key=lambda item: item[0])
+                if not pts:
+                    continue
+                color = '#98a2b3' if p_name == 'coarse' else pass_colors.get(p_name, '#2563eb')
+                width_px = 1.5 if p_name == 'coarse' else 2.0
+                coords = []
+                for zv, yv in pts:
+                    sx, sy = to_px(zv, yv)
+                    coords.extend((sx, sy))
+                    if p_name == 'coarse':
+                        c.create_oval(sx - 2, sy - 2, sx + 2, sy + 2, fill=color, outline=color)
+                if len(coords) >= 4:
+                    c.create_line(*coords, fill=color, width=width_px)
+
+            if res:
+                for idx, fit in enumerate(res.get('fits') or [], 1):
+                    pk = fit.get('z_peak')
+                    if isinstance(pk, (int, float)) and z_lo <= pk <= z_hi:
+                        sx, _ = to_px(pk, y_lo)
+                        c.create_line(sx, py0, sx, py1, fill=pass_colors.get(str(idx), '#b42318'), dash=(3, 2), width=1.5)
+                mean_pk = res.get('z_peak')
+                if isinstance(mean_pk, (int, float)) and z_lo <= mean_pk <= z_hi:
+                    sx, _ = to_px(mean_pk, y_lo)
+                    c.create_line(sx, py0, sx, py1, fill='#b42318', width=2)
+
     def build_placeholder(self, parent, title):
         parent.columnconfigure(0, weight=1); parent.columnconfigure(1, weight=1)
         parent.rowconfigure(0, weight=1)
@@ -1900,6 +2176,7 @@ class App:
         self.update_tip(tip_data)
         self.update_offset(main)
         self.update_pickacc(main)
+        self.update_depthcal(main)
         from nest_clear.ui.model import supervisor_tooltip_main
         tooltip = self.file_data(self.directory / 'state' / 'supervisor_tooltip_status.json')
         self.update_baseline(supervisor_tooltip_main(main, supervisor, tooltip, supervisor_age=supervisor_age), supervisor)
