@@ -78,6 +78,24 @@ def test_startup_metadata_snapshot_and_updates(tmp_path, monkeypatch):
         assert meta["config"]["content"] == config_path.read_text()
         assert meta["detection_scales"][0]["parameters"]
         assert all(meta[key]["sha256"] for key in ("config", "contract", "calibration", "tools"))
+
+        # 对刀相机配置中含 _role_resolver 方法对象时，write_meta 不得因 TypeError 失败
+        from types import SimpleNamespace
+        fake_calib = SimpleNamespace(
+            cameras={
+                "front": SimpleNamespace(
+                    backend="mock",
+                    device=None,
+                    config={"backend": "uvc", "sn": "F1", "_role_resolver": lambda: None, "_ownership_dir": tmp_path},
+                )
+            }
+        )
+        fake_calib.cameras["front"].config["_role_resolver"] = events.clock
+        write_meta(events, config_path, calibration, config, camera, None, [(0., 0., config.scan.z)], fake_calib)
+        meta_with_calib = json.loads((events.run_directory / "meta.json").read_text())
+        assert "_role_resolver" not in meta_with_calib["calibration_cameras"]["front"]["settings"]
+        assert "_ownership_dir" not in meta_with_calib["calibration_cameras"]["front"]["settings"]
+
         events.meta_update(task_id=12, tool=1, old=[0, 0, 0], new=[1, 2, 3])
         update = json.loads((events.run_directory / "meta_updates.jsonl").read_text())
         assert update["task_id"] == 12 and update["new"] == [1, 2, 3]

@@ -49,11 +49,23 @@ class ViewCalib:
 
     width_px: float | None = None
     click: dict | bool | None = None
+    manual_override: bool = False
+    axis_rms_px: float | None = None
+    edge_width_px: float | None = None
+    override_note: str | None = None
 
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""
         if self.width_px is not None and (not np.isfinite(self.width_px) or self.width_px <= 0):
             raise _error("width_px must be positive", locals())
+        if type(self.manual_override) is not bool:
+            raise _error("manual_override must be a boolean", locals())
+        for attr in ("axis_rms_px", "edge_width_px"):
+            val = getattr(self, attr)
+            if val is not None and (isinstance(val, bool) or not isinstance(val, (int, float)) or not np.isfinite(val) or val < 0):
+                raise _error(f"{attr} must be non-negative and finite", locals())
+        if self.override_note is not None and not isinstance(self.override_note, str):
+            raise _error("override_note must be a string", locals())
         if not isinstance(self.name, str) or not self.name.strip():
             raise _error("view name must be a non-empty string", locals())
         object.__setattr__(self, "target_uv", _tuple(self.target_uv, (2,), "target_uv"))
@@ -75,6 +87,7 @@ class ToolTipBaseline:
     jacobian_measured_at: str = ""
     jacobian_session: str = ""
     detector: dict[str, dict[str, str]] | None = None
+    manual_override: bool = False
 
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""
@@ -95,6 +108,8 @@ class ToolTipBaseline:
             raise _error("timestamp and note must be strings", locals())
         if type(self.jacobian_pending) is not bool:
             raise _error("jacobian_pending must be a boolean", locals())
+        if type(self.manual_override) is not bool:
+            raise _error("manual_override must be a boolean", locals())
         if not isinstance(self.jacobian_measured_at, str) or not isinstance(self.jacobian_session, str):
             raise _error("jacobian measurement metadata must be strings", locals())
 

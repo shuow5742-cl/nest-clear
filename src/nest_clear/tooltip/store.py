@@ -139,6 +139,7 @@ def save_baseline(
         **({"jacobian_measured_at": baseline.jacobian_measured_at} if baseline.jacobian_measured_at else {}),
         **({"jacobian_session": baseline.jacobian_session} if baseline.jacobian_session else {}),
         **({"detector": baseline.detector} if baseline.detector else {}),
+        **({"manual_override": True} if baseline.manual_override else {}),
         "views": [
             {
                 "name": view.name,
@@ -146,6 +147,10 @@ def save_baseline(
                 "jacobian": [list(row) for row in view.jacobian] if view.jacobian is not None else None,
                 **({"width_px": view.width_px} if view.width_px is not None else {}),
                 **({"click": view.click} if view.click is not None else {}),
+                **({"manual_override": True} if view.manual_override else {}),
+                **({"axis_rms_px": view.axis_rms_px} if view.axis_rms_px is not None else {}),
+                **({"edge_width_px": view.edge_width_px} if view.edge_width_px is not None else {}),
+                **({"override_note": view.override_note} if view.override_note else {}),
             }
             for view in baseline.views
         ],

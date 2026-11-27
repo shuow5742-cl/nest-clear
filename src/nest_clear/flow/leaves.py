@@ -140,7 +140,10 @@ class WaitRequest(CallWorker):
             self.events.baseline_session = baseline = None
         if command and command[0] in preview_commands:
             name, params = command
-            handle_preview_command(self.events, self._blackboard.read('mode'), name, params)
+            if name == 'tooltip_peak_reset' and baseline and not baseline.closed:
+                baseline.submit(name, params, reader(reader_ctx).last_seq)
+            else:
+                handle_preview_command(self.events, self._blackboard.read('mode'), name, params)
         if command and command[0].startswith('baseline_'):
             name, params = command
             if name == 'baseline_start':

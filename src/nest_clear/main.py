@@ -152,8 +152,9 @@ def write_meta(events: EventRecorder, config_path: Path, calibration_path: Path,
         calibration_cameras = {}
         if calib_camera is not None:
             for name, device in calib_camera.cameras.items():
+                settings = {k: v for k, v in device.config.items() if not str(k).startswith("_") and not callable(v)}
                 info = {"sn": device.config.get("sn"), "model": None,
-                        "width": None, "height": None, "settings": device.config,
+                        "width": None, "height": None, "settings": settings,
                         "readback": {"exposure_us": None, "gain_db": None, "balance_ratio": None}}
                 try:
                     if device.backend == "mock":
@@ -185,7 +186,16 @@ def write_meta(events: EventRecorder, config_path: Path, calibration_path: Path,
             "detection_scales": scales,
         }
         events.run_directory.mkdir(parents=True, exist_ok=True)
-        (events.run_directory / "meta.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+        (events.run_directory / "meta.json").write_text(
+            json.dumps(
+                metadata,
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+                default=lambda obj: str(obj) if isinstance(obj, Path) else (f"<{type(obj).__name__}>" if callable(obj) else str(obj)),
+            ),
+            encoding="utf-8",
+        )
     except Exception:
         logger.exception("启动快照 meta.json 写入失败")
 

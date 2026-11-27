@@ -67,29 +67,85 @@ def read_tooltip_preview(root, *, now=None, stale_seconds=TOOLTIP_PREVIEW_STALE_
     return result
 
 
-def baseline_preview_display(item, live=None, *, allow_inline=False):
-    """Format one preparation view, discarding stale metrics after an error or expiration."""
+def baseline_focus_status(live, *, good_px=2.0, warn_px=3.0, axis_rms_limit=0.7):
+    """根据边缘宽度判断对焦状态，并格式化对焦状态条摘要（不依赖 cv2/numpy/yaml）。"""
+    try:
+        good = float(good_px)
+        if not math.isfinite(good) or good <= 0:
+            good = 2.0
+    except (TypeError, ValueError):
+        good = 2.0
+    try:
+        warn = float(warn_px)
+        if not math.isfinite(warn) or warn < good:
+            warn = max(3.0, good)
+    except (TypeError, ValueError):
+        warn = max(3.0, good)
+    src = live if isinstance(live, dict) else {}
+    det_raw = src.get('detection_status')
+    det_txt = '未检出' if det_raw in (None, '', '未识别', '未检出') else str(det_raw)
+    edge_px = src.get('edge_width_px')
+    edge_um = src.get('edge_width_um')
+    contrast = src.get('contrast')
+    axis_rms = src.get('axis_rms_px')
+    lim = src.get('axis_rms_limit')
+    lim_val = float(lim) if isinstance(lim, (int, float)) and math.isfinite(lim) and lim > 0 else axis_rms_limit
+    valid_edge = (
+        bool(src)
+        and det_txt != '未检出'
+        and isinstance(edge_px, (int, float))
+        and not isinstance(edge_px, bool)
+        and math.isfinite(edge_px)
+        and edge_px > 0
+    )
+    if not valid_edge:
+        level, badge, color_key = 'none', '未检出', 'gray'
+    elif edge_px <= good:
+        level, badge, color_key = 'good', '✔ 已对焦', 'green'
+    elif edge_px <= warn:
+        level, badge, color_key = 'warn', '⚠ 稍虚', 'yellow'
+    else:
+        level, badge, color_key = 'bad', '✖ 未对焦', 'red'
+    edge_px_txt = f'{float(edge_px):.2f} px' if isinstance(edge_px, (int, float)) and not isinstance(edge_px, bool) and math.isfinite(edge_px) else '— px'
+    edge_um_txt = f'{float(edge_um):.1f} µm' if isinstance(edge_um, (int, float)) and not isinstance(edge_um, bool) and math.isfinite(edge_um) else '— µm'
+    contrast_txt = f'{float(contrast):.0f}' if isinstance(contrast, (int, float)) and not isinstance(contrast, bool) and math.isfinite(contrast) else '—'
+    rms_txt = f'{float(axis_rms):.2f} px' if isinstance(axis_rms, (int, float)) and not isinstance(axis_rms, bool) and math.isfinite(axis_rms) else '— px'
+    lim_txt = f'{float(lim_val):g}' if isinstance(lim_val, (int, float)) and math.isfinite(lim_val) else '0.7'
+    summary = f'边缘 {edge_px_txt}（{edge_um_txt}）· 对比度 {contrast_txt} · 轴残差 {rms_txt}（门限 {lim_txt}）· {det_txt}'
+    return {
+        'level': level,
+        'badge': badge,
+        'color_key': color_key,
+        'summary': summary,
+        'detection_label': det_txt,
+        'axis_rms_limit': lim_val,
+    }
+
+
+def baseline_preview_display(item, live=None, *, allow_inline=False, session_live=False):
+    """Format one preparation or baseline-session view, discarding stale metrics after an error or expiration."""
     error = str(item.get('error') or '')
     if error:
         hint = ('两台相机不要接在同一个 USB 集线器上，换一个主板 USB 口后重开预览。'
                 if 'USB' in error or '带宽' in error else '检查相机配置、连接和权限后重开预览。')
-        return {'failed': True, 'on': bool(item.get('on')), 'no_live_data': False,
+        return {'failed': True, 'on': bool(item.get('on')), 'session_live': bool(session_live), 'no_live_data': False,
                 'button': '预览失败，点击重试', 'message': error, 'hint': hint,
                 'metrics': {'percent': '—', 'current': '—', 'peak': '—', 'edge_um': '—',
                             'edge_px': '—', 'contrast': '—', 'source': '—', 'exposure': '—'},
                 'history': []}
-    if not item.get('on'):
-        return {'failed': False, 'on': False, 'no_live_data': False, 'message': '预览关闭',
+    on = bool(item.get('on'))
+    if not on and not session_live:
+        return {'failed': False, 'on': False, 'session_live': False, 'no_live_data': False, 'message': '预览关闭',
                 'metrics': None, 'history': []}
-    src = live if isinstance(live, dict) and live else (item if allow_inline and 'percent' in item else None)
+    src = live if isinstance(live, dict) and live else (item if on and allow_inline and 'percent' in item else None)
     if not src:
         exposure_error = item.get('exposure_error')
-        message = str(exposure_error) if exposure_error else '无实时数据'
-        return {'failed': False, 'on': True, 'no_live_data': True, 'message': message,
+        message = str(exposure_error) if exposure_error else ('等待实时检测数据' if session_live and not on else '无实时数据')
+        return {'failed': False, 'on': on, 'session_live': bool(session_live), 'no_live_data': True, 'message': message,
                 'metrics': {'percent': '—', 'current': '—', 'peak': '—', 'edge_um': '—',
                             'edge_px': '—', 'contrast': '—', 'source': '—', 'exposure': '—'},
                 'history': []}
-    return {'failed': False, 'on': True, 'no_live_data': False, 'live': src,
+    return {'failed': False, 'on': on, 'session_live': bool(session_live), 'no_live_data': False, 'live': src,
             'history': list(src.get('history') or [])}
 
 

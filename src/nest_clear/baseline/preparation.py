@@ -31,6 +31,94 @@ def exposure_source(measured):
     return ('已存（手动）' if measured.get('source') == 'manual' else '已存（自动测）') if measured else '默认'
 
 
+def make_tip_tracker(detector_cfg):
+    """按检测方法构造对应的清晰度峰值跟踪器。"""
+    method = (detector_cfg or {}).get('method', 'trident')
+    return BandGradientTracker() if method == 'trident' else EdgeWidthTracker(reset_distance=50)
+
+
+def write_tooltip_preview_file(directory, cameras, updated_at):
+    """原子写入高频对刀实时清晰度状态文件 runs/state/tooltip_preview.json。"""
+    path = tooltip_preview_file(directory)
+    payload = {
+        'updated_at': updated_at,
+        'cameras': {k: dict(v) for k, v in cameras.items()},
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix='.tooltip_preview_', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(payload, stream, ensure_ascii=False, allow_nan=False)
+        os.replace(temp, path)
+    except Exception:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def build_preview_camera_payload(
+    *,
+    metrics,
+    tracked,
+    status,
+    reason,
+    detection,
+    tip,
+    delta_uv,
+    history,
+    fps,
+    scale,
+    detector_cfg,
+    ui_config,
+    updated_at,
+    exposure_ms=None,
+    frame_seq=None,
+    captured_mono=None,
+    captured_at=None,
+    frame_age_ms=None,
+    processing_ms=None,
+):
+    """构造单路写入 tooltip_preview.json 的标准化实时清晰度字典。"""
+    method = (detector_cfg or {}).get('method', 'trident')
+    axis_rms_limit = detector_cfg.get('max_axis_rms_px', 0.7) if method == 'trident' else None
+    peak_edge_um = (
+        tracked['best'] * scale
+        if metrics.get('source') != 'band_gradient_p995' and tracked.get('best') is not None
+        else None
+    )
+    return {
+        'tenengrad': metrics['tenengrad'],
+        'band_gradient': metrics.get('band_gradient'),
+        'axis_rms_px': metrics.get('axis_rms_px'),
+        'axis_rms_limit': axis_rms_limit,
+        'focus_good_px': ui_config.get('focus_good_px', 2.0),
+        'focus_warn_px': ui_config.get('focus_warn_px', 3.0),
+        'peak': tracked['best'],
+        'percent': tracked['percent'],
+        'edge_width_um': metrics['edge_width_um'],
+        'edge_width_px': metrics['edge_width_px'],
+        'peak_edge_width_um': peak_edge_um,
+        'contrast': metrics['contrast'],
+        'source': metrics['source'],
+        'tip_uv': list(tip) if tip is not None else None,
+        'detection_status': status,
+        'detection_reason': getattr(detection, 'diagnostic', ''),
+        'focus_reason': reason,
+        'delta_uv': delta_uv,
+        'history': list(history),
+        'fps': fps,
+        'frame_seq': frame_seq,
+        'captured_mono': captured_mono,
+        'captured_at': captured_at,
+        'frame_age_ms': frame_age_ms,
+        'processing_ms': processing_ms,
+        'exposure_ms': exposure_ms,
+        'updated_at': updated_at,
+    }
+
+
 def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127):
     tip = detection.point_uv
     if isinstance(detection, TridentResult):
@@ -38,7 +126,9 @@ def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127):
         reason = detection.diagnostic if status != '精定位' else ''
         value = (detection.sharpness or {}).get('band_gradient_p995') if status == '精定位' else None
         tracked = tracker.update(value, tip if value is not None else None)
-        metrics = {'tenengrad': None, 'edge_width_px': None, 'edge_width_um': None,
+        edge_px = detection.edge_width_px
+        edge_um = edge_px * scale if edge_px is not None else None
+        metrics = {'tenengrad': None, 'edge_width_px': edge_px, 'edge_width_um': edge_um,
                    'contrast': detection.tip_contrast, 'source': 'band_gradient_p995',
                    'band_gradient': tracked['current'], 'axis_rms_px': detection.axis_rms_px}
         return status, reason, metrics, tracked
@@ -123,7 +213,7 @@ class Preparation:
         self.assignment_thread = None
         self.devices = []
         detector_settings = getattr(getattr(config, 'tool_calibration', None), 'detection', {})
-        self.trackers = {n: (BandGradientTracker() if detector_settings.get(n, {}).get('method', 'trident') == 'trident' else EdgeWidthTracker(reset_distance=50)) for n in self.enabled}
+        self.trackers = {n: make_tip_tracker(detector_settings.get(n, {})) for n in self.enabled}
         self.reset_peak = {n: threading.Event() for n in self.enabled}
         self.history = {n: [] for n in self.enabled}
         self._preview_cameras = {}
@@ -192,7 +282,6 @@ class Preparation:
         directory = getattr(self.events, 'directory', None)
         if directory is None:
             return
-        path = tooltip_preview_file(directory)
         with self.lock:
             if now is None:
                 now = self._monotonic()
@@ -208,23 +297,9 @@ class Preparation:
             if self._preview_timer is not None:
                 self._preview_timer.cancel()
                 self._preview_timer = None
-            payload = {
-                'updated_at': self._clock().isoformat(),
-                'cameras': {k: dict(v) for k, v in self._preview_cameras.items()},
-            }
+            cameras = {k: dict(v) for k, v in self._preview_cameras.items()}
             self._preview_last_write = now
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temp = tempfile.mkstemp(prefix='.tooltip_preview_', suffix='.tmp', dir=path.parent)
-            try:
-                with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-                    json.dump(payload, stream, ensure_ascii=False, allow_nan=False)
-                os.replace(temp, path)
-            except Exception:
-                try:
-                    os.unlink(temp)
-                except OSError:
-                    pass
-                raise
+            write_tooltip_preview_file(directory, cameras, self._clock().isoformat())
 
     def refresh_existing(self):
         if self.config:
@@ -611,7 +686,8 @@ class Preparation:
                 if tracked['percent'] is not None:
                     self.history[name].append((now, tracked['percent']))
                 with self.lock:
-                    self.state[name]['peak_edge_width_um'] = tracked['best'] * scale if tracked['best'] is not None else None
+                    peak_edge_um = tracked['best'] * scale if metrics['source'] != 'band_gradient_p995' and tracked['best'] is not None else None
+                    self.state[name]['peak_edge_width_um'] = peak_edge_um
                     self.state[name].update(tenengrad=metrics['tenengrad'], peak=tracked['best'], percent=tracked['percent'],
                         band_gradient=metrics.get('band_gradient'), axis_rms_px=metrics.get('axis_rms_px'),
                         edge_width_um=metrics['edge_width_um'], edge_width_px=metrics['edge_width_px'], contrast=metrics['contrast'],
@@ -631,32 +707,27 @@ class Preparation:
                 with self.lock:
                     self.state[name].update(exposure_ms=exposure)
                     published = time.monotonic()
-                    self._preview_cameras[name] = {
-                        'tenengrad': metrics['tenengrad'],
-                        'band_gradient': metrics.get('band_gradient'),
-                        'axis_rms_px': metrics.get('axis_rms_px'),
-                        'peak': tracked['best'],
-                        'percent': tracked['percent'],
-                        'edge_width_um': metrics['edge_width_um'],
-                        'edge_width_px': metrics['edge_width_px'],
-                        'peak_edge_width_um': self.state[name].get('peak_edge_width_um'),
-                        'contrast': metrics['contrast'],
-                        'source': metrics['source'],
-                        'tip_uv': list(tip) if tip is not None else None,
-                        'detection_status': status,
-                        'detection_reason': detection.diagnostic,
-                        'focus_reason': reason,
-                        'delta_uv': delta_uv,
-                        'history': list(self.state[name]['history']),
-                        'fps': fps,
-                        'frame_seq': item.seq,
-                        'captured_mono': item.captured_mono,
-                        'captured_at': item.captured_at,
-                        'frame_age_ms': max(0., (published - item.captured_mono) * 1000),
-                        'processing_ms': max(0., (published - processing_start) * 1000),
-                        'exposure_ms': exposure,
-                        'updated_at': self._clock().isoformat(),
-                    }
+                    self._preview_cameras[name] = build_preview_camera_payload(
+                        metrics=metrics,
+                        tracked=tracked,
+                        status=status,
+                        reason=reason,
+                        detection=detection,
+                        tip=tip,
+                        delta_uv=delta_uv,
+                        history=self.state[name]['history'],
+                        fps=fps,
+                        scale=scale,
+                        detector_cfg=detector_cfg,
+                        ui_config=self.ui_config,
+                        updated_at=self._clock().isoformat(),
+                        exposure_ms=exposure,
+                        frame_seq=item.seq,
+                        captured_mono=item.captured_mono,
+                        captured_at=item.captured_at,
+                        frame_age_ms=max(0., (published - item.captured_mono) * 1000),
+                        processing_ms=max(0., (published - processing_start) * 1000),
+                    )
                 self._write_preview_file(now=now)
                 last_sum = self._last_summary[name]
                 if last_sum is None or now - last_sum >= self.summary_interval:
