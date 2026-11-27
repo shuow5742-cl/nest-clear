@@ -162,62 +162,200 @@ def fit_coarse_fwhm(rows, metric, method, where, dof_ratio=DEPTH_DEFAULTS['dof_r
     return fit, None
 
 
-def plan_fine_scan(cfg, coarse_fwhm, coarse_peak, z_min, z_max, fallback_reason=None):
-    """根据粗扫 FWHM 与 Z 行程约束计算细扫半宽、步距及截断/回退提示。"""
-    configured_mode = cfg['fine_range_mode']
-    fwhm_valid = isinstance(coarse_fwhm, (int, float)) and math.isfinite(coarse_fwhm) and coarse_fwhm > 0
-    fallback = False
-    if configured_mode == 'auto':
-        if fwhm_valid:
-            raw_half = cfg['fine_range_factor'] * float(coarse_fwhm)
-            half_width = min(max(raw_half, cfg['fine_range_min_mm']), cfg['fine_range_max_mm'])
-            raw_step = (2.0 * half_width) / cfg['fine_steps_target']
-            fine_step = min(max(raw_step, cfg['fine_step_min_mm']), cfg['fine_step_max_mm'])
-            actual_mode = 'auto'
-            reason = None
-        else:
-            half_width = float(cfg['fine_range_mm'])
-            fine_step = float(cfg['fine_step_mm'])
-            actual_mode = 'fixed_fallback'
-            fallback = True
-            reason = fallback_reason or '粗扫 FWHM 无效'
+def has_peak_contrast(v_peak, v_low, min_peak_contrast=DEPTH_DEFAULTS['min_peak_contrast']):
+    """判断清晰度动态对比度 v_peak / v_low 是否达到最小要求。"""
+    if not (math.isfinite(v_peak) and math.isfinite(v_low)) or v_peak <= 0:
+        return False
+    if v_low <= 0:
+        return True
+    return (v_peak / v_low) >= float(min_peak_contrast)
+
+
+def _is_blurred_point(value, v_peak, v_low, blur_contrast_ratio, defocus_ratio):
+    """动态范围判据或峰值比值判据任一满足即视为明显模糊。"""
+    if v_peak <= 0 or not math.isfinite(value):
+        return False
+    ratio_ok = (value / v_peak) <= float(defocus_ratio)
+    dyn = v_peak - v_low
+    contrast_ok = (dyn > 0) and (((value - v_low) / dyn) <= float(blur_contrast_ratio))
+    return ratio_ok or contrast_ok
+
+
+def find_side_blur(
+    values,
+    side_indices,
+    v_peak,
+    v_low,
+    *,
+    blur_contrast_ratio=DEPTH_DEFAULTS['blur_contrast_ratio'],
+    defocus_ratio=DEPTH_DEFAULTS['defocus_ratio'],
+    min_peak_contrast=DEPTH_DEFAULTS['min_peak_contrast'],
+):
+    """从峰所在下标起沿单侧外扩，找离开峰后单调下降且连续 2 点明显模糊的下标。"""
+    if len(side_indices) < 3 or not has_peak_contrast(v_peak, v_low, min_peak_contrast):
+        return None
+    tol = 0.02 * max(float(v_peak) - float(v_low), 0.0)
+    prev_blurred = False
+    for offset in range(1, len(side_indices)):
+        idx = side_indices[offset]
+        prev_idx = side_indices[offset - 1]
+        cur_val = float(values[idx])
+        prev_val = float(values[prev_idx])
+        # 离开峰后必须呈单调下降趋势，防止噪声/未离峰时误判。
+        if cur_val > prev_val + tol or cur_val >= v_peak:
+            return None
+        cur_blurred = _is_blurred_point(cur_val, v_peak, v_low, blur_contrast_ratio, defocus_ratio)
+        if offset >= 2 and prev_blurred and cur_blurred:
+            return idx
+        prev_blurred = cur_blurred
+    return None
+
+
+def analyze_coarse_scan(
+    rows,
+    metric,
+    cfg,
+    where,
+    *,
+    upper_blurred_hint=False,
+    upper_limited_by=None,
+    lower_limited_by=None,
+):
+    """分析向下粗扫曲线：校验对比度与内部峰，定位两侧明显模糊 Z 边界。"""
+    ordered = sorted(rows, key=lambda row: row['z_actual'], reverse=True)
+    z = [float(row['z_actual']) for row in ordered]
+    values = [float(row[metric]) for row in ordered]
+    if not values:
+        raise boundary_error(z, 0, where)
+    v_peak = max(values)
+    v_low = min(values)
+    if not has_peak_contrast(v_peak, v_low, cfg['min_peak_contrast']):
+        raise GuardError(
+            'DEPTH-CONTRAST',
+            '清晰度变化太小，景深过大或画面太暗/对比度不足',
+            where,
+            '检查光源、曝光、对焦范围或增大 Z 向扫描行程。',
+        )
+    idx = peak_index(np.array(z), np.array(values), where)
+    blur_ratio = cfg['blur_contrast_ratio']
+    defocus = cfg['defocus_ratio']
+    min_contrast = cfg['min_peak_contrast']
+
+    upper_indices = list(range(idx, -1, -1))
+    upper_blur_idx = find_side_blur(
+        values, upper_indices, v_peak, v_low,
+        blur_contrast_ratio=blur_ratio, defocus_ratio=defocus, min_peak_contrast=min_contrast,
+    )
+    if upper_blur_idx is not None:
+        blur_high_reached = True
+        blur_high_z = z[upper_blur_idx]
+    elif upper_blurred_hint:
+        blur_high_reached = True
+        blur_high_z = z[0]
     else:
+        blur_high_reached = False
+        blur_high_z = z[0]
+
+    lower_indices = list(range(idx, len(values)))
+    lower_blur_idx = find_side_blur(
+        values, lower_indices, v_peak, v_low,
+        blur_contrast_ratio=blur_ratio, defocus_ratio=defocus, min_peak_contrast=min_contrast,
+    )
+    if lower_blur_idx is not None:
+        blur_low_reached = True
+        blur_low_z = z[lower_blur_idx]
+    else:
+        blur_low_reached = False
+        blur_low_z = z[-1]
+
+    limit_notes = []
+    if not blur_high_reached:
+        if upper_limited_by == 'span':
+            limit_notes.append('上侧未达明显模糊（受 coarse_max_span_mm 限制）')
+        else:
+            limit_notes.append('上侧未达明显模糊（受行程上限限制）')
+    if not blur_low_reached:
+        if lower_limited_by == 'span':
+            limit_notes.append('下侧未达明显模糊（受 coarse_max_span_mm 限制）')
+        else:
+            limit_notes.append('下侧未达明显模糊（受 Z 下限限制）')
+
+    return {
+        'peak_idx': idx,
+        'z_peak_coarse': z[idx],
+        'v_peak': float(v_peak),
+        'v_low': float(v_low),
+        'contrast_ratio': float(v_peak / v_low) if v_low > 0 else float('inf'),
+        'blur_low_z': float(blur_low_z),
+        'blur_high_z': float(blur_high_z),
+        'blur_low_reached': blur_low_reached,
+        'blur_high_reached': blur_high_reached,
+        'limit_notes': limit_notes,
+    }
+
+
+def plan_fine_scan(
+    cfg,
+    blur_low_z,
+    blur_high_z,
+    z_min,
+    z_max,
+    *,
+    blur_low_reached=True,
+    blur_high_reached=True,
+    coarse_peak=None,
+    coarse_fwhm=None,
+    limit_notes=None,
+):
+    """在两侧明显模糊点（或受限边界）之间均匀插点规划细测步距与范围。"""
+    configured_mode = cfg['fine_range_mode']
+    if configured_mode == 'fixed':
+        anchor = float(coarse_peak if coarse_peak is not None else 0.5 * (blur_low_z + blur_high_z))
         half_width = float(cfg['fine_range_mm'])
         fine_step = float(cfg['fine_step_mm'])
+        nominal_low = anchor - half_width
+        nominal_high = anchor + half_width
         actual_mode = 'fixed'
-        reason = None
+    else:
+        nominal_low = float(blur_low_z)
+        nominal_high = float(blur_high_z)
+        span = max(0.0, nominal_high - nominal_low)
+        raw_step = span / cfg['fine_steps_target']
+        fine_step = min(max(raw_step, cfg['fine_step_min_mm']), cfg['fine_step_max_mm'])
+        half_width = span / 2.0
+        actual_mode = 'auto'
 
-    nominal_high = coarse_peak + half_width
-    nominal_low = coarse_peak - half_width
     low = max(nominal_low, z_min)
     top = min(nominal_high + cfg['overshoot_mm'], z_max)
     high = min(nominal_high, top - fine_step)
-    truncated_low = nominal_low < z_min - 1e-12
-    truncated_high = high < nominal_high - 1e-12
+    truncated_low = (nominal_low < z_min - 1e-12) or (not blur_low_reached)
+    truncated_high = (high < nominal_high - 1e-12) or (not blur_high_reached)
     truncated = truncated_low or truncated_high
-    lower_half = max(0.0, coarse_peak - low)
-    upper_half = max(0.0, high - coarse_peak)
-    notes = []
-    if truncated_low:
-        notes.append(f'下限受 camera_z_min_mm={z_min:.3f}mm 截断（下半宽 {lower_half:.3f} < {half_width:.3f} mm）')
-    if truncated_high:
-        notes.append(f'上限受 Z 行程 {z_max:.3f}mm 截断（上半宽 {upper_half:.3f} < {half_width:.3f} mm）')
+    notes = list(limit_notes or [])
+    if nominal_low < z_min - 1e-12:
+        notes.append(f'下限受 camera_z_min_mm={z_min:.3f}mm 截断')
+    if high < nominal_high - 1e-12 and blur_high_reached:
+        notes.append(f'上限受 Z 行程 {z_max:.3f}mm 截断')
+    fwhm_valid = isinstance(coarse_fwhm, (int, float)) and math.isfinite(coarse_fwhm) and coarse_fwhm > 0
     return {
         'mode': actual_mode,
         'configured_mode': configured_mode,
-        'fallback': fallback,
-        'fallback_reason': reason,
+        'fallback': False,
+        'fallback_reason': None,
         'coarse_fwhm_mm': float(coarse_fwhm) if fwhm_valid else None,
         'half_width_mm': float(half_width),
-        'effective_half_width_mm': float((high - low) / 2.0),
-        'lower_half_mm': float(lower_half),
-        'upper_half_mm': float(upper_half),
+        'span_mm': float(max(0.0, high - low)),
+        'effective_half_width_mm': float(max(0.0, (high - low) / 2.0)),
         'fine_step_mm': float(fine_step),
+        'blur_low_z': float(blur_low_z),
+        'blur_high_z': float(blur_high_z),
+        'blur_low_reached': bool(blur_low_reached),
+        'blur_high_reached': bool(blur_high_reached),
         'high_mm': float(high),
         'low_mm': float(low),
         'top_mm': float(top),
         'truncated': truncated,
         'truncated_low': truncated_low,
         'truncated_high': truncated_high,
-        'truncation_note': '；'.join(notes) if notes else None,
+        'truncation_note': '；'.join(dict.fromkeys(notes)) if notes else None,
     }

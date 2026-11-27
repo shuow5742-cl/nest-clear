@@ -87,6 +87,7 @@ class DepthCalibration(DeviceSampling):
                     'fine_plan': session.fine_plan,
                     'coarse_fit': session.coarse_fit,
                     'coarse_dof': getattr(session, 'coarse_dof', None),
+                    'coarse_bounds': getattr(session, 'coarse_bounds', None),
                     'current_fits': list(session.fits),
                     'dof_summary': getattr(session, 'dof_summary', None),
                     'arrival_summary': getattr(session, 'arrival_summary', None),
@@ -221,7 +222,7 @@ class DepthCalibration(DeviceSampling):
                     return Status.RUNNING
                 actual, arrival_info = settled
                 entry = session.arrived(actual, arrival_info, task_id=bb.read('task_id'))
-                if session.phase == 'overshoot':
+                if session.phase in ('coarse_overshoot', 'overshoot'):
                     return self.move_reply(session.after_overshoot())
                 if entry['status'] != 'ok':
                     self.publish()

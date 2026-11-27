@@ -11,8 +11,18 @@ from nest_clear.guard import GuardError, format_pose
 from nest_clear.tooloffset.detection import detect
 from nest_clear.tooloffset.session import film_calibration
 from nest_clear.vision.geometry import pixel_to_module
-from .focus import fit_coarse_fwhm, fit_peak, measure_dof, peak_index, plan_fine_scan, scores
+from .focus import (
+    analyze_coarse_scan, find_side_blur, fit_coarse_fwhm, fit_peak, measure_dof, plan_fine_scan, scores,
+)
 from .layout import dof_summary, film_layout, fit_plane, repeatability
+
+
+def ascending(bottom, top, step):
+    """生成从 bottom 向上至 top 的步进 Z 队列（不含起点 bottom）。"""
+    if top <= bottom + 1e-9:
+        return deque()
+    count = math.ceil((top - bottom) / step - 1e-10)
+    return deque([min(top, bottom + index * step) for index in range(1, count + 1)])
 
 
 def descending(top, bottom, step):
@@ -52,6 +62,14 @@ class Session:
         self.roi = None
         self.fits = []
         self.scan_rows = []
+        self.coarse_up_rows = []
+        self.coarse_up_limit = self.z_max
+        self.coarse_down_limit = self.z_min
+        self.coarse_upper_blurred = False
+        self.coarse_upper_limited_by = None
+        self.coarse_lower_limited_by = None
+        self.coarse_bounds = None
+        self._last_up_crop = None
         self.repeat = 0
         self.coarse_fit = None
         self.coarse_dof = None
@@ -61,7 +79,7 @@ class Session:
 
     @property
     def frame_count(self):
-        return self.cfg['frames_per_step'] if self.phase in ('coarse', 'fine') else 3
+        return self.cfg['frames_per_step'] if self.phase in ('coarse_up', 'coarse', 'fine') else 3
 
     @property
     def where(self):
@@ -71,7 +89,9 @@ class Session:
     def message(self):
         return {
             'center': f'居中 第 {self.center_round} 轮',
-            'coarse': '粗扫',
+            'coarse_up': '粗找 · 上行',
+            'coarse_overshoot': '粗扫 · 抬升',
+            'coarse': '粗扫 · 下行',
             'overshoot': f"细扫 第 {self.repeat}/{self.cfg['repeats_per_point']} 次 · 抬升",
             'fine': f"细扫 第 {self.repeat}/{self.cfg['repeats_per_point']} 次",
             'peak': '峰位全幅采图',
@@ -305,12 +325,52 @@ class Session:
                              '减小 roi_mm，或检查居中和像素比例尺。')
         self.roi = np.s_[top:top + size, left:left + size]
         self.record.image(f'{self.label}_center', frame)
-        self.record.roi(frame[self.roi])
+        crop = frame[self.roi]
+        self.record.roi(crop)
         self.camera_xy = (x, y)
+        return self._begin_coarse_up(crop, z)
+
+    def _begin_coarse_up(self, crop, z):
+        self._last_up_crop = crop
+        self.coarse_up_rows = [{'z_actual': z, **scores(crop)}]
+        self.coarse_upper_blurred = False
+        self.coarse_upper_limited_by = None
+        self.coarse_lower_limited_by = None
+        self.coarse_bounds = None
+        max_span = self.cfg.get('coarse_max_span_mm')
+        up_limit = min(self.z_max, z + max_span) if max_span is not None else self.z_max
+        self.coarse_up_limit = up_limit
+        self.steps = ascending(z, up_limit, self.cfg['coarse_step_mm'])
+        if self.steps:
+            self.phase = 'coarse_up'
+            return self.next_step()
+        self.coarse_upper_limited_by = 'span' if (max_span is not None and abs(up_limit - self.z_max) > 1e-6) else 'z_max'
+        return self._begin_coarse_down(z, seed_row=self.coarse_up_rows[-1])
+
+    def _begin_coarse_down(self, z_top, seed_row=None):
+        max_span = self.cfg.get('coarse_max_span_mm')
+        down_limit = max(self.z_min, z_top - max_span) if max_span is not None else self.z_min
+        self.coarse_down_limit = down_limit
+        self.scan_rows = []
+        self.steps = descending(z_top, down_limit, self.cfg['coarse_step_mm'])
+        top_over = min(z_top + self.cfg['overshoot_mm'], self.z_max)
+        if top_over > z_top + max(0.02, self.cfg['position_tolerance_mm']):
+            self.phase = 'coarse_overshoot'
+            return self.move((*self.camera_xy, top_over))
+        if seed_row is not None:
+            row = {
+                'label': self.label, 'pass': 'coarse', 'direction': 'down',
+                'z_cmd': float(seed_row['z_actual']), 'z_actual': float(seed_row['z_actual']),
+                **{key: float(seed_row[key]) for key in METRICS},
+            }
+            self.scan_rows.append(row)
+            self.samples.append(row)
+            self.last_sample = row
+            self.record.sample(row, self._last_up_crop, len(self.samples))
+            if self.steps and abs(self.steps[0] - float(seed_row['z_actual'])) < 1e-6:
+                self.steps.popleft()
         self.phase = 'coarse'
-        radius = self.cfg['coarse_range_mm']
-        self.steps = descending(min(z + radius, self.z_max), max(z - radius, self.z_min),
-                                self.cfg['coarse_step_mm'])
+        self.overshoot_z = None
         return self.next_step()
 
     def identify(self, target):
@@ -347,15 +407,43 @@ class Session:
         return self.move((*self.camera_xy, top))
 
     def after_overshoot(self):
-        self.phase = 'fine'
+        self.phase = 'coarse' if self.phase == 'coarse_overshoot' else 'fine'
         self.overshoot_z = self.actual[2]
         return self.next_step()
 
     def scan(self, frames):
         z = self.actual[2]
+        if self.phase == 'coarse_up':
+            crops = [frame[self.roi] for frame in frames]
+            metrics = [scores(crop) for crop in crops]
+            primary = self.cfg['metric']
+            midpoint = sorted(range(len(crops)), key=lambda i: metrics[i][primary])[len(crops) // 2]
+            row = {'z_actual': z, **{key: statistics.median(item[key] for item in metrics) for key in METRICS}}
+            self._last_up_crop = crops[midpoint]
+            self.coarse_up_rows.append(row)
+            self.record.roi(crops[midpoint])
+            values = [item[primary] for item in self.coarse_up_rows]
+            peak_idx = values.index(max(values))
+            upper_blur = find_side_blur(
+                values, list(range(peak_idx, len(values))), max(values), min(values),
+                blur_contrast_ratio=self.cfg['blur_contrast_ratio'],
+                defocus_ratio=self.cfg['defocus_ratio'],
+                min_peak_contrast=self.cfg['min_peak_contrast'],
+            )
+            if upper_blur is not None or not self.steps:
+                self.coarse_upper_blurred = upper_blur is not None
+                if not self.coarse_upper_blurred:
+                    max_span = self.cfg.get('coarse_max_span_mm')
+                    self.coarse_upper_limited_by = (
+                        'span' if (max_span is not None and abs(self.coarse_up_limit - self.z_max) > 1e-6) else 'z_max'
+                    )
+                return self._begin_coarse_down(z, seed_row=row)
+            return self.next_step()
         previous_z = self.scan_rows[-1]['z_actual'] if self.scan_rows else None
         if previous_z is None and self.phase == 'fine':
             previous_z = self.overshoot_z
+        elif previous_z is None and self.phase == 'coarse':
+            previous_z = getattr(self, 'overshoot_z', None)
         if previous_z is not None and z >= previous_z:
             raise GuardError('DEPTH-DIRECTION', '实测 Z 没有继续下降', self.where,
                              '核对 PLC 到位精度和细扫步长。')
@@ -371,16 +459,30 @@ class Session:
         self.last_sample = row
         self.record.sample(row, crops[midpoint], len(self.samples))
         values = [item[primary] for item in self.scan_rows]
-        index = values.index(max(values))
         if self.phase == 'coarse':
-            threshold = self.cfg['defocus_ratio'] * values[index]
-            defocused = len(values) - index >= 3 and max(values[-2:]) < threshold
-            if self.steps and not defocused:
+            peak_idx = values.index(max(values))
+            lower_blur = find_side_blur(
+                values, list(range(peak_idx, len(values))), max(values), min(values),
+                blur_contrast_ratio=self.cfg['blur_contrast_ratio'],
+                defocus_ratio=self.cfg['defocus_ratio'],
+                min_peak_contrast=self.cfg['min_peak_contrast'],
+            )
+            if self.steps and lower_blur is None:
                 return self.next_step()
-            z_values = [item['z_actual'] for item in self.scan_rows]
-            peak_index(z_values, values, self.where)
+            if lower_blur is None:
+                max_span = self.cfg.get('coarse_max_span_mm')
+                self.coarse_lower_limited_by = (
+                    'span' if (max_span is not None and abs(self.coarse_down_limit - self.z_min) > 1e-6) else 'z_min'
+                )
+            analysis = analyze_coarse_scan(
+                self.scan_rows, primary, self.cfg, self.where,
+                upper_blurred_hint=self.coarse_upper_blurred,
+                upper_limited_by=self.coarse_upper_limited_by,
+                lower_limited_by=self.coarse_lower_limited_by,
+            )
+            self.coarse_bounds = analysis
             dof_ratio = self.cfg['dof_ratio']
-            coarse_fit, coarse_error = fit_coarse_fwhm(
+            coarse_fit, _ = fit_coarse_fwhm(
                 self.scan_rows, primary, self.cfg['peak_method'], self.where, dof_ratio=dof_ratio,
             )
             self.coarse_fit = coarse_fit
@@ -395,9 +497,16 @@ class Session:
                 z_arr = np.array([item['z_actual'] for item in ordered])
                 v_arr = np.array([item[primary] for item in ordered])
                 self.coarse_dof = {**measure_dof(z_arr, v_arr, int(np.argmax(v_arr)), dof_ratio), 'dof_gauss_mm': None}
-            self.coarse_peak = coarse_fit['z_peak'] if coarse_fit else z_values[index]
+            self.coarse_peak = coarse_fit['z_peak'] if coarse_fit else analysis['z_peak_coarse']
             coarse_fwhm = coarse_fit['fwhm'] if coarse_fit else None
-            self.fine_plan = plan_fine_scan(self.cfg, coarse_fwhm, self.coarse_peak, self.z_min, self.z_max, coarse_error)
+            self.fine_plan = plan_fine_scan(
+                self.cfg, analysis['blur_low_z'], analysis['blur_high_z'], self.z_min, self.z_max,
+                blur_low_reached=analysis['blur_low_reached'],
+                blur_high_reached=analysis['blur_high_reached'],
+                coarse_peak=self.coarse_peak,
+                coarse_fwhm=coarse_fwhm,
+                limit_notes=analysis['limit_notes'],
+            )
             return self.begin_fine()
         if self.steps:
             return self.next_step()
@@ -419,7 +528,8 @@ class Session:
         uncovered_dofs = [item['repeat'] for item in self.fits if not item.get('dof_covered')]
         self.result = {
             'label': self.label, 'xy': [float(v) for v in self.point_xy], 'fits': self.fits,
-            'coarse_fit': self.coarse_fit, 'coarse_dof': self.coarse_dof, 'fine_plan': self.fine_plan,
+            'coarse_fit': self.coarse_fit, 'coarse_dof': self.coarse_dof,
+            'coarse_bounds': self.coarse_bounds, 'fine_plan': self.fine_plan,
             'insufficient_repeats': insufficient,
             'z_peak': statistics.mean(peaks), 'range': max(peaks) - min(peaks),
             'std': statistics.stdev(peaks) if len(peaks) > 1 else None,

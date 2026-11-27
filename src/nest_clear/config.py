@@ -214,21 +214,40 @@ def _depth_config(value, global_travel):
         ("fine_range_mode", ("auto", "fixed")),
         ("metric", METRICS),
         ("peak_method", ("gauss", "half_height")),
+        ("exposure_mode", ("auto", "manual")),
     ):
         if settings[key] not in options:
             _fail(f"{path}.{key}", f"请选择 {options}")
+    if settings["coarse_max_span_mm"] is not None:
+        settings["coarse_max_span_mm"] = _number(settings["coarse_max_span_mm"], f"{path}.coarse_max_span_mm", True)
+    if settings["manual_exposure_us"] is not None:
+        settings["manual_exposure_us"] = _number(settings["manual_exposure_us"], f"{path}.manual_exposure_us", True)
+    if settings["exposure_min_us"] >= settings["exposure_max_us"]:
+        _fail(f"{path}.exposure_min_us", "必须小于 exposure_max_us")
+    if settings["manual_exposure_us"] is not None and not (
+        settings["exposure_min_us"] <= settings["manual_exposure_us"] <= settings["exposure_max_us"]
+    ):
+        _fail(f"{path}.manual_exposure_us", "须在 [exposure_min_us, exposure_max_us] 范围内")
+    if not 0 < settings["exposure_target_p99"] < 250:
+        _fail(f"{path}.exposure_target_p99", "须在 0 和 250 之间")
     if settings["fine_range_min_mm"] > settings["fine_range_max_mm"]:
         _fail(f"{path}.fine_range_min_mm", "不能大于 fine_range_max_mm")
     if settings["fine_step_min_mm"] > settings["fine_step_max_mm"]:
         _fail(f"{path}.fine_step_min_mm", "不能大于 fine_step_max_mm")
     if not 0 < settings["defocus_ratio"] < 1:
         _fail(f"{path}.defocus_ratio", "须在 0 和 1 之间")
+    if not 0 < settings["blur_contrast_ratio"] < 1:
+        _fail(f"{path}.blur_contrast_ratio", "须在 0 和 1 之间")
+    if settings["min_peak_contrast"] <= 1.0:
+        _fail(f"{path}.min_peak_contrast", "须大于 1.0")
     if not 0 < settings["dof_ratio"] < 1:
         _fail(f"{path}.dof_ratio", "须在 0 和 1 之间")
     if settings["settle_samples"] < 2:
         _fail(f"{path}.settle_samples", "须至少为 2")
     if not 5 <= settings["max_points"] <= 9:
         _fail(f"{path}.max_points", "须为 5 至 9")
+    if not 3 <= settings["min_valid_points"] <= settings["max_points"]:
+        _fail(f"{path}.min_valid_points", "须为 3 至 max_points")
     for key, count in (("point_order", 5), ("extra_points", 4)):
         labels = settings[key]
         if labels is None:

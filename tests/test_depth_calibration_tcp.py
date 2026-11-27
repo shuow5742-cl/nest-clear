@@ -84,8 +84,8 @@ class ScriptedPlcWorker(PlcWorker):
 def tcp_rig(tmp_path):
     camera = FilmCamera()
     cfg = load_config('config/nest_clear.yaml')
-    settings = {**cfg.depth_calibration, 'camera_z_min_mm': -7.0, 'coarse_range_mm': 1.6,
-                'coarse_step_mm': .20, 'fine_steps_target': 24, 'overshoot_mm': .15,
+    settings = {**cfg.depth_calibration, 'camera_z_min_mm': -7.0,
+                'coarse_step_mm': .50, 'overshoot_mm': .15,
                 'settle_window_s': .0001, 'arrival_timeout_s': .05, 'frames_per_step': 1,
                 'travel': ((80, 220), (0, 230), (-15, 0))}  # 仿真场景需要更宽的下针深度标定行程
     cfg = replace(cfg, depth_calibration=settings, travel=((80, 220), (0, 230), (-15, 0)),
@@ -316,7 +316,7 @@ def test_160_multisite(tcp_rig, anomaly):
     rig.camera.anomaly = anomaly
     coordinates = None
     session = None
-    for _ in range(1200):
+    for _ in range(1800):
         code, coordinates = rig.exchange(coordinates)
         if code == 161:
             break
@@ -416,11 +416,11 @@ def test_160_error(tcp_rig, case, reason):
             rig.camera.exposure_us = 8000.
             kwargs = {'xyz': target}
     elif case == 'boundary':
-        rig.cfg.depth_calibration['coarse_range_mm'] = .025
-        rig.cfg.depth_calibration['coarse_step_mm'] = .01
+        rig.cfg.depth_calibration['camera_z_min_mm'] = -4.5
+        rig.camera.actual = (*rig.camera.actual[:2], -4.2)
     elif isinstance(case, int):
         kwargs = {'func': case}
-    for _ in range(15):
+    for _ in range(30):
         code, target = rig.exchange(**kwargs)
         if code == 999:
             break

@@ -518,10 +518,12 @@ def depthcal_stage_info(data):
     if phase == 'plane':
         suffix = f' · 到位异常 {anom} 次' if has_summary else ''
         return f'阶段：平面判定{suffix}', '#e0f2fe', '#0369a1'
-    if phase in ('center', 'coarse', 'overshoot', 'fine', 'peak'):
+    if phase in ('center', 'coarse_up', 'coarse_overshoot', 'coarse', 'overshoot', 'fine', 'peak'):
         detail = message or {
             'center': '居中',
-            'coarse': '粗扫',
+            'coarse_up': '粗找 · 上行',
+            'coarse_overshoot': '粗扫 · 抬升',
+            'coarse': '粗扫 · 下行',
             'overshoot': '细扫 · 抬升',
             'fine': '细扫',
             'peak': '峰位采图',
@@ -609,15 +611,21 @@ def depthcal_fine_plan_text(data):
         step = plan.get('fine_step_mm')
         mode = plan.get('mode') or 'auto'
         coarse_fwhm = plan.get('coarse_fwhm_mm')
-        half_txt = f'±{float(half):.3f} mm' if isinstance(half, (int, float)) else '—'
         step_txt = f'{float(step):.3f} mm' if isinstance(step, (int, float)) else '—'
-        if mode == 'auto' and isinstance(coarse_fwhm, (int, float)):
-            tag = f'auto, 粗扫 FWHM {float(coarse_fwhm):.3f} mm'
-        elif mode == 'fixed_fallback':
-            tag = '回退 fixed'
+        if isinstance(plan.get('blur_low_z'), (int, float)) and isinstance(plan.get('blur_high_z'), (int, float)):
+            lo_z = float(plan['blur_low_z'])
+            hi_z = float(plan['blur_high_z'])
+            fwhm_tag = f', 粗扫 FWHM {float(coarse_fwhm):.3f} mm' if isinstance(coarse_fwhm, (int, float)) else ''
+            summary = f'细扫：[{lo_z:.2f}, {hi_z:.2f}] mm / 步距 {step_txt}（{mode}{fwhm_tag}）'
         else:
-            tag = str(mode)
-        summary = f'细扫：{half_txt} / 步距 {step_txt}（{tag}）'
+            half_txt = f'±{float(half):.3f} mm' if isinstance(half, (int, float)) else '—'
+            if mode == 'auto' and isinstance(coarse_fwhm, (int, float)):
+                tag = f'auto, 粗扫 FWHM {float(coarse_fwhm):.3f} mm'
+            elif mode == 'fixed_fallback':
+                tag = '回退 fixed'
+            else:
+                tag = str(mode)
+            summary = f'细扫：{half_txt} / 步距 {step_txt}（{tag}）'
     else:
         summary = '细扫：等待粗扫完成后确定'
 

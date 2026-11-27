@@ -32,7 +32,11 @@ def test_default_config_z_min_is_minus_12():
     assert cfg.depth_calibration['fine_range_max_mm'] == 3.0
     assert cfg.depth_calibration['fine_steps_target'] == 40
     assert cfg.depth_calibration['fine_step_min_mm'] == 0.02
-    assert cfg.depth_calibration['fine_step_max_mm'] == 0.1
+    assert cfg.depth_calibration['fine_step_max_mm'] == 0.25
+    assert cfg.depth_calibration['coarse_step_mm'] == 0.5
+    assert cfg.depth_calibration['blur_contrast_ratio'] == 0.3
+    assert cfg.depth_calibration['min_peak_contrast'] == 1.15
+    assert cfg.depth_calibration['coarse_max_span_mm'] is None
     assert cfg.depth_calibration['dof_ratio'] == 0.8
     assert cfg.depth_calibration['arrival_timeout_s'] == 2.0
 

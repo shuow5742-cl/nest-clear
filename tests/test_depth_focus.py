@@ -8,9 +8,11 @@ import pytest
 
 from nest_clear.config import load_config
 from nest_clear.depth_config import DEFAULTS as DEPTH_DEFAULTS
-from nest_clear.depthcal.focus import fit_coarse_fwhm, fit_peak, measure_dof, plan_fine_scan, scores
+from nest_clear.depthcal.focus import (
+    analyze_coarse_scan, fit_coarse_fwhm, fit_peak, measure_dof, plan_fine_scan, scores,
+)
 from nest_clear.depthcal.layout import dof_summary, fit_plane, repeatability
-from nest_clear.depthcal.session import descending
+from nest_clear.depthcal.session import ascending, descending
 from nest_clear.guard import GuardError
 
 
@@ -87,31 +89,37 @@ def _sim_rows(image, zs, focus, blur_fn, noise=0.0, rng=None):
     return rows
 
 
-@pytest.mark.parametrize(('label', 'k', 'exp_half_rng', 'exp_step_rng'), [
-    ('fwhm_0.5mm', 3.6, (0.30, 0.48), (0.02, 0.025)),
-    ('fwhm_2.0mm', 0.9, (1.35, 1.65), (0.065, 0.085)),
-    ('fwhm_4.0mm', 0.44, (2.75, 3.00), (0.095, 0.10)),
+@pytest.mark.parametrize(('label', 'k', 'exp_step_rng'), [
+    ('fwhm_1.0mm', 1.8, (0.03, 0.15)),
+    ('fwhm_2.0mm', 0.9, (0.05, 0.20)),
+    ('fwhm_4.0mm', 0.44, (0.10, 0.25)),
 ])
-@pytest.mark.parametrize(('noise', 'tol'), [(0.0, 0.002), (2.0, 0.01)])
-def test_auto_fine_range_and_accuracy_across_fwhm(label, k, exp_half_rng, exp_step_rng, noise, tol):
+@pytest.mark.parametrize(('noise', 'tol'), [(0.0, 0.01), (2.0, 0.015)])
+def test_auto_fine_range_and_accuracy_across_fwhm(label, k, exp_step_rng, noise, tol):
     image = film_ring()
     focus = -5.137
     cfg = dict(DEPTH_DEFAULTS)
     rng = np.random.default_rng(88)
     blur_fn = lambda dz: math.hypot(0.4, k * dz)
 
-    coarse = _sim_rows(image, descending(-2.0, -8.0, cfg['coarse_step_mm']), focus, blur_fn, noise, rng)
-    coarse_fit, err_msg = fit_coarse_fwhm(coarse, 'tenengrad', 'gauss', '粗扫')
-    assert coarse_fit is not None and err_msg is None
-    plan = plan_fine_scan(cfg, coarse_fit['fwhm'], coarse_fit['z_peak'], -12.0, 0.0)
+    coarse = _sim_rows(image, descending(-0.5, -10.5, cfg['coarse_step_mm']), focus, blur_fn, noise, rng)
+    analysis = analyze_coarse_scan(coarse, 'tenengrad', cfg, '粗扫')
+    assert analysis['blur_low_reached'] and analysis['blur_high_reached']
+    assert analysis['blur_low_z'] < focus < analysis['blur_high_z']
+    plan = plan_fine_scan(
+        cfg, analysis['blur_low_z'], analysis['blur_high_z'], -12.0, 0.0,
+        blur_low_reached=analysis['blur_low_reached'],
+        blur_high_reached=analysis['blur_high_reached'],
+        coarse_peak=analysis['z_peak_coarse'],
+        limit_notes=analysis['limit_notes'],
+    )
     assert plan['mode'] == 'auto' and not plan['fallback'] and not plan['truncated']
-    assert exp_half_rng[0] <= plan['half_width_mm'] <= exp_half_rng[1]
     assert exp_step_rng[0] <= plan['fine_step_mm'] <= exp_step_rng[1]
 
     fine = _sim_rows(image, descending(plan['high_mm'], plan['low_mm'], plan['fine_step_mm']), focus, blur_fn, noise, rng)
     fit = fit_peak(fine, 'tenengrad', 'gauss', '细扫')
     error = abs(fit['z_peak'] - focus)
-    print(f'{label} noise={noise}: half={plan["half_width_mm"]:.4f} step={plan["fine_step_mm"]:.4f}'
+    print(f'{label} noise={noise}: span=[{plan["blur_low_z"]:.2f},{plan["blur_high_z"]:.2f}] step={plan["fine_step_mm"]:.4f}'
           f' fwhm={fit["fwhm"]:.4f} err={error:.6f} L={fit["left_points"]} R={fit["right_points"]} min_r={fit["min_ratio"]:.3f}')
     assert error <= tol
     assert fit['quality_ok'] and not fit['insufficient_points']
@@ -131,12 +139,19 @@ def test_synthetic_gaussian_dof_matches_analytical_within_two_steps(fwhm_mm):
 
     coarse_rows = [
         {'z_actual': z, 'tenengrad': math.exp(-0.5 * ((z - focus) / sigma) ** 2)}
-        for z in descending(-1.0, -9.0, cfg['coarse_step_mm'])
+        for z in descending(-0.5, -10.5, cfg['coarse_step_mm'])
     ]
+    analysis = analyze_coarse_scan(coarse_rows, 'tenengrad', cfg, '粗扫')
     coarse_fit, err_msg = fit_coarse_fwhm(coarse_rows, 'tenengrad', 'gauss', '粗扫', dof_ratio=ratio)
     assert coarse_fit is not None and err_msg is None and coarse_fit['dof_covered']
 
-    plan = plan_fine_scan(cfg, coarse_fit['fwhm'], coarse_fit['z_peak'], -12.0, 0.0)
+    plan = plan_fine_scan(
+        cfg, analysis['blur_low_z'], analysis['blur_high_z'], -12.0, 0.0,
+        blur_low_reached=analysis['blur_low_reached'],
+        blur_high_reached=analysis['blur_high_reached'],
+        coarse_peak=coarse_fit['z_peak'],
+        coarse_fwhm=coarse_fit['fwhm'],
+    )
     step = plan['fine_step_mm']
     fine_rows = [
         {'z_actual': z, 'tenengrad': math.exp(-0.5 * ((z - focus) / sigma) ** 2)}
@@ -218,7 +233,7 @@ def test_2mm_fixed_triggers_insufficient_points_while_auto_passes():
 
     # fixed ±0.6 mm: 仅覆盖峰顶平坦段，最低参与点 > 0.6 × 峰值，触发“拟合点不足”
     fixed_cfg = {**DEPTH_DEFAULTS, 'fine_range_mode': 'fixed'}
-    fixed_plan = plan_fine_scan(fixed_cfg, 2.0, focus, -12.0, 0.0)
+    fixed_plan = plan_fine_scan(fixed_cfg, -7.0, -3.0, -12.0, 0.0, coarse_peak=focus)
     assert fixed_plan['mode'] == 'fixed' and fixed_plan['half_width_mm'] == pytest.approx(0.6)
     fixed_rows = _sim_rows(image, descending(fixed_plan['high_mm'], fixed_plan['low_mm'], fixed_plan['fine_step_mm']), focus, blur_fn)
     fixed_fit = fit_peak(fixed_rows, 'tenengrad', 'gauss', '细扫')
@@ -229,11 +244,15 @@ def test_2mm_fixed_triggers_insufficient_points_while_auto_passes():
                                  'z_peak': fixed_fit['z_peak'], 'range': 0.001, 'std': 0.0005}], 0.02)
     assert feas_fixed['insufficient_fits'] == 1 and not feas_fixed['met']
 
-    # auto: 自适应放大范围到 ~1.5mm，覆盖下降段，不触发“拟合点不足”
+    # auto: 在两侧明显模糊点之间均匀插点，覆盖下降段，不触发“拟合点不足”
     auto_cfg = dict(DEPTH_DEFAULTS)
-    coarse = _sim_rows(image, descending(-2.0, -8.0, auto_cfg['coarse_step_mm']), focus, blur_fn)
-    coarse_fit, _ = fit_coarse_fwhm(coarse, 'tenengrad', 'gauss', '粗扫')
-    auto_plan = plan_fine_scan(auto_cfg, coarse_fit['fwhm'], coarse_fit['z_peak'], -12.0, 0.0)
+    coarse = _sim_rows(image, descending(-0.5, -10.5, auto_cfg['coarse_step_mm']), focus, blur_fn)
+    analysis = analyze_coarse_scan(coarse, 'tenengrad', auto_cfg, '粗扫')
+    auto_plan = plan_fine_scan(
+        auto_cfg, analysis['blur_low_z'], analysis['blur_high_z'], -12.0, 0.0,
+        blur_low_reached=analysis['blur_low_reached'], blur_high_reached=analysis['blur_high_reached'],
+        coarse_peak=analysis['z_peak_coarse'],
+    )
     auto_rows = _sim_rows(image, descending(auto_plan['high_mm'], auto_plan['low_mm'], auto_plan['fine_step_mm']), focus, blur_fn)
     auto_fit = fit_peak(auto_rows, 'tenengrad', 'gauss', '细扫')
     assert auto_fit['quality_ok'] and not auto_fit['insufficient_points']
@@ -243,29 +262,72 @@ def test_2mm_fixed_triggers_insufficient_points_while_auto_passes():
     assert feas_auto['insufficient_fits'] == 0 and feas_auto['met']
 
 
-def test_coarse_fallback_and_z_truncation_and_config():
+def test_coarse_blur_search_and_limits_and_config():
     cfg = dict(DEPTH_DEFAULTS)
-    # 粗扫拟合失败 / FWHM 无效 -> 回退 fixed
-    bad_coarse = [{'z_actual': -5.0 - 0.2 * i, 'tenengrad': v} for i, v in enumerate((0.95, 0.90, 1.00, 0.92, 0.96))]
-    cfit, err_msg = fit_coarse_fwhm(bad_coarse, 'tenengrad', 'gauss', '粗扫')
-    assert cfit is None and err_msg is not None
-    fb_plan = plan_fine_scan(cfg, None, -5.4, -12.0, 0.0, err_msg)
-    assert fb_plan['mode'] == 'fixed_fallback' and fb_plan['fallback']
-    assert fb_plan['half_width_mm'] == pytest.approx(cfg['fine_range_mm'])
-    assert fb_plan['fine_step_mm'] == pytest.approx(cfg['fine_step_mm'])
+    assert cfg['coarse_step_mm'] == 0.5
+    assert cfg['blur_contrast_ratio'] == 0.3
+    assert cfg['min_peak_contrast'] == 1.15
+    assert cfg['coarse_max_span_mm'] is None
+    assert cfg['fine_step_max_mm'] == 0.25
 
-    # 下限与上限 Z 约束截断提示
-    trunc_low = plan_fine_scan(cfg, 3.0, -11.2, -12.0, 0.0)
+    # 1) 合成高斯峰 + 大底值 + 噪声，覆盖 FWHM = 1 / 3 / 6 mm；峰在中间 / 靠上边界 / 靠下边界
+    rng = np.random.default_rng(91)
+    for fwhm_mm in (1.0, 3.0, 6.0):
+        sigma = fwhm_mm / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+        for peak_z in (-6.0, -1.2, -10.8):
+            zs = list(descending(0.0, -12.0, cfg['coarse_step_mm']))
+            rows = [
+                {
+                    'z_actual': z,
+                    'tenengrad': 0.16 + 0.40 * math.exp(-0.5 * ((z - peak_z) / sigma) ** 2) + rng.normal(0, 0.002),
+                }
+                for z in zs
+            ]
+            analysis = analyze_coarse_scan(rows, 'tenengrad', cfg, '粗扫')
+            plan = plan_fine_scan(
+                cfg, analysis['blur_low_z'], analysis['blur_high_z'], -12.0, 0.0,
+                blur_low_reached=analysis['blur_low_reached'],
+                blur_high_reached=analysis['blur_high_reached'],
+                coarse_peak=analysis['z_peak_coarse'],
+                limit_notes=analysis['limit_notes'],
+            )
+            assert not plan['fallback']
+            assert cfg['fine_step_min_mm'] <= plan['fine_step_mm'] <= cfg['fine_step_max_mm']
+            assert plan['low_mm'] < peak_z < plan['high_mm']
+            if peak_z == -6.0 and fwhm_mm <= 3.0:
+                assert analysis['blur_low_reached'] and analysis['blur_high_reached']
+            if peak_z == -1.2 and fwhm_mm == 6.0:
+                assert not analysis['blur_high_reached']
+                assert any('上侧未达明显模糊' in n for n in analysis['limit_notes'])
+            if peak_z == -10.8 and fwhm_mm == 6.0:
+                assert not analysis['blur_low_reached']
+                assert any('下侧未达明显模糊' in n for n in analysis['limit_notes'])
+
+    # 2) 对比度不足（类似 11-26 现场 0.1545 -> 0.1631） -> DEPTH-CONTRAST
+    flat_rows = [{'z_actual': -3.0 - 0.5 * i, 'tenengrad': 0.1545 + 0.0008 * i} for i in range(13)]
+    with pytest.raises(GuardError) as exc_info:
+        analyze_coarse_scan(flat_rows, 'tenengrad', cfg, '粗扫')
+    assert exc_info.value.code == 'DEPTH-CONTRAST'
+    assert '清晰度变化太小' in exc_info.value.what
+
+    # 3) 峰在边界（对比度足够但峰在最高点） -> DEPTH-PEAK-BOUNDARY
+    edge_rows = [{'z_actual': -0.5 * i, 'tenengrad': 0.15 + 0.30 * math.exp(-0.5 * (i / 2.0) ** 2)} for i in range(8)]
+    with pytest.raises(GuardError) as exc_info:
+        analyze_coarse_scan(edge_rows, 'tenengrad', cfg, '粗扫')
+    assert exc_info.value.code == 'DEPTH-PEAK-BOUNDARY'
+
+    # 4) 下限与上限 Z 约束截断提示
+    trunc_low = plan_fine_scan(cfg, -13.0, -9.0, -12.0, 0.0, blur_low_reached=False, limit_notes=['下侧未达明显模糊（受 Z 下限限制）'])
     assert trunc_low['truncated'] and trunc_low['truncated_low']
     assert trunc_low['low_mm'] == pytest.approx(-12.0)
-    assert 'camera_z_min_mm' in trunc_low['truncation_note']
-
-    trunc_high = plan_fine_scan(cfg, 3.0, -1.0, -12.0, 0.0)
-    assert trunc_high['truncated'] and trunc_high['truncated_high']
-    assert trunc_high['top_mm'] == pytest.approx(0.0)
-    assert 'Z 行程' in trunc_high['truncation_note']
+    assert '下侧未达明显模糊' in trunc_low['truncation_note']
 
     loaded = load_config('config/nest_clear.yaml')
+    assert loaded.depth_calibration['coarse_step_mm'] == 0.5
+    assert loaded.depth_calibration['blur_contrast_ratio'] == 0.3
+    assert loaded.depth_calibration['min_peak_contrast'] == 1.15
+    assert loaded.depth_calibration['coarse_max_span_mm'] is None
+    assert loaded.depth_calibration['fine_step_max_mm'] == 0.25
     assert loaded.depth_calibration['fine_range_mode'] == 'auto'
     assert loaded.depth_calibration['fine_steps_target'] == 40
     assert loaded.depth_calibration['dof_ratio'] == 0.8

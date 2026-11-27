@@ -1863,7 +1863,7 @@ class App:
         fine_text, fine_notice = depthcal_fine_plan_text(data)
         self.depth_fine_info.config(text=fine_text)
 
-        active = phase in ('center', 'coarse', 'overshoot', 'fine', 'peak', 'plane') and not self.depth_pending and not data.get('abort_requested')
+        active = phase in ('center', 'coarse_up', 'coarse_overshoot', 'coarse', 'overshoot', 'fine', 'peak', 'plane') and not self.depth_pending and not data.get('abort_requested')
         self.depth_abort.config(state='normal' if active else 'disabled')
 
         default_msg = {
@@ -1992,13 +1992,13 @@ class App:
 
         # 顶部图例
         legend_items = [('粗扫(灰)', '#98a2b3', ()), ('细扫1', '#2563eb', ()), ('细扫2', '#168448', ()),
-                        ('细扫3', '#d97706', ()), ('峰位(竖线)', '#b42318', (4, 2)),
-                        (f'DOF({dof_ratio:.0%})', '#0284c7', (3, 2))]
+                        ('细扫3', '#d97706', ()), ('明显模糊', '#9333ea', ()),
+                        ('峰位(竖线)', '#b42318', (4, 2)), (f'DOF({dof_ratio:.0%})', '#0284c7', (3, 2))]
         lx = 12
         for text, color, dash in legend_items:
-            c.create_line(lx, 12, lx + 16, 12, fill=color, width=2, dash=dash)
-            c.create_text(lx + 20, 12, text=text, anchor='w', fill=INK, font=(self.theme.body[0], 9))
-            lx += 88 if '粗扫' in text else 96 if '竖线' in text else 92 if 'DOF' in text else 66
+            c.create_line(lx, 12, lx + 14, 12, fill=color, width=2, dash=dash)
+            c.create_text(lx + 18, 12, text=text, anchor='w', fill=INK, font=(self.theme.body[0], 9))
+            lx += 78 if '粗扫' in text else 84 if '模糊' in text else 88 if '竖线' in text else 86 if 'DOF' in text else 60
 
         if not plan:
             c.create_text(w / 2, h / 2, text='暂无清晰度扫描曲线，等待 PLC 160 发起测试',
@@ -2106,6 +2106,25 @@ class App:
                         c.create_line(sx_c, max(py0, sy_thr - 8), sx_c, py1, fill='#0284c7', width=1.5, dash=(2, 2))
                         c.create_oval(sx_c - 2.5, sy_thr - 2.5, sx_c + 2.5, sy_thr + 2.5,
                                       fill='#0284c7', outline='#0284c7')
+
+            bounds = (res.get('coarse_bounds') if res else None) or (
+                data.get('coarse_bounds') if label == current_label else None
+            ) or (res.get('fine_plan') if res else None) or (
+                data.get('fine_plan') if label == current_label else None
+            )
+            if isinstance(bounds, dict):
+                coarse_pts = series.get('coarse') or []
+                for z_key, flag_key in (('blur_low_z', 'blur_low_reached'), ('blur_high_z', 'blur_high_reached')):
+                    bz = bounds.get(z_key)
+                    if bounds.get(flag_key) and isinstance(bz, (int, float)) and z_lo <= bz <= z_hi:
+                        if coarse_pts:
+                            nearest = min(coarse_pts, key=lambda pt: abs(pt[0] - bz))
+                            sx_b, sy_b = to_px(nearest[0], nearest[1])
+                            c.create_polygon(sx_b, sy_b - 4.5, sx_b + 4.5, sy_b, sx_b, sy_b + 4.5, sx_b - 4.5, sy_b,
+                                             fill='#9333ea', outline='#ffffff', width=1)
+                        else:
+                            sx_b, _ = to_px(bz, y_lo)
+                            c.create_line(sx_b, py0, sx_b, py1, fill='#9333ea', dash=(2, 2), width=1)
 
             if res:
                 for idx, fit in enumerate(res.get('fits') or [], 1):
