@@ -1,6 +1,8 @@
 """160 多点会话，通过本机 Modbus TCP 寄存器驱动物理模型。"""
 
+import csv
 from dataclasses import replace
+import json
 from types import SimpleNamespace
 import time
 
@@ -17,7 +19,9 @@ from nest_clear.depthcal.layout import film_layout
 from nest_clear.flow.batch import build_batch
 from nest_clear.flow.context import RequestTracker
 from nest_clear.flow.modes import Mode
+from nest_clear.paths import live_image_file
 from nest_clear.record.events import EventRecorder
+from nest_clear.tooloffset.commands import send
 from nest_clear.vision.geometry import Calibration
 from nest_clear.workers.plc import PlcWorker
 from sim.fake_plc import FakePLC
@@ -33,6 +37,8 @@ class FilmCamera(AsyncRequestWorker):
         self.actual = (*tuple(self.origin + self.layout[self.primary[0]] + [1., -1.]), -5.)
         self.blank = False
         self.anomaly = False
+        self.offcenter = False
+        self.exposure_us = 6000.
         self.cached = None
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.markers = {label: cv2.rotate(cv2.aruco.generateImageMarker(dictionary, int(label[1:]), 80),
@@ -44,12 +50,12 @@ class FilmCamera(AsyncRequestWorker):
     def execute(self, payload):
         if self.blank:
             return np.full((420, 420), 220, np.uint8), {}
-        if self.cached and self.cached[0] == self.actual:
-            return self.cached[1], {'exposure_us': 6000.}
+        if self.cached and self.cached[0] == self.actual and self.cached[1] == self.exposure_us:
+            return self.cached[2], {'exposure_us': self.exposure_us}
         x, y, z = self.actual
         label = min(self.layout, key=lambda key: np.linalg.norm(self.origin + self.layout[key] - (x, y)))
         dx, dy = self.origin + self.layout[label] - (x, y)
-        u, v = int(round(210 + 20 * dx)), int(round(210 - 20 * dy))
+        u, v = (260, 210) if self.offcenter else (int(round(210 + 20 * dx)), int(round(210 - 20 * dy)))
         image = np.full((420, 420), 225, np.uint8)
         cv2.circle(image, (u, v), 37, 18, 6, cv2.LINE_AA)
         cv2.line(image, (u - 90, v), (u + 90, v), 18, 2, cv2.LINE_AA)
@@ -57,8 +63,8 @@ class FilmCamera(AsyncRequestWorker):
         if 0 <= u - 180 <= 340 and 0 <= v - 180 <= 340:
             image[v - 180:v - 100, u - 180:u - 100] = self.markers[label]
         frame = cv2.GaussianBlur(image, (0, 0), max(.001, 12 * abs(z - self.focus(label))))
-        self.cached = (self.actual, frame)
-        return frame, {'exposure_us': 6000.}
+        self.cached = (self.actual, self.exposure_us, frame)
+        return frame, {'exposure_us': self.exposure_us}
 
 
 @pytest.fixture
@@ -106,7 +112,7 @@ def tcp_rig(tmp_path):
 
         try:
             yield SimpleNamespace(exchange=exchange, camera=camera, cfg=cfg, events=events,
-                                  batch=batch, writes=writes)
+                                  batch=batch, writes=writes, root=tmp_path)
         finally:
             clock.shutdown()
             io.close()
@@ -140,6 +146,31 @@ def test_160_multisite(tcp_rig, anomaly):
         assert session.plane['after_extra'].startswith('加测后残差')
     else:
         assert session.plane['tilt_mm_per_100mm'] == pytest.approx(.05, abs=.004)
+    # 核对 runs/<日期>/depthcal/<会话>/ 全部记录文件与曲线状态
+    session_dir = session.record.directory
+    assert session_dir.is_dir() and session_dir.parent.name == 'depthcal'
+    with (session_dir / 'curves.csv').open(encoding='utf-8', newline='') as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == len(session.samples) > 0
+    assert all(r['direction'] == 'down' for r in rows)
+    assert all(r[m] for r in rows for m in ('tenengrad', 'laplacian', 'brenner'))
+    assert len(list((session_dir / 'roi').glob('*.png'))) == len(rows)
+    for result in session.results:
+        assert (session_dir / f"{result['label']}_center.png").is_file()
+        assert (session_dir / f"{result['label']}_peak.png").is_file()
+    fits_doc = json.loads((session_dir / 'fits.json').read_text(encoding='utf-8'))
+    assert len(fits_doc['points']) == len(session.results)
+    assert fits_doc['feasibility']['met']
+    plane_doc = json.loads((session_dir / 'plane.json').read_text(encoding='utf-8'))
+    assert plane_doc['final']['max_residual'] == pytest.approx(session.plane['max_residual'])
+    rec_doc = json.loads((session_dir / 'session_record.json').read_text(encoding='utf-8'))
+    assert rec_doc['outcome'] == 'done' and rec_doc['exposure_us'] == 6000.0
+    assert len(rec_doc['requests']) == len(rec_doc['replies']) == len(rig.writes)
+    plc_lines = [json.loads(line) for line in (session_dir / 'plc.jsonl').read_text(encoding='utf-8').splitlines()]
+    assert len(plc_lines) == 2 * len(rig.writes)
+    assert live_image_file(rig.root, 'depthcal_roi').is_file()
+    status_depth = rig.events.status.data['depthcal']
+    assert status_depth['phase'] == 'done' and len(status_depth['curves']) == len(session.results)
     print(f'anomaly={anomaly} requests={len(rig.writes)} tilt={session.plane["tilt_mm_per_100mm"]:.6f}'
           f' initial={session.initial_plane["max_residual"]:.6f} final={session.plane["max_residual"]:.6f}')
 
@@ -147,7 +178,11 @@ def test_160_multisite(tcp_rig, anomaly):
 @pytest.mark.parametrize(('case', 'reason'), [
     ('missing_limit', 'DEPTH-Z-MIN'), ('blank', 'DEPTH-TARGET'), ('boundary', 'DEPTH-PEAK-BOUNDARY'),
     ('below_limit', 'DEPTH-Z-LIMIT'), ('wrong_request', 'DEPTH-MODE'),
-    (170, 'DEPTH-UNIMPLEMENTED'), (180, 'DEPTH-UNIMPLEMENTED'), (190, 'DEPTH-UNIMPLEMENTED'),
+    ('center_limit', 'DEPTH-CENTER'), ('exposure_change', 'DEPTH-EXPOSURE'),
+    ('abort', 'DEPTH-ABORTED'), ('arrival_mismatch', 'DEPTH-ARRIVAL'),
+    (170, 'DEPTH-UNIMPLEMENTED'), (171, 'DEPTH-UNIMPLEMENTED'),
+    (180, 'DEPTH-UNIMPLEMENTED'), (181, 'DEPTH-UNIMPLEMENTED'),
+    (190, 'DEPTH-UNIMPLEMENTED'), (191, 'DEPTH-UNIMPLEMENTED'),
 ])
 def test_160_error(tcp_rig, case, reason):
     rig = tcp_rig
@@ -156,10 +191,23 @@ def test_160_error(tcp_rig, case, reason):
         rig.cfg.depth_calibration['camera_z_min_mm'] = None
     elif case == 'blank':
         rig.camera.blank = True
-    elif case in ('below_limit', 'wrong_request'):
+    elif case == 'center_limit':
+        rig.camera.offcenter = True
+    elif case in ('below_limit', 'wrong_request', 'arrival_mismatch', 'abort', 'exposure_change'):
         code, target = rig.exchange()
         assert code == 160
-        kwargs = {'xyz': (*target[:2], -6.5)} if case == 'below_limit' else {'func': 100, 'xyz': target}
+        if case == 'below_limit':
+            kwargs = {'xyz': (*target[:2], -6.5)}
+        elif case == 'wrong_request':
+            kwargs = {'func': 100, 'xyz': target}
+        elif case == 'arrival_mismatch':
+            kwargs = {'xyz': (target[0] + 0.5, target[1], target[2])}
+        elif case == 'abort':
+            send(rig.root, 'depthcal_abort')
+            kwargs = {'xyz': target}
+        elif case == 'exposure_change':
+            rig.camera.exposure_us = 8000.
+            kwargs = {'xyz': target}
     elif case == 'boundary':
         rig.cfg.depth_calibration['coarse_range_mm'] = .025
         rig.cfg.depth_calibration['coarse_step_mm'] = .01
@@ -169,7 +217,11 @@ def test_160_error(tcp_rig, case, reason):
         code, target = rig.exchange(**kwargs)
         if code == 999:
             break
-        assert case == 'boundary' and code == 160
+        assert case in ('boundary', 'center_limit') and code == 160
         kwargs = {'xyz': target}
     assert code == 999 and rig.batch.blackboard.read('mode') == Mode.IDLE
     assert rig.events.status.data['depthcal']['reason_code'] == reason
+    if case not in ('missing_limit', 170, 171, 180, 181, 190, 191):
+        rec_path, = (rig.root / rig.events.clock().date().isoformat() / 'depthcal').glob('*/session_record.json')
+        rec = json.loads(rec_path.read_text(encoding='utf-8'))
+        assert rec['outcome'] == 'failed' and rec['diagnostic']['reason_code'] == reason

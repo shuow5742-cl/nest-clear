@@ -8,6 +8,7 @@ from autoweaver.motion_policy.nodes.node import Status
 from nest_clear.depthcal.record import DepthRecord
 from nest_clear.depthcal.session import Session
 from nest_clear.guard import GuardError, diagnostic
+from nest_clear.preview.control import REQUEST_CAMERAS, close_previews_for
 from .calibration import change_mode
 from .modes import Mode
 from .sampling import DeviceSampling
@@ -21,7 +22,7 @@ class DepthCalibration(DeviceSampling):
     def __init__(self, ctx):
         super().__init__('下针深度标定')
         self.ctx = ctx
-        self.settle_config = ctx.config.depth_calibration
+        self.settle_config = ctx.config.depth_calibration if ctx.config is not None else {}
 
     def reply(self, code, coords=None):
         bb = self._blackboard
@@ -134,8 +135,11 @@ class DepthCalibration(DeviceSampling):
             ctx.events.depth_reply_committed = self.committed
             self.record_request(session)
             change_mode(bb, ctx, Mode.DEPTH_CALIB, self.name)
-        if session.abort_requested:
-            return self.abort()
+        else:
+            if session.abort_requested:
+                return self.abort()
+            close_previews_for(ctx.events, REQUEST_CAMERAS.get(bb.read('request_func'), ()), 'plc_request',
+                               bb.read('task_id'), bb.read('request_func'), mode=bb.read('mode').value)
         self.call = None
         self.samples, self.round, self.next_read = [], 0, 0.
         self.frames = []

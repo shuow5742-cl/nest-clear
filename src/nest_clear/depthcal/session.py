@@ -230,7 +230,7 @@ class Session:
         if self.repeat < self.cfg['repeats_per_point']:
             return self.begin_fine()
         peaks = [item['z_peak'] for item in self.fits]
-        self.result = {'label': self.label, 'xy': list(self.point_xy), 'fits': self.fits,
+        self.result = {'label': self.label, 'xy': [float(v) for v in self.point_xy], 'fits': self.fits,
                        'z_peak': statistics.mean(peaks), 'range': max(peaks) - min(peaks),
                        'std': statistics.stdev(peaks) if len(peaks) > 1 else None}
         self.results.append(self.result)
