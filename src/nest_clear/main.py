@@ -276,6 +276,7 @@ class Application:
             camera_sn = assembly.camera_sn(config)
             self.camera = CameraWorker(config.vision.camera_backend, camera_sn, camera, timeout_s=config.capture_timeout_s, exposure_us=config.exposure_us, gain_db=config.gain_db, balance_ratio=config.balance_ratio, principal=(float(calibration.K[0][2]), float(calibration.K[1][2])), image_size=config.camera_image_size)
             self.camera.open()
+            self.events.main_camera = self.camera
             from nest_clear.preview.main_host import MainPreview
             self.main_preview = MainPreview(config, self.camera, self.events)
             self.events.stop_main_preview = self.main_preview.stop
@@ -431,6 +432,9 @@ class Application:
         if baseline is not None:
             baseline.end('主程序停止')
             baseline.thread.join(timeout=self.config.capture_timeout_s + 2)
+        abort_depthcal = getattr(self.events, "abort_depthcal", None)
+        if abort_depthcal is not None:
+            abort_depthcal("主程序停止，PLC 初始化或急停时会话中断")
         if self.clock is not None:
             self.clock.shutdown()
         calib_camera = getattr(self, "calib_camera", None)
@@ -445,9 +449,6 @@ class Application:
         abort_accuracy = getattr(self.events, "abort_pickaccuracy", None)
         if abort_accuracy is not None:
             abort_accuracy("主程序停止，PLC 初始化或急停时会话中断")
-        abort_depthcal = getattr(self.events, "abort_depthcal", None)
-        if abort_depthcal is not None:
-            abort_depthcal("主程序停止，PLC 初始化或急停时会话中断")
         cycle = getattr(self.events, "active_cycle", None)
         if cycle is not None:
             cycle.pending()

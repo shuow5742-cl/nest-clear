@@ -40,11 +40,13 @@ class FilmCamera(AsyncRequestWorker):
         self.anomaly = False
         self.offcenter = False
         self.exposure_us = 6000.
+        self.exposure_auto = 0
         self.base_exposure_us = 6000.
         self.simulate_exposure = False
         self.background_level = 190.
         self.per_label_background = {}
         self.exposure_history = []
+        self.fail_restore = False
         self.cached = None
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.markers = {label: cv2.rotate(cv2.aruco.generateImageMarker(dictionary, int(label[1:]), 80),
@@ -54,7 +56,19 @@ class FilmCamera(AsyncRequestWorker):
         return -5.037 + .0005 * self.layout[label][0] + (.05 if self.anomaly and label == self.primary[-1] else 0.)
 
     def execute(self, payload):
-        if payload.get('operation') == 'set_exposure':
+        op = payload.get('operation')
+        if op == 'get_exposure_state':
+            return None, {'exposure_us': self.exposure_us, 'exposure_auto': self.exposure_auto}
+        if op == 'restore_exposure_state':
+            if self.fail_restore:
+                raise RuntimeError('相机通信断开，无法写回曝光')
+            if payload.get('exposure_us') is not None:
+                self.exposure_us = float(payload['exposure_us'])
+            if payload.get('exposure_auto') is not None:
+                self.exposure_auto = payload['exposure_auto']
+            self.cached = None
+            return None, {'exposure_us': self.exposure_us, 'exposure_auto': self.exposure_auto}
+        if op == 'set_exposure':
             self.exposure_us = float(payload['exposure_us'])
             self.exposure_history.append(self.exposure_us)
             self.cached = None
@@ -547,6 +561,10 @@ def test_160_per_point_auto_exposure_dark_saturated_and_clamped(tcp_rig):
     assert by_label['T31']['exposure_us'] == pytest.approx(6000.0, rel=0.05)
     assert 175.0 <= by_label['T31']['roi_p99'] <= 205.0
     assert by_label['T00']['exposure_us'] != by_label['T07']['exposure_us']
+    # 161 完成后主相机曝光必须恢复到会话前原值 6000.0
+    assert rig.camera.exposure_us == pytest.approx(6000.0)
+    _, post_meta = rig.camera.execute({'stage': 'coarse', 'task_id': 9999})
+    assert post_meta['exposure_us'] == pytest.approx(6000.0)
 
     # 验证触及曝光上限时记警告并继续（不 999）
     rig.cfg.depth_calibration['exposure_max_us'] = 10000.0
@@ -636,3 +654,173 @@ def test_camera_worker_set_exposure_operation_used_by_depthcal():
     frame, fmeta = worker.execute({'stage': 'depthcal', 'task_id': 1})
     assert frame.shape == (96, 128, 3)
     assert fmeta['exposure_us'] == pytest.approx(15000.0)
+
+
+@pytest.mark.parametrize('exit_kind', ['done', 'fail_999', 'abort', 'interrupt'])
+def test_160_restores_mock_camera_exposure_and_auto_on_all_exits(tmp_path, exit_kind):
+    """成功(161)、失败(999)、放弃(abort)、中断(interrupt)后 MockCamera 曝光与 ExposureAuto 回到原值，后续其他流程采图 metadata 正确。"""
+    from autoweaver.sensor.camera.base import CameraConfig
+    from autoweaver.sensor.camera.mock import MockCamera
+    from nest_clear.workers.camera import CameraWorker
+
+    film = FilmCamera()
+    film.simulate_exposure = True
+    film.background_level = 60.0  # 会触发自动曝光把曝光调高到 ~19000 µs
+
+    class SyntheticMockCamera(MockCamera):
+        def __init__(self):
+            super().__init__(CameraConfig(device_sn='MOCK_DEPTH'), width=420, height=420)
+            self.exposure_us = 6000.0
+            self.auto_mode = 2  # 模拟原 ExposureAuto=Continuous
+            self._cam = SimpleNamespace(
+                ExposureAuto=SimpleNamespace(
+                    get=lambda: self.auto_mode,
+                    set=lambda v: setattr(self, 'auto_mode', v),
+                ),
+                ExposureTime=SimpleNamespace(
+                    get=lambda: self.exposure_us,
+                    set=lambda v: setattr(self, 'exposure_us', float(v)),
+                ),
+            )
+            self._gx = SimpleNamespace(GxAutoEntry=SimpleNamespace(OFF=0))
+
+        def snapshot(self):
+            film.actual = self.actual
+            film.exposure_us = 6000.0
+            img, _ = film.execute({'stage': 'depthcal'})
+            return np.repeat(img[:, :, None], 3, axis=2)
+
+    mock_cam = SyntheticMockCamera()
+    mock_cam.actual = film.actual
+    worker = CameraWorker('mock', 'MOCK_DEPTH', mock_cam, exposure_us=6000.0)
+    worker.open()
+    # 模拟会话开始前主相机原本处于 ExposureAuto=2（Continuous）与 6000 µs
+    mock_cam.exposure_us = 6000.0
+    mock_cam.auto_mode = 2
+    worker.readback['exposure_us'] = 6000.0
+
+    cfg = load_config('config/nest_clear.yaml')
+    settings = {
+        **cfg.depth_calibration,
+        'camera_z_min_mm': -7.0,
+        'coarse_step_mm': .50,
+        'overshoot_mm': .15,
+        'settle_window_s': .0001,
+        'arrival_timeout_s': .05,
+        'frames_per_step': 1,
+        'repeats_per_point': 1,
+        'point_order': ['T00', 'T07', 'T31', 'T24', 'T11'],
+        'travel': ((80, 220), (0, 230), (-15, 0)),
+    }
+    cfg = replace(
+        cfg,
+        depth_calibration=settings,
+        travel=((80, 220), (0, 230), (-15, 0)),
+        tool_offset={**cfg.tool_offset, 'card_thickness_mm': 0.},
+        camera_calibration={**cfg.camera_calibration, 'board_thickness_mm': 0.},
+    )
+    cal = Calibration(
+        np.array([[2000., 0., 210], [0., 2000., 210], [0., 0., 1.]]),
+        np.zeros(5), np.diag([1., -1., -1.]), np.zeros(3), -105,
+    )
+    events = EventRecorder(tmp_path, run=True)
+    events.main_camera = worker
+
+    with FakePLC() as plc:
+        io = PLCClient('127.0.0.1', plc.port, 1, plc.contract)
+        board = WorldBoard()
+        clock = BTClock(board)
+        for w in (PlcWorker(Handshake(io, plc.contract, events=events)), worker):
+            clock.attach_worker(w)
+        batch = build_batch(board, cfg, [], RequestTracker(0), events, calibration=cal)
+        clock.submit(batch)
+
+        def exchange(xyz=None, func=160):
+            if xyz is not None:
+                mock_cam.actual = tuple(xyz)
+            plc.set_actual_xyz(mock_cam.actual)
+            task = plc.request(func, tool_id=65535)
+            deadline = time.monotonic() + 6
+            while batch.blackboard.read('committed_func') is None or events.request_pending or plc.io.read('result_id') != task:
+                clock.tick_once()
+                if time.monotonic() > deadline:
+                    pytest.fail(f'未收到 Task_ID={task} 回应')
+                time.sleep(.00015)
+            code = plc.io.read('reply_func')
+            return code, plc.io.read_real32_block(40942, 3) if code == 160 else None
+
+        try:
+            # 160 启动时先发几步让自动曝光把 mock_cam.exposure_us 调到 != 6000
+            target = None
+            session = None
+            for _ in range(30):
+                code, target = exchange(target)
+                assert code == 160
+                session = batch.blackboard.read('depth_session')
+                if session.exposure_locked:
+                    break
+            assert session.exposure_locked and mock_cam.exposure_us > 12000.0
+            assert mock_cam.auto_mode == 0  # 扫描中自动曝光已关闭
+
+            if exit_kind == 'done':
+                for _ in range(1200):
+                    code, target = exchange(target)
+                    if code == 161:
+                        break
+                    assert code == 160
+                else:
+                    pytest.fail('未完成 161 会话')
+                assert code == 161
+            elif exit_kind == 'fail_999':
+                # 触发 DEPTH-Z-LIMIT 999
+                code, _ = exchange((*target[:2], settings['camera_z_min_mm'] - 0.5))
+                assert code == 999
+            elif exit_kind == 'abort':
+                send(tmp_path, 'depthcal_abort')
+                code, _ = exchange(target)
+                assert code == 999
+            elif exit_kind == 'interrupt':
+                events.abort_depthcal('测试主程序停止中断')
+
+            assert batch.blackboard.read('mode') == Mode.IDLE
+            assert mock_cam.exposure_us == pytest.approx(6000.0)
+            assert mock_cam.auto_mode == 2
+            # 后续其他流程（挑毛粗拍）采图 metadata exposure_us 必须为原值 6000.0
+            _, other_meta = worker.execute({'stage': 'coarse', 'task_id': 8888})
+            assert other_meta['exposure_us'] == pytest.approx(6000.0)
+        finally:
+            clock.shutdown()
+            io.close()
+
+
+def test_160_restore_failure_not_swallowed_and_still_replies_999(tcp_rig):
+    """曝光恢复失败不得吞掉：写 error 事件、999 诊断含“主相机曝光恢复失败，请重启程序”，且仍发 PLC 应答。"""
+    rig = tcp_rig
+    rig.camera.simulate_exposure = True
+    rig.camera.background_level = 60.0
+    code, target = rig.exchange()
+    assert code == 160
+    session = rig.batch.blackboard.read('depth_session')
+    for _ in range(20):
+        if session.exposure_locked:
+            break
+        code, target = rig.exchange(target)
+        assert code == 160
+    assert session.exposure_locked
+
+    rig.camera.fail_restore = True
+    send(rig.root, 'depthcal_abort')
+    code, _ = rig.exchange(target)
+    assert code == 999
+    assert rig.batch.blackboard.read('mode') == Mode.IDLE
+
+    diag = rig.events.status.data['depthcal']
+    assert '主相机曝光恢复失败，请重启程序' in diag['what']
+    event_rows = [
+        json.loads(line)
+        for line in (rig.events.run_directory / 'events.jsonl').read_text(encoding='utf-8').splitlines()
+        if line.strip()
+    ]
+    err_rows = [e for e in event_rows if e.get('event') == 'error' and e.get('operation') == 'depthcal_restore_exposure']
+    assert len(err_rows) == 1
+    assert '主相机曝光恢复失败，请重启程序' in err_rows[0]['reason']

@@ -57,6 +57,10 @@ class Session:
         exp_state = load_depthcal_exposure(record.events.directory, self.cfg)
         self.desired_exposure_mode = exp_state['mode']
         self.desired_manual_exposure_us = exp_state['manual_exposure_us']
+        self.initial_exposure_us = None
+        self.initial_exposure_auto = None
+        self.exposure_restored = False
+        self.exposure_restore_error = None
         self.exposure_us = None
         self.reset_point()
 

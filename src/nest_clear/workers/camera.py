@@ -195,6 +195,34 @@ class CameraWorker(AsyncRequestWorker):
         try:
             if self.needs_reopen:
                 raise RuntimeError("上次采图超时，相机需要重开")
+            if payload.get("operation") == "get_exposure_state":
+                device = getattr(self.camera, "_cam", None)
+                if device is not None:
+                    cur_exp = float(device.ExposureTime.get())
+                else:
+                    cur_exp = getattr(self.camera, "exposure_us", None)
+                    if cur_exp is None:
+                        cur_exp = self.readback.get("exposure_us")
+                return None, {
+                    "exposure_us": float(cur_exp) if cur_exp is not None else None,
+                    "exposure_auto": self.exposure_auto_mode(),
+                    "settings": self.settings,
+                }
+            if payload.get("operation") == "restore_exposure_state":
+                wanted_exp = payload.get("exposure_us")
+                actual = (
+                    self._set_exposure_locked(float(wanted_exp))
+                    if wanted_exp is not None
+                    else self.readback.get("exposure_us")
+                )
+                wanted_auto = payload.get("exposure_auto")
+                if wanted_auto is not None:
+                    self.restore_exposure_auto_mode(wanted_auto)
+                return None, {
+                    "exposure_us": actual,
+                    "exposure_auto": wanted_auto,
+                    "settings": self.settings,
+                }
             if payload.get("operation") == "set_exposure":
                 actual = self._set_exposure_locked(float(payload["exposure_us"]))
                 return None, {"exposure_us": actual, "settings": self.settings}

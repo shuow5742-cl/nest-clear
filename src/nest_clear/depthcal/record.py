@@ -136,6 +136,10 @@ class DepthRecord:
             self.write('session_record.json', {
                 'start_time': self.started.isoformat(), 'end_time': self.events.clock().isoformat(),
                 'outcome': outcome, 'diagnostic': details, 'configuration': session.cfg,
+                'initial_exposure_us': getattr(session, 'initial_exposure_us', None),
+                'initial_exposure_auto': getattr(session, 'initial_exposure_auto', None),
+                'exposure_restored': getattr(session, 'exposure_restored', None),
+                'exposure_restore_error': getattr(session, 'exposure_restore_error', None),
                 'exposure_us': getattr(session, 'exposure_us', None), 'point_exposures': point_exposures,
                 'plan': session.plan,
                 'fine_plans': fine_plans,

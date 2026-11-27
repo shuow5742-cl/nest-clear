@@ -64,6 +64,9 @@ class DepthCalibration(DeviceSampling):
         super().__init__('下针深度标定')
         self.ctx = ctx
         self.settle_config = ctx.config.depth_calibration if ctx.config is not None else {}
+        self.init_exp_stage = None
+        self.restore_stage = None
+        self.pending_exit = None
 
     def reply(self, code, coords=None):
         bb = self._blackboard
@@ -72,10 +75,42 @@ class DepthCalibration(DeviceSampling):
         bb.write('reply_tool', None, self.name)
         return Status.SUCCESS
 
+    def _restore_sync(self, session):
+        """在中断或收尾兜底路径同步恢复主相机曝光；失败时记录 error 并返回错误文本。"""
+        if (session is None or getattr(session, 'exposure_restored', False)
+                or getattr(session, 'exposure_restore_error', None)):
+            return None
+        target_exp = getattr(session, 'initial_exposure_us', None)
+        if target_exp is None and self.ctx.config is not None:
+            target_exp = self.ctx.config.exposure_us
+        target_auto = getattr(session, 'initial_exposure_auto', None)
+        camera = getattr(self.ctx.events, 'main_camera', None)
+        if camera is None or (target_exp is None and target_auto is None):
+            return None
+        try:
+            camera.execute({
+                'stage': 'depthcal',
+                'operation': 'restore_exposure_state',
+                'exposure_us': target_exp,
+                'exposure_auto': target_auto,
+            })
+            session.exposure_restored = True
+            return None
+        except Exception as exc:
+            err = str(exc) or type(exc).__name__
+            session.exposure_restore_error = err
+            self.ctx.events.emit(
+                'error',
+                operation='depthcal_restore_exposure',
+                reason=f'主相机曝光恢复失败，请重启程序：{err}',
+            )
+            return err
+
     def finish(self, outcome, details=None):
         bb = self._blackboard
         session = bb.read('depth_session', None)
         if session:
+            self._restore_sync(session)
             session.record.finish(session, outcome, details)
         if bb.read('mode') == Mode.DEPTH_CALIB:
             change_mode(bb, self.ctx, Mode.IDLE, self.name)
@@ -83,13 +118,25 @@ class DepthCalibration(DeviceSampling):
         bb.write('depth_image', None, self.name)
         self.frames = []
         self.ae_stage = None
+        self.init_exp_stage = None
+        self.restore_stage = None
+        self.pending_exit = None
         self.last_capture_meta = None
         self.ctx.events.abort_depthcal = None
         self.ctx.events.depth_reply_committed = None
 
     def interrupt(self, reason):
+        bb = self._blackboard
+        session = bb.read('depth_session', None)
         details = diagnostic(reason, code='DEPTH-INTERRUPTED', where='主程序停止',
                              hint='恢复 PLC 正常状态后从 160 重新发起。')
+        restore_err = self._restore_sync(session)
+        if restore_err:
+            details = {
+                **details,
+                'what': f"{details.get('what', '')}；主相机曝光恢复失败，请重启程序（{restore_err}）".lstrip('；'),
+                'hint': f"{details.get('hint', '')} 主相机曝光恢复失败，请重启程序。".strip(),
+            }
         self.publish('failed', **details)
         self.finish('aborted', details)
 
@@ -149,15 +196,48 @@ class DepthCalibration(DeviceSampling):
             data['phase'] = phase
         self.ctx.events.emit('depthcal_state', **(data | details))
 
+    def _begin_restore(self, reply_func, details=None):
+        bb = self._blackboard
+        session = bb.read('depth_session', None)
+        if session is None or getattr(session, 'exposure_restored', False):
+            if details is not None:
+                bb.write('reply_diagnostic', details, self.name)
+            return self.reply(reply_func)
+        target_exp = getattr(session, 'initial_exposure_us', None)
+        if target_exp is None and self.ctx.config is not None:
+            target_exp = self.ctx.config.exposure_us
+        target_auto = getattr(session, 'initial_exposure_auto', None)
+        if target_exp is None and target_auto is None:
+            if details is not None:
+                bb.write('reply_diagnostic', details, self.name)
+            return self.reply(reply_func)
+        self.ae_stage = None
+        self.init_exp_stage = None
+        self.pending_exit = (reply_func, details)
+        self.restore_stage = 'restoring'
+        self.start_call(
+            'camera',
+            {
+                'stage': 'depthcal',
+                'operation': 'restore_exposure_state',
+                'exposure_us': target_exp,
+                'exposure_auto': target_auto,
+                'task_id': bb.read('task_id'),
+            },
+            'depth_restore_exposure',
+        )
+        return Status.RUNNING
+
     def fail(self, exc):
         bb = self._blackboard
         details = diagnostic(exc, code='DEPTH-FAILED', where='下针深度标定',
                              hint='检查菲林、相机和 PLC 实时坐标。')
-        bb.write('reply_diagnostic', details, self.name)
         if bb.read('depth_session', None) is None:
+            bb.write('reply_diagnostic', details, self.name)
             self.publish('failed', **details)
             self.finish('failed', details)
-        return self.reply(999)
+            return self.reply(999)
+        return self._begin_restore(999, details)
 
     def on_start(self):
         bb = self._blackboard
@@ -183,7 +263,8 @@ class DepthCalibration(DeviceSampling):
     def start_request(self):
         bb, ctx = self._blackboard, self.ctx
         session = bb.read('depth_session', None)
-        if session is None:
+        is_new_session = session is None
+        if is_new_session:
             if ctx.calibration is None or (ctx.calibration.placeholder and
                                             not ctx.config.vision.allow_placeholder_calibration):
                 raise GuardError('DEPTH-CALIBRATION', '缺少有效的主相机标定',
@@ -206,7 +287,17 @@ class DepthCalibration(DeviceSampling):
         self.frames = []
         self.capturing = False
         self.ae_stage = None
+        self.init_exp_stage = None
+        self.restore_stage = None
+        self.pending_exit = None
         self.last_capture_meta = None
+        if is_new_session:
+            self.init_exp_stage = 'getting'
+            self.start_call(
+                'camera',
+                {'stage': 'depthcal', 'operation': 'get_exposure_state', 'task_id': bb.read('task_id')},
+                'depth_init_exposure',
+            )
         self.publish()
         return Status.RUNNING
 
@@ -285,12 +376,85 @@ class DepthCalibration(DeviceSampling):
         if session is None:
             return self.fail('下针深度标定会话已中断')
         try:
+            if self.restore_stage == 'restoring':
+                status = self.tick_call()
+                if status == Status.RUNNING:
+                    return status
+                reply_func, details = self.pending_exit
+                self.restore_stage = None
+                self.pending_exit = None
+                if status == Status.FAILURE:
+                    err = str(bb.read('error') or '未知错误')
+                    session.exposure_restore_error = err
+                    self.ctx.events.emit(
+                        'error',
+                        task_id=bb.read('task_id'),
+                        operation='depthcal_restore_exposure',
+                        reason=f'主相机曝光恢复失败，请重启程序：{err}',
+                    )
+                    if details is None:
+                        details = diagnostic(
+                            GuardError(
+                                'DEPTH-EXPOSURE-RESTORE',
+                                f'主相机曝光恢复失败，请重启程序（{err}）',
+                                '会话结束恢复曝光',
+                                '请重启主程序与父程序，避免后续流程采图曝光异常。',
+                            )
+                        )
+                        reply_func = 999
+                    else:
+                        details = {
+                            **details,
+                            'what': f"{details.get('what', '')}；主相机曝光恢复失败，请重启程序（{err}）".lstrip('；'),
+                            'hint': f"{details.get('hint', '')} 主相机曝光恢复失败，请重启程序。".strip(),
+                        }
+                    bb.write('reply_diagnostic', details, self.name)
+                    return self.reply(reply_func)
+                session.exposure_restored = True
+                if details is not None:
+                    bb.write('reply_diagnostic', details, self.name)
+                return self.reply(reply_func)
             cmd = reader(self.ctx).poll({'depthcal_abort', 'depthcal_exposure'}, defer_unallowed=True)
             if cmd and cmd[0] == 'depthcal_abort':
                 return self.abort()
             if cmd and cmd[0] == 'depthcal_exposure':
                 handle_depthcal_exposure_command(self.ctx.events, self.ctx.config, cmd[1], session=session)
                 self.publish()
+            if self.init_exp_stage == 'getting':
+                status = self.tick_call()
+                if status == Status.RUNNING:
+                    return status
+                self.init_exp_stage = None
+                fallback_exp = self.ctx.config.exposure_us if self.ctx.config is not None else None
+                if status == Status.FAILURE:
+                    session.initial_exposure_us = float(fallback_exp) if fallback_exp is not None else None
+                    session.initial_exposure_auto = None
+                else:
+                    _, meta = bb.read('depth_init_exposure')
+                    exp = meta.get('exposure_us') if isinstance(meta, dict) else None
+                    auto = meta.get('exposure_auto') if isinstance(meta, dict) else None
+                    if exp is None or not math.isfinite(exp) or exp <= 0:
+                        exp = fallback_exp
+                    session.initial_exposure_us = float(exp) if exp is not None else None
+                    session.initial_exposure_auto = auto
+                self.publish()
+                if (session.initial_exposure_auto not in (None, 0)
+                        and session.initial_exposure_us is not None):
+                    self.init_exp_stage = 'fixing'
+                    self.start_call(
+                        'camera',
+                        {'stage': 'depthcal', 'operation': 'set_exposure',
+                         'exposure_us': float(session.initial_exposure_us), 'task_id': bb.read('task_id')},
+                        'depth_init_exposure_fix',
+                    )
+                    return Status.RUNNING
+            if self.init_exp_stage == 'fixing':
+                status = self.tick_call()
+                if status == Status.RUNNING:
+                    return status
+                if status == Status.FAILURE:
+                    return self.fail(bb.read('error'))
+                self.init_exp_stage = None
             if self.ae_stage is not None:
                 status = self.tick_call()
                 if status == Status.RUNNING:
@@ -311,7 +475,7 @@ class DepthCalibration(DeviceSampling):
                 if val is not None:
                     return self.move_reply(val)
                 session.record.results(session)
-                return self.reply(161)
+                return self._begin_restore(161)
             if not self.capturing:
                 settled = self.settle(session.expected)
                 if settled is None:
@@ -349,7 +513,7 @@ class DepthCalibration(DeviceSampling):
             if coords is not None:
                 return self.move_reply(coords)
             session.record.results(session)
-            return self.reply(161)
+            return self._begin_restore(161)
         except GuardError as exc:
             return self.fail(exc)
         except Exception as exc:
