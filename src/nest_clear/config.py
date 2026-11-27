@@ -8,6 +8,7 @@ from typing import Any, NoReturn
 
 import yaml
 
+from .depth_config import DEFAULTS as DEPTH_DEFAULTS, METRICS
 from .guard import GuardError
 from .vision.hair.config import HairDetectConfig
 from .tooltip.store import load_tools
@@ -151,6 +152,7 @@ class Config:
     white_balance_source: str = "配置"
     arrival_settle: dict[str, Any] = field(default_factory=lambda: {"sample_interval_s": .05, "settle_samples": 4, "jitter_tol_mm": .02, "settle_timeout_s": 1.0})
     test_mode: dict[str, Any] = field(default_factory=lambda: {"non_pickable": [f"T{i:02d}" for i in range(3, 31, 3)]})
+    depth_calibration: dict[str, Any] = field(default_factory=lambda: dict(DEPTH_DEFAULTS))
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -167,6 +169,44 @@ def _mapping(value: Any, path: str, keys: list[str]) -> dict[str, Any]:
     if missing or extra:
         _fail(path, f"缺少字段 {sorted(missing)}，未知字段 {sorted(extra)}")
     return value
+
+
+def _depth_config(value, z_travel):
+    path = "depth_calibration"
+    if not isinstance(value, dict):
+        _fail(path, "应为映射")
+    settings = _mapping({**DEPTH_DEFAULTS, **value}, path, list(DEPTH_DEFAULTS))
+    for key, default in DEPTH_DEFAULTS.items():
+        name = f"{path}.{key}"
+        item = settings[key]
+        if type(default) is float:
+            settings[key] = _number(item, name, True)
+        if type(default) is int and (type(item) is not int or item < 1):
+            _fail(name, "须为正整数")
+    lower = settings["camera_z_min_mm"]
+    if lower is not None:
+        lower = _number(lower, f"{path}.camera_z_min_mm")
+        if not z_travel[0] <= lower < z_travel[1]:
+            _fail(f"{path}.camera_z_min_mm", "须在 Z 行程内且低于行程上限")
+        settings["camera_z_min_mm"] = lower
+    for key, options in (("metric", METRICS), ("peak_method", ("gauss", "half_height"))):
+        if settings[key] not in options:
+            _fail(f"{path}.{key}", f"请选择 {options}")
+    if not 0 < settings["defocus_ratio"] < 1:
+        _fail(f"{path}.defocus_ratio", "须在 0 和 1 之间")
+    if settings["settle_samples"] < 2:
+        _fail(f"{path}.settle_samples", "须至少为 2")
+    if not 5 <= settings["max_points"] <= 9:
+        _fail(f"{path}.max_points", "须为 5 至 9")
+    for key, count in (("point_order", 5), ("extra_points", 4)):
+        labels = settings[key]
+        if labels is None:
+            continue
+        if (not isinstance(labels, list) or len(labels) != count
+                or any(label not in [f"T{i:02d}" for i in range(32)] for label in labels)
+                or len(set(labels)) != count):
+            _fail(f"{path}.{key}", f"须提供 {count} 个不同的菲林标签 T00–T31")
+    return settings
 
 
 def _number(value: Any, path: str, positive: bool = False) -> float:
@@ -329,7 +369,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             _fail("run_mode", "通信联调模式已删除，请改用 config/nest_clear.yaml")
         if data.get("run_mode") == "production":
             data.pop("run_mode")
-        data = {"arrival_settle": {}, "test_mode": {}, "pick_accuracy": {}, "tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, **data}
+        data = {"arrival_settle": {}, "depth_calibration": {}, "test_mode": {}, "pick_accuracy": {}, "tool_offset": {}, "camera_calibration": {}, "ui": {}, "ui_preview": {}, **data}
     root = _mapping(
         data,
         "根",
@@ -344,6 +384,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
             "camera_calibration",
             "tool_offset",
             "pick_accuracy",
+            "depth_calibration",
             "ui_preview",
             "travel",
             "camera",
@@ -511,6 +552,7 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
     for axis, bounds in zip("xyz", travel):
         if bounds[0] >= bounds[1]:
             _fail(f"travel.{axis}", "最小值必须小于最大值")
+    depth_calibration = _depth_config(root["depth_calibration"], travel[2])
     if start is not None and any(not lo <= value <= hi for value, (lo, hi) in zip(start, travel)):
         _fail("camera_calibration.start_xyz", "必须在 travel 范围内")
     scan_data = {"mode": "corners", "tray": {"origin_xy": [0, 0], "size_mm": [182.7, 171.8], "x_direction": -1, "y_direction": 1}, "fov_mm": None, "min_overlap_mm": 20, **root["scan"]}
@@ -882,5 +924,5 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _string(record["machine_id"], "record.machine_id"),
         camcal,
         UIConfig(**ui_data),
-        preview_data, offset, accuracy, str(exposure_path), exposure_source, str(wb_path), wb_source, settle, test_mode,
+        preview_data, offset, accuracy, str(exposure_path), exposure_source, str(wb_path), wb_source, settle, test_mode, depth_calibration,
     )

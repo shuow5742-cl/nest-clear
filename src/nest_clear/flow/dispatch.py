@@ -11,6 +11,7 @@ from .camera_calibration import camera_branch, finish
 from .tool_offset import ToolOffset, finish as finish_tooloffset
 from .pick_accuracy import PickAccuracy, finish as finish_pickaccuracy
 from .calibration import finish_branch, change_tool_branch
+from .depth_calibration import DepthCalibration, DEPTH_CODES
 from .context import FlowContext
 from .leaves import Instant, Predicate, PrepareError
 from .modes import Mode
@@ -132,7 +133,11 @@ class CheckToolID(Instant):
 def build_dispatch(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -> TreeNode:
     """每项先匹配功能码，再统一检查模式并执行对应工厂。"""
     entries = BRANCHES if branches is None else branches
-    nodes = []
+    nodes = [Sequence([
+        Predicate("下针深度标定请求", lambda bb: bb.read("mode") == Mode.DEPTH_CALIB
+                  or bb.read("request_func") in DEPTH_CODES),
+        DepthCalibration(ctx),
+    ], name="下针深度标定分发")]
     for code, (allowed, factory) in entries.items():
         match = Predicate(f"功能码 == {code}", lambda bb, code=code: bb.read("request_func") == code)
         steps = [factory(ctx)]

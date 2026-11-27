@@ -32,7 +32,7 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -
     def reply_payload(bb):
         coordinates = dict(bb.read("reply_coordinates"))
         tool_id = bb.read("plc_tool_id")
-        if tool_id is not None:
+        if tool_id is not None and not bb.read("depth_request", False):
             coordinates["pc_tool_id"] = tool_id
         return {
             "operation": "reply",
@@ -79,6 +79,7 @@ def build_batch(
     params = {
         "work_cycle": None,
         "tooloffset_session": None,
+        "depth_session": None,
         "pickaccuracy_session": None,
         "mode": Mode.IDLE,
         "next_index": 0,

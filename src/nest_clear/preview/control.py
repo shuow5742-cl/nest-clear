@@ -5,7 +5,7 @@ from nest_clear.preview.eligibility import MODE_CAMERAS
 # Only requests whose branch can capture; mode entry is handled separately.
 REQUEST_CAMERAS = {
     1: frozenset({'main'}), 20: frozenset({'main'}), 80: frozenset({'main'}),
-    90: frozenset({'main'}),
+    90: frozenset({'main'}), 160: frozenset({'main'}),
     150: frozenset({'main'}), 155: frozenset({'main'}),
     100: frozenset({'front', 'side'}),
     110: frozenset({'front', 'side'}),

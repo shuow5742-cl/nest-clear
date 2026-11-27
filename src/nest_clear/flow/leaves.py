@@ -184,6 +184,7 @@ class WaitRequest(CallWorker):
         self.tracker.processed = task
         self._blackboard.write("task_id", task, self.name)
         self._blackboard.write("request_func", func, self.name)
+        self._blackboard.write("depth_request", False, self.name)
         self._blackboard.write("plc_tool_id", tool_id, self.name)
         self._blackboard.write("raw_path", None, self.name)
         self._blackboard.write("fine_render_data", None, self.name)
