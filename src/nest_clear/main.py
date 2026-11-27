@@ -427,6 +427,9 @@ class Application:
         abort_accuracy = getattr(self.events, "abort_pickaccuracy", None)
         if abort_accuracy is not None:
             abort_accuracy("主程序停止，PLC 初始化或急停时会话中断")
+        abort_depthcal = getattr(self.events, "abort_depthcal", None)
+        if abort_depthcal is not None:
+            abort_depthcal("主程序停止，PLC 初始化或急停时会话中断")
         cycle = getattr(self.events, "active_cycle", None)
         if cycle is not None:
             cycle.pending()

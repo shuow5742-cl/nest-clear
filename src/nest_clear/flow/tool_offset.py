@@ -8,16 +8,15 @@ from pathlib import Path
 import subprocess
 import time
 
-import numpy as np
 import yaml
-from autoweaver.motion_policy.nodes.node import Status, TreeNode
+from autoweaver.motion_policy.nodes.node import Status
 
 from nest_clear.guard import GuardError, diagnostic
 from nest_clear.preview.control import REQUEST_CAMERAS, close_previews_for
 from nest_clear.tooloffset.commands import CommandReader
 from nest_clear.tooloffset.store import save_confirmed
 from .calibration import change_mode
-from .leaves import CallWorker
+from .sampling import DeviceSampling
 from .modes import Mode
 
 
@@ -94,13 +93,14 @@ def _failure_fields(reason, code='TOOLOFFSET-FAILED', where='工具偏移标定'
             'failure_where': diag['where'], 'failure_hint': diag['hint']}
 
 
-class ToolOffset(TreeNode):
+class ToolOffset(DeviceSampling):
     """工具偏移标定行为树节点；同时为 PickAccuracy 提供共享的采图/稳定采样基类方法。"""
 
     def __init__(self, ctx):
         super().__init__('工具偏移标定')
         self.ctx = ctx
         self.call = None
+        self.settle_config = ctx.config.tool_offset
 
     def publish(self, phase, message='', **extra):
         """向事件总线与主状态发布工具偏移实时进度。"""
@@ -157,44 +157,6 @@ class ToolOffset(TreeNode):
         self.publish('failed', reason, **diag_fields)
         finish(self.ctx, self._blackboard, 'failed', reason)
         return status
-
-    def start_call(self, target, payload, result):
-        """发起非阻塞 Worker 调用。"""
-        self.call = CallWorker(self.ctx.board, target, payload, result, name='工具偏移设备调用')
-        self.call.set_blackboard(self._blackboard)
-
-    def tick_call(self):
-        """推进一次 Worker 调用。"""
-        status = self.call.tick(self.snapshot, self.tick_ctx)
-        if status != Status.RUNNING:
-            self.call = None
-        return status
-
-    def settle(self):
-        """非阻塞等待 PLC 实时坐标在窗口内稳定，取均值。"""
-        cfg = self.ctx.config.tool_offset
-        if self.call:
-            status = self.tick_call()
-            if status == Status.FAILURE:
-                raise ValueError('读取实时坐标失败：' + str(self._blackboard.read('error')))
-            if status == Status.RUNNING:
-                return None
-            value = self._blackboard.read('tooloffset_actual')
-            if len(value) != 3 or not all(math.isfinite(x) for x in value):
-                raise ValueError('实时坐标无效')
-            self.samples.append(value)
-            self.next_read = time.monotonic() + cfg['settle_window_s'] / (cfg['settle_samples'] - 1)
-        if len(self.samples) >= cfg['settle_samples']:
-            a = np.asarray(self.samples)
-            if np.all(np.ptp(a, axis=0) <= cfg['jitter_tol_mm']):
-                return tuple(float(x) for x in a.mean(axis=0))
-            self.round += 1
-            if self.round >= 3:
-                return False
-            self.samples = []
-        if self.call is None and time.monotonic() >= self.next_read:
-            self.start_call('plc', {'operation': 'actual'}, 'tooloffset_actual')
-        return None
 
     def on_start(self):
         """校验会话与请求顺序，准备稳定采样或 130 核对。"""

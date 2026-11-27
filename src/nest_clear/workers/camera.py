@@ -190,6 +190,16 @@ class CameraWorker(AsyncRequestWorker):
         try:
             if self.needs_reopen:
                 raise RuntimeError("上次采图超时，相机需要重开")
+            if payload.get("stage") == "depthcal":
+                device = getattr(self.camera, "_cam", None)
+                if device is not None:
+                    auto = self.exposure_auto_mode()
+                    if auto is not None and auto != enum_value(self.camera._gx.GxAutoEntry.OFF):
+                        raise GuardError("DEPTH-EXPOSURE", "下针深度标定要求关闭自动曝光", where,
+                                         "设置主相机固定曝光后重新发起 160。")
+                    exposure = float(device.ExposureTime.get())
+                    if not np.isfinite(exposure) or exposure <= 0:
+                        raise ValueError("主相机固定曝光回读无效")
             threading.Thread(target=capture, daemon=True).start()
             # gxipy DataStream.get_image() 默认 timeout=1000ms，超时返回 None；
             # Auto_Weaver 的 DahengCamera.snapshot 抛 RuntimeError("Failed to capture image")。
@@ -234,6 +244,8 @@ class CameraWorker(AsyncRequestWorker):
                 if metadata[key] is None:
                     metadata[key] = read(feature)
             return image, {"capture_seq": None if payload.get("stage") == "preview" else next(_sequence), **metadata, "settings": self.settings}
+        except GuardError:
+            raise
         except Exception as exc:
             raise GuardError("CAMERA-CAPTURE", f"采图失败：{exc}", where, "检查相机连接、触发、图像尺寸和标定；超时后重开相机。") from exc
 
