@@ -2,6 +2,7 @@
 
 import logging
 import math
+import time
 
 from autoweaver.motion_policy.nodes.node import Status
 
@@ -88,6 +89,7 @@ class DepthCalibration(DeviceSampling):
                     'coarse_dof': getattr(session, 'coarse_dof', None),
                     'current_fits': list(session.fits),
                     'dof_summary': getattr(session, 'dof_summary', None),
+                    'arrival_summary': getattr(session, 'arrival_summary', None),
                     'session': session.record.directory.name, 'sample': session.last_sample,
                     'abort_requested': session.abort_requested}
             session.last_sample = None
@@ -148,10 +150,52 @@ class DepthCalibration(DeviceSampling):
                                bb.read('task_id'), bb.read('request_func'), mode=bb.read('mode').value)
         self.call = None
         self.samples, self.round, self.next_read = [], 0, 0.
+        self.arrival_started = None
         self.frames = []
         self.capturing = False
         self.publish()
         return Status.RUNNING
+
+    def settle(self, expected=None):
+        """非阻塞滑动窗口等待 PLC 实时坐标稳定且到位；超时后取最后窗口均值继续。"""
+        cfg = self.settle_config
+        now = time.monotonic()
+        if self.arrival_started is None:
+            self.arrival_started = now
+        if self.call:
+            status = self.tick_call()
+            if status == Status.FAILURE:
+                raise ValueError('读取实时坐标失败：' + str(self._blackboard.read('error')))
+            if status == Status.RUNNING:
+                return None
+            value = self._blackboard.read('stable_actual')
+            if len(value) != 3 or not all(math.isfinite(x) for x in value):
+                raise ValueError('实时坐标无效')
+            self.samples.append(tuple(float(x) for x in value))
+            now = time.monotonic()
+            self.next_read = now + cfg['settle_window_s'] / (cfg['settle_samples'] - 1)
+        n = cfg['settle_samples']
+        jitter_tol = cfg['jitter_tol_mm']
+        pos_tol = cfg['position_tolerance_mm']
+        timeout_s = cfg['arrival_timeout_s']
+        timed_out = self.call is None and bool(self.samples) and (now - self.arrival_started >= timeout_s)
+        if len(self.samples) >= n or timed_out:
+            window = self.samples[-n:]
+            ptp = tuple(max(s[i] for s in window) - min(s[i] for s in window) for i in range(3))
+            mean = tuple(sum(s[i] for s in window) / len(window) for i in range(3))
+            stable = len(window) >= n and all(r <= jitter_tol for r in ptp)
+            in_tol = (expected is None) or all(abs(m - e) <= pos_tol for m, e in zip(mean, expected))
+            if (stable and in_tol) or timed_out:
+                return mean, {
+                    'stable': stable,
+                    'ptp': ptp,
+                    'elapsed_s': max(0.0, now - self.arrival_started),
+                    'samples': len(self.samples),
+                    'timed_out': not (stable and in_tol),
+                }
+        if self.call is None and now >= self.next_read:
+            self.start_call('plc', {'operation': 'actual'}, 'stable_actual')
+        return None
 
     def abort(self):
         return self.fail(GuardError('DEPTH-ABORTED', '用户放弃料盘对焦测试', '下针深度标定',
@@ -172,15 +216,15 @@ class DepthCalibration(DeviceSampling):
             if reader(self.ctx).poll({'depthcal_abort'}, defer_unallowed=True):
                 return self.abort()
             if not self.capturing:
-                actual = self.settle()
-                if actual is None:
+                settled = self.settle(session.expected)
+                if settled is None:
                     return Status.RUNNING
-                if actual is False:
-                    raise GuardError('DEPTH-SETTLE', 'PLC 实时坐标未稳定', session.where,
-                                     '检查到位时序、模组振动与 jitter_tol_mm。')
-                session.arrived(actual)
+                actual, arrival_info = settled
+                entry = session.arrived(actual, arrival_info, task_id=bb.read('task_id'))
                 if session.phase == 'overshoot':
                     return self.move_reply(session.after_overshoot())
+                if entry['status'] != 'ok':
+                    self.publish()
                 return self.capture()
             status = self.tick_call()
             if status == Status.RUNNING:

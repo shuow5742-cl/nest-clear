@@ -68,13 +68,25 @@ class FilmCamera(AsyncRequestWorker):
         return frame, {'exposure_us': self.exposure_us}
 
 
+class ScriptedPlcWorker(PlcWorker):
+    def __init__(self, handshake, plc_sim):
+        super().__init__(handshake)
+        self.plc_sim = plc_sim
+        self.on_actual_read = None
+
+    def execute(self, payload):
+        if payload['operation'] == 'actual' and self.on_actual_read is not None:
+            self.plc_sim.set_actual_xyz(self.on_actual_read())
+        return super().execute(payload)
+
+
 @pytest.fixture
 def tcp_rig(tmp_path):
     camera = FilmCamera()
     cfg = load_config('config/nest_clear.yaml')
     settings = {**cfg.depth_calibration, 'camera_z_min_mm': -7.0, 'coarse_range_mm': 1.6,
                 'coarse_step_mm': .20, 'fine_steps_target': 24, 'overshoot_mm': .15,
-                'settle_window_s': .0001, 'frames_per_step': 1,
+                'settle_window_s': .0001, 'arrival_timeout_s': .05, 'frames_per_step': 1,
                 'travel': ((80, 220), (0, 230), (-15, 0))}  # 仿真场景需要更宽的下针深度标定行程
     cfg = replace(cfg, depth_calibration=settings, travel=((80, 220), (0, 230), (-15, 0)),
                   tool_offset={**cfg.tool_offset, 'card_thickness_mm': 0.},
@@ -86,7 +98,8 @@ def tcp_rig(tmp_path):
         io = PLCClient('127.0.0.1', plc.port, 1, plc.contract)
         board = WorldBoard()
         clock = BTClock(board)
-        for worker in (PlcWorker(Handshake(io, plc.contract, events=events)), camera):
+        plc_worker = ScriptedPlcWorker(Handshake(io, plc.contract, events=events), plc)
+        for worker in (plc_worker, camera):
             clock.attach_worker(worker)
         batch = build_batch(board, cfg, [], RequestTracker(0), events, calibration=cal)
         handle = clock.submit(batch)
@@ -114,10 +127,187 @@ def tcp_rig(tmp_path):
 
         try:
             yield SimpleNamespace(exchange=exchange, camera=camera, cfg=cfg, events=events,
-                                  batch=batch, writes=writes, root=tmp_path)
+                                  batch=batch, writes=writes, root=tmp_path, plc=plc, plc_worker=plc_worker)
         finally:
             clock.shutdown()
             io.close()
+
+
+def test_160_arrival_waits_for_old_pose_and_002mm_fine_step(tcp_rig):
+    """测试 1 & 2：旧位置/中途值滑动窗口等待；0.02mm 细扫步移动期间不得提前接受。"""
+    rig = tcp_rig
+    rig.cfg.depth_calibration['arrival_timeout_s'] = 1.0
+
+    # 第 1 次 160 居中完成，拿到下一个预期目标 target1
+    code, target1 = rig.exchange()
+    assert code == 160
+    session = rig.batch.blackboard.read('depth_session')
+
+    # 测试 1：先停在旧位置/中途位置 6 次，再到达 target1 并稳定 6 次
+    old_pose = (target1[0] + 0.8, target1[1] - 0.6, target1[2] + 0.5)
+    mid_pose = (target1[0] + 0.1, target1[1] - 0.1, target1[2] + 0.1)
+    seq1 = [old_pose] * 6 + [mid_pose] * 2 + [target1] * 10
+    idx1 = [0]
+
+    def read_seq1():
+        i = min(idx1[0], len(seq1) - 1)
+        idx1[0] += 1
+        return seq1[i]
+
+    rig.plc_worker.on_actual_read = read_seq1
+    code, target2 = rig.exchange(target1)
+    assert code == 160
+    assert session.actual == pytest.approx(target1, abs=1e-4)
+    assert session.all_arrivals[-1]['status'] == 'ok'
+    assert session.all_arrivals[-1]['samples'] >= 14
+    assert session.arrival_summary['total_anomalies'] == 0
+
+    # 测试 2（回归）：模拟细扫 0.02mm 步距期间，前 8 个采样点每步仅走 0.002mm（窗口极差 0.010 <= 0.02mm），
+    # 但尚未到位（均值偏差 0.011~0.015 > 0.01mm），不得提前接受；到达目标并稳定后才接受。
+    step_target = (target2[0], target2[1], target2[2] - 0.02)
+    z0 = target2[2]
+    moving_window = [(step_target[0], step_target[1], z0 - 0.002 * k) for k in range(8)]
+    settled_window = [step_target] * 10
+    seq2 = moving_window + settled_window
+    idx2 = [0]
+
+    def read_seq2():
+        i = min(idx2[0], len(seq2) - 1)
+        idx2[0] += 1
+        return seq2[i]
+
+    rig.plc_worker.on_actual_read = read_seq2
+    # 手动把 expected 设成细扫下行 0.02mm 目标，验证不会在移动期间提前接受
+    session.expected = step_target
+    code, _ = rig.exchange(step_target)
+    assert code == 160
+    last = session.all_arrivals[-1]
+    assert last['status'] == 'ok'
+    assert last['samples'] >= 9
+    assert abs(last['actual'][2] - step_target[2]) <= 0.01
+    assert session.arrival_summary['total_anomalies'] == 0
+    rig.plc_worker.on_actual_read = None
+
+
+def test_160_arrival_offset_003mm_records_and_completes_161(tcp_rig):
+    """测试 3：稳定但偏 +0.03mm → 超时后继续并最终回 161；arrivals.csv / 事件 / arrival_summary 均记录。"""
+    from nest_clear.ui.model import classify_event
+
+    rig = tcp_rig
+    rig.cfg.depth_calibration['arrival_timeout_s'] = 0.01
+    target_label = rig.camera.primary[0]
+    target = None
+    session = None
+    injected = [False]
+
+    for _ in range(1200):
+        rig.plc_worker.on_actual_read = None
+        actual_to_send = target
+        if session is not None and session.label == target_label and session.phase == 'peak' and target is not None and not injected[0]:
+            # 在首点峰位留档时制造稳定但 Z 偏 +0.03 mm 的到位超差
+            biased = (target[0], target[1], target[2] + 0.03)
+            actual_to_send = biased
+            injected[0] = True
+            rig.plc_worker.on_actual_read = lambda b=biased: b
+        code, target = rig.exchange(actual_to_send)
+        if code == 161:
+            break
+        assert code == 160
+        session = rig.batch.blackboard.read('depth_session')
+    else:
+        pytest.fail('未完成多点会话')
+
+    assert injected[0]
+    assert session.feasibility['met']
+    session_dir = session.record.directory
+
+    # 1) arrivals.csv 校验
+    with (session_dir / 'arrivals.csv').open(encoding='utf-8', newline='') as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == len(session.all_arrivals) > 0
+    warn_rows = [r for r in rows if r['label'] == target_label and r['phase'] == 'peak']
+    assert len(warn_rows) == 1
+    wrow = warn_rows[0]
+    assert wrow['status'] == '超差'
+    assert wrow['max_delta_axis'] == 'Z'
+    assert float(wrow['max_abs_delta_mm']) == pytest.approx(0.03, abs=1e-4)
+
+    # 2) events.jsonl 校验 depthcal_arrival_warning
+    event_rows = [
+        json.loads(line)
+        for line in (rig.events.run_directory / 'events.jsonl').read_text(encoding='utf-8').splitlines()
+        if line.strip()
+    ]
+    warn_events = [e for e in event_rows if e.get('event') == 'depthcal_arrival_warning']
+    assert len(warn_events) >= 1
+    we = next(e for e in warn_events if e.get('label') == target_label and e.get('phase') == 'peak')
+    assert we['type'] == '超差'
+    assert we['delta'][2] == pytest.approx(0.03, abs=1e-4)
+    assert classify_event(we)['color'] == 'yellow'
+
+    # 3) fits.json（results）逐点 arrival 与顶层 arrival_summary 校验
+    fits_doc = json.loads((session_dir / 'fits.json').read_text(encoding='utf-8'))
+    target_pt = next(p for p in fits_doc['points'] if p['label'] == target_label)
+    assert target_pt['arrival']['anomalies'] >= 1
+    assert 'peak' in target_pt['arrival']['phases']
+    assert target_pt['arrival']['max_delta_axis'] == 'Z'
+    assert target_pt['arrival']['max_delta_mm'] == pytest.approx(0.03, abs=1e-4)
+
+    summary = fits_doc['arrival_summary']
+    assert target_label in summary['anomaly_points']
+    assert summary['total_anomalies'] >= 1
+    assert summary['avg_elapsed_s'] >= 0 and summary['max_elapsed_s'] >= 0
+
+
+def test_160_arrival_always_jittering_continues_as_unstable(tcp_rig):
+    """测试 4：一直抖动不稳 → 超时后继续，记“未稳定”/“超差+未稳定”，不回 999。"""
+    rig = tcp_rig
+    rig.cfg.depth_calibration['arrival_timeout_s'] = 0.015
+
+    # 4a) 首次 160（尚无 expected）一直抖动 ±0.03mm -> 不回 999，记“未稳定”
+    base0 = rig.camera.actual
+    tick0 = [0]
+
+    def jitter0():
+        tick0[0] += 1
+        d = 0.03 if tick0[0] % 2 else -0.03
+        return (base0[0], base0[1], base0[2] + d)
+
+    rig.plc_worker.on_actual_read = jitter0
+    code, target1 = rig.exchange()
+    assert code == 160
+    session = rig.batch.blackboard.read('depth_session')
+    assert session.all_arrivals[0]['status'] == '未稳定'
+    assert session.all_arrivals[0]['unstable'] is True
+
+    # 4b) 有 expected 后一直围绕目标抖动 ±0.03mm -> 记“未稳定”（若偏 0.03mm+抖动则“超差+未稳定”），仍回 160
+    tick1 = [0]
+
+    def jitter_around_target():
+        tick1[0] += 1
+        d = 0.03 if tick1[0] % 2 else -0.03
+        return (target1[0], target1[1], target1[2] + d)
+
+    rig.plc_worker.on_actual_read = jitter_around_target
+    code, target2 = rig.exchange(target1)
+    assert code == 160
+    assert session.all_arrivals[1]['status'] == '未稳定'
+
+    tick2 = [0]
+
+    def jitter_and_offset():
+        tick2[0] += 1
+        d = 0.03 if tick2[0] % 2 else -0.03
+        return (target2[0], target2[1], target2[2] + 0.03 + d)
+
+    rig.plc_worker.on_actual_read = jitter_and_offset
+    code, _ = rig.exchange(target2)
+    assert code == 160
+    assert session.all_arrivals[2]['status'] == '超差+未稳定'
+    assert session.arrival_summary['total_anomalies'] == 3
+    assert session.arrival_summary['unstable_count'] == 3
+    assert session.arrival_summary['over_tolerance_count'] == 1
+    rig.plc_worker.on_actual_read = None
 
 
 @pytest.mark.parametrize('anomaly', [False, True])
@@ -198,7 +388,7 @@ def test_160_multisite(tcp_rig, anomaly):
     ('missing_limit', 'DEPTH-Z-MIN'), ('blank', 'DEPTH-TARGET'), ('boundary', 'DEPTH-PEAK-BOUNDARY'),
     ('below_limit', 'DEPTH-Z-LIMIT'), ('wrong_request', 'DEPTH-MODE'),
     ('center_limit', 'DEPTH-CENTER'), ('exposure_change', 'DEPTH-EXPOSURE'),
-    ('abort', 'DEPTH-ABORTED'), ('arrival_mismatch', 'DEPTH-ARRIVAL'),
+    ('abort', 'DEPTH-ABORTED'),
     (170, 'DEPTH-UNIMPLEMENTED'), (171, 'DEPTH-UNIMPLEMENTED'),
     (180, 'DEPTH-UNIMPLEMENTED'), (181, 'DEPTH-UNIMPLEMENTED'),
     (190, 'DEPTH-UNIMPLEMENTED'), (191, 'DEPTH-UNIMPLEMENTED'),
@@ -212,15 +402,13 @@ def test_160_error(tcp_rig, case, reason):
         rig.camera.blank = True
     elif case == 'center_limit':
         rig.camera.offcenter = True
-    elif case in ('below_limit', 'wrong_request', 'arrival_mismatch', 'abort', 'exposure_change'):
+    elif case in ('below_limit', 'wrong_request', 'abort', 'exposure_change'):
         code, target = rig.exchange()
         assert code == 160
         if case == 'below_limit':
             kwargs = {'xyz': (*target[:2], rig.cfg.depth_calibration['camera_z_min_mm'] - 0.2)}
         elif case == 'wrong_request':
             kwargs = {'func': 100, 'xyz': target}
-        elif case == 'arrival_mismatch':
-            kwargs = {'xyz': (target[0] + 0.5, target[1], target[2])}
         elif case == 'abort':
             send(rig.root, 'depthcal_abort')
             kwargs = {'xyz': target}

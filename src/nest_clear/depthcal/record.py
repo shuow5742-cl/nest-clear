@@ -24,6 +24,47 @@ class DepthRecord:
         self.live.unlink(missing_ok=True)
         with (self.directory / 'curves.csv').open('w', encoding='utf-8', newline='') as stream:
             csv.writer(stream).writerow(('label', 'pass', 'direction', 'z_cmd', 'z_actual', *METRICS))
+        with (self.directory / 'arrivals.csv').open('w', encoding='utf-8', newline='') as stream:
+            csv.writer(stream).writerow((
+                'label', 'phase', 'seq',
+                'expected_x', 'expected_y', 'expected_z',
+                'actual_x', 'actual_y', 'actual_z',
+                'delta_x', 'delta_y', 'delta_z',
+                'max_abs_delta_mm', 'max_delta_axis',
+                'ptp_x', 'ptp_y', 'ptp_z',
+                'status', 'elapsed_s', 'samples',
+            ))
+
+    def arrival(self, entry):
+        """追加记录每次 160 到位采样结果；目录未建立时跳过。"""
+        if not self.directory.exists():
+            return
+        path = self.directory / 'arrivals.csv'
+        if not path.exists():
+            with path.open('w', encoding='utf-8', newline='') as stream:
+                csv.writer(stream).writerow((
+                    'label', 'phase', 'seq',
+                    'expected_x', 'expected_y', 'expected_z',
+                    'actual_x', 'actual_y', 'actual_z',
+                    'delta_x', 'delta_y', 'delta_z',
+                    'max_abs_delta_mm', 'max_delta_axis',
+                    'ptp_x', 'ptp_y', 'ptp_z',
+                    'status', 'elapsed_s', 'samples',
+                ))
+        expected = entry['expected'] if entry.get('expected') is not None else ('', '', '')
+        actual = entry['actual']
+        delta = entry['delta'] if entry.get('delta') is not None else ('', '', '')
+        ptp = entry['ptp']
+        max_abs = '' if entry.get('max_abs_delta_mm') is None else entry['max_abs_delta_mm']
+        max_axis = '' if entry.get('max_delta_axis') is None else entry['max_delta_axis']
+        with path.open('a', encoding='utf-8', newline='') as stream:
+            csv.writer(stream).writerow((
+                entry['label'], entry['phase'], entry['seq'],
+                *expected, *actual, *delta,
+                max_abs, max_axis,
+                *ptp,
+                entry['status'], entry['elapsed_s'], entry['samples'],
+            ))
 
     def image(self, name, frame):
         path = self.directory / f'{name}.png'
@@ -65,7 +106,8 @@ class DepthRecord:
         self.write('fits.json', {'metric': session.cfg['metric'], 'method': session.cfg['peak_method'],
                                  'dof_ratio': session.cfg['dof_ratio'],
                                  'points': session.results, 'feasibility': session.feasibility,
-                                 'dof_summary': getattr(session, 'dof_summary', None)})
+                                 'dof_summary': getattr(session, 'dof_summary', None),
+                                 'arrival_summary': getattr(session, 'arrival_summary', None)})
         self.write('plane.json', {'initial': session.initial_plane, 'final': session.plane,
                                   'tolerance_mm': session.cfg['plane_tol_mm']})
 
@@ -82,6 +124,7 @@ class DepthRecord:
                 'exposure_us': getattr(session, 'exposure_us', None), 'plan': session.plan,
                 'fine_plans': fine_plans,
                 'dof_summary': getattr(session, 'dof_summary', None),
+                'arrival_summary': getattr(session, 'arrival_summary', None),
                 'requests': session.requests, 'replies': session.replies, 'samples': len(session.samples),
             })
         except (OSError, ValueError) as exc:

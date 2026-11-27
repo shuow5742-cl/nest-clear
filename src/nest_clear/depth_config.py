@@ -34,5 +34,7 @@ DEFAULTS = {
     'settle_window_s': .5,
     'jitter_tol_mm': .02,
     'position_tolerance_mm': .01,
+    # 到位等待超时（秒），超时后取最后窗口均值继续并记录
+    'arrival_timeout_s': 2.0,
 }
 METRICS = ('tenengrad', 'laplacian', 'brenner')

@@ -333,8 +333,9 @@ def test_main_preview_controls_use_mode_and_hosted_focus_state():
 def test_depthcal_model_helpers_and_status(tmp_path):
     from nest_clear.ui.demo import depthcal_demo
     from nest_clear.ui.model import (
-        depthcal_curve_dof, depthcal_dof_summary_text, depthcal_feasibility_text,
-        depthcal_fine_plan_text, depthcal_latest_dof_text, depthcal_stage_info,
+        classify_event, depthcal_arrival_summary_text, depthcal_curve_dof,
+        depthcal_dof_summary_text, depthcal_feasibility_text, depthcal_fine_plan_text,
+        depthcal_latest_dof_text, depthcal_point_arrival_text, depthcal_stage_info,
         depthcal_subplot_layout,
     )
     from nest_clear.ui.status import MainStatus
@@ -342,6 +343,40 @@ def test_depthcal_model_helpers_and_status(tmp_path):
     assert depthcal_stage_info({'phase': 'done'})[0] == '阶段：完成（已回 161）'
     assert depthcal_stage_info({'phase': 'failed'})[0] == '阶段：失败（已回 999）'
     assert depthcal_stage_info({'phase': 'fine', 'message': '细扫 第 2/3 次'})[0] == '阶段：细扫 第 2/3 次'
+    assert '到位异常 3 次' in depthcal_stage_info({
+        'phase': 'fine', 'message': '细扫 第 2/3 次',
+        'arrival_summary': {'total_arrivals': 100, 'total_anomalies': 3},
+    })[0]
+    assert '到位异常 2/50 次' in depthcal_stage_info({
+        'phase': 'failed',
+        'arrival_summary': {'total_arrivals': 50, 'total_anomalies': 2},
+    })[0]
+
+    # 到位列文字、汇总行文字及 depthcal_arrival_warning 事件分类
+    assert depthcal_point_arrival_text({'arrival': {'total': 126, 'anomalies': 0}}) == ('—', False)
+    assert depthcal_point_arrival_text({
+        'arrival': {'total': 126, 'anomalies': 3, 'max_delta_axis': 'Z', 'max_delta_mm': 0.023}
+    }) == ('3/126 次 · 最大 Z +0.023', True)
+    warn_sum, warn_bg, _ = depthcal_arrival_summary_text({
+        'phase': 'done',
+        'arrival_summary': {
+            'total_arrivals': 775, 'total_anomalies': 4, 'anomaly_points': ['T02', 'T26'],
+            'max_delta_axis': 'Z', 'max_delta_mm': 0.023, 'position_tolerance_mm': 0.01, 'avg_elapsed_s': 0.52,
+        },
+    })
+    assert warn_sum == '到位超差点：T02、T26（共 4 次，最大 Z +0.023 mm，详见 arrivals.csv）'
+    assert warn_bg == '#fef3c7'
+    ok_sum, ok_bg, _ = depthcal_arrival_summary_text({
+        'phase': 'done',
+        'arrival_summary': {
+            'total_arrivals': 630, 'total_anomalies': 0, 'anomaly_points': [],
+            'position_tolerance_mm': 0.01, 'avg_elapsed_s': 0.51,
+        },
+    })
+    assert ok_sum == '到位：全部在 ±0.01 mm 内（平均等待 0.51 s）'
+    assert ok_bg == '#ecfdf3'
+    ev = classify_event({'event': 'depthcal_arrival_warning', 'label': 'T02', 'phase': 'fine1', 'what': 'T02 fine1 到位超差'})
+    assert ev['color'] == 'yellow' and ev['category'] == '标定'
 
     ok_text, ok_bg, _ = depthcal_feasibility_text({'feasibility': {'max_range': 0.004, 'max_std': 0.002, 'threshold': 0.02, 'met': True}})
     assert '满足下针深度标定误差预算' in ok_text and ok_bg == '#ecfdf3'

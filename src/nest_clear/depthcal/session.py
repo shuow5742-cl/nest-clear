@@ -40,6 +40,8 @@ class Session:
         self.point_index = 0
         self.plane = self.initial_plane = self.feasibility = self.dof_summary = None
         self.actual = None
+        self.all_arrivals = []
+        self.arrival_summary = self._build_arrival_summary()
         self.reset_point()
 
     def reset_point(self):
@@ -54,6 +56,8 @@ class Session:
         self.coarse_fit = None
         self.coarse_dof = None
         self.fine_plan = None
+        self.result = None
+        self.point_arrivals = []
 
     @property
     def frame_count(self):
@@ -109,14 +113,154 @@ class Session:
         self.guard(self.expected)
         return self.expected
 
-    def arrived(self, actual):
+    def _arrival_phase(self):
+        if self.phase == 'fine':
+            return f'fine{self.repeat}'
+        return self.phase
+
+    @staticmethod
+    def _build_point_arrival(arrivals):
+        anomalies = [a for a in arrivals if a['status'] != 'ok']
+        with_delta = [a for a in arrivals if a['max_abs_delta_mm'] is not None]
+        if with_delta:
+            worst = max(with_delta, key=lambda a: a['max_abs_delta_mm'])
+            max_abs = worst['max_abs_delta_mm']
+            max_signed = worst['max_delta_mm']
+            max_axis = worst['max_delta_axis']
+        else:
+            max_abs = max_signed = max_axis = None
+        elapsed_list = [a['elapsed_s'] for a in arrivals]
+        return {
+            'total': len(arrivals),
+            'anomalies': len(anomalies),
+            'over_tolerance': sum(1 for a in anomalies if a['over_tolerance']),
+            'unstable': sum(1 for a in anomalies if a['unstable']),
+            'max_abs_delta_mm': max_abs,
+            'max_delta_mm': max_signed,
+            'max_delta_axis': max_axis,
+            'phases': list(dict.fromkeys(a['phase'] for a in anomalies)),
+            'avg_elapsed_s': (sum(elapsed_list) / len(elapsed_list)) if elapsed_list else None,
+            'max_elapsed_s': max(elapsed_list) if elapsed_list else None,
+        }
+
+    def _build_arrival_summary(self):
+        anomalies = [a for a in self.all_arrivals if a['status'] != 'ok']
+        with_delta = [a for a in self.all_arrivals if a['max_abs_delta_mm'] is not None]
+        if with_delta:
+            worst = max(with_delta, key=lambda a: a['max_abs_delta_mm'])
+            max_abs = worst['max_abs_delta_mm']
+            max_signed = worst['max_delta_mm']
+            max_axis = worst['max_delta_axis']
+            max_label = worst['point_label'] or worst['label']
+        else:
+            max_abs = max_signed = max_axis = max_label = None
+        elapsed_list = [a['elapsed_s'] for a in self.all_arrivals]
+        return {
+            'total_arrivals': len(self.all_arrivals),
+            'total_anomalies': len(anomalies),
+            'over_tolerance_count': sum(1 for a in anomalies if a['over_tolerance']),
+            'unstable_count': sum(1 for a in anomalies if a['unstable']),
+            'anomaly_points': list(dict.fromkeys((a['point_label'] or a['label']) for a in anomalies)),
+            'max_abs_delta_mm': max_abs,
+            'max_delta_mm': max_signed,
+            'max_delta_axis': max_axis,
+            'max_delta_label': max_label,
+            'position_tolerance_mm': float(self.cfg['position_tolerance_mm']),
+            'avg_elapsed_s': (sum(elapsed_list) / len(elapsed_list)) if elapsed_list else None,
+            'max_elapsed_s': max(elapsed_list) if elapsed_list else None,
+        }
+
+    def arrived(self, actual, arrival_info=None, *, task_id=None):
         self.guard(actual)
-        if self.expected and any(abs(a - b) > self.cfg['position_tolerance_mm']
-                                 for a, b in zip(actual, self.expected)):
-            raise GuardError('DEPTH-ARRIVAL',
-                             f'相机到位超差，目标 {format_pose(self.expected)}，实际 {format_pose(actual)}',
-                             self.where, '检查 PLC 到位时序和 position_tolerance_mm。')
-        self.actual = actual
+        actual_t = tuple(float(x) for x in actual)
+        expected = self.expected
+        if expected is not None:
+            delta = tuple(float(a - e) for a, e in zip(actual_t, expected))
+            pos_tol = self.cfg['position_tolerance_mm']
+            over = any(abs(d) > pos_tol for d in delta)
+            max_idx = max(range(3), key=lambda i: abs(delta[i]))
+            max_delta_axis = 'XYZ'[max_idx]
+            max_delta_mm = delta[max_idx]
+            max_abs_delta_mm = abs(max_delta_mm)
+        else:
+            delta = None
+            over = False
+            max_delta_axis = None
+            max_delta_mm = None
+            max_abs_delta_mm = None
+
+        stable = True if arrival_info is None else bool(arrival_info.get('stable', True))
+        ptp = (0.0, 0.0, 0.0) if arrival_info is None else tuple(float(x) for x in arrival_info.get('ptp', (0.0, 0.0, 0.0)))
+        elapsed_s = 0.0 if arrival_info is None else float(arrival_info.get('elapsed_s', 0.0))
+        sample_count = 0 if arrival_info is None else int(arrival_info.get('samples', 0))
+
+        if over and not stable:
+            status = '超差+未稳定'
+        elif over:
+            status = '超差'
+        elif not stable:
+            status = '未稳定'
+        else:
+            status = 'ok'
+
+        phase = self._arrival_phase()
+        seq = len(self.all_arrivals) + 1
+        label = self.label or '初始靶点'
+        entry = {
+            'seq': seq,
+            'label': label,
+            'point_label': self.label,
+            'phase': phase,
+            'expected': expected,
+            'actual': actual_t,
+            'delta': delta,
+            'max_abs_delta_mm': max_abs_delta_mm,
+            'max_delta_mm': max_delta_mm,
+            'max_delta_axis': max_delta_axis,
+            'ptp': ptp,
+            'status': status,
+            'over_tolerance': over,
+            'unstable': not stable,
+            'elapsed_s': elapsed_s,
+            'samples': sample_count,
+        }
+        self.all_arrivals.append(entry)
+        self.point_arrivals.append(entry)
+        self.record.arrival(entry)
+        if status != 'ok':
+            delta_text = ('—' if delta is None else
+                          f'({delta[0]:+.4f}, {delta[1]:+.4f}, {delta[2]:+.4f}) mm')
+            emit_fields = {
+                'label': label,
+                'phase': phase,
+                'seq': seq,
+                'expected': list(expected) if expected is not None else None,
+                'actual': list(actual_t),
+                'delta': list(delta) if delta is not None else None,
+                'max_abs_delta_mm': max_abs_delta_mm,
+                'max_delta_mm': max_delta_mm,
+                'max_delta_axis': max_delta_axis,
+                'ptp': list(ptp),
+                'type': status,
+                'status': status,
+                'elapsed_s': elapsed_s,
+                'samples': sample_count,
+                'what': f'{label} {phase} 到位{status}（偏差 {delta_text}）',
+                'where': self.where,
+                'hint': '查看 arrivals.csv 调整 settle_window_s / jitter_tol_mm / arrival_timeout_s 或检查 PLC 到位特性。',
+                'reason': f'{label} {phase} 到位{status}：期望 {expected}，实际 {actual_t}，偏差 {delta}，极差 {ptp}',
+            }
+            if task_id is not None:
+                emit_fields['task_id'] = task_id
+            elif self.record.events.request_task is not None:
+                emit_fields['task_id'] = self.record.events.request_task
+            self.record.events.emit('depthcal_arrival_warning', **emit_fields)
+
+        self.arrival_summary = self._build_arrival_summary()
+        if self.result is not None and self.result.get('label') == self.label:
+            self.result['arrival'] = self._build_point_arrival(self.point_arrivals)
+        self.actual = actual_t
+        return entry
 
     def advance(self, frames):
         if self.phase == 'center':
@@ -135,6 +279,10 @@ class Session:
         target = min(targets, key=lambda item: math.dist(item.ring_uv, uv))
         self.identify(target)
         self.label = target.label
+        for item in self.point_arrivals:
+            if item['point_label'] is None:
+                item['point_label'] = self.label
+        self.arrival_summary = self._build_arrival_summary()
         self.point_xy = pixel_to_module(*target.ring_uv, self.actual, self.cal)[:2]
         center_xy = pixel_to_module(*uv, self.actual, self.cal)[:2]
         x, y, z = self.actual
@@ -280,6 +428,7 @@ class Session:
             'dof_covered_count': len(covered_dofs),
             'dof_uncovered': len(uncovered_dofs),
             'dof_uncovered_repeats': uncovered_dofs,
+            'arrival': self._build_point_arrival(self.point_arrivals),
         }
         self.results.append(self.result)
         self.phase = 'peak'

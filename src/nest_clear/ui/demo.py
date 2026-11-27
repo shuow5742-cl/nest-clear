@@ -290,6 +290,24 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             'insufficient_points': False,
         }
 
+    point_arrivals = {
+        'T02': {'total': 155, 'anomalies': 3, 'over_tolerance': 3, 'unstable': 0,
+                'max_abs_delta_mm': 0.023, 'max_delta_mm': 0.023, 'max_delta_axis': 'Z',
+                'phases': ['fine1', 'fine2'], 'avg_elapsed_s': 0.54, 'max_elapsed_s': 2.00},
+        'T05': {'total': 155, 'anomalies': 0, 'over_tolerance': 0, 'unstable': 0,
+                'max_abs_delta_mm': 0.004, 'max_delta_mm': 0.004, 'max_delta_axis': 'Z',
+                'phases': [], 'avg_elapsed_s': 0.51, 'max_elapsed_s': 0.55},
+        'T29': {'total': 155, 'anomalies': 0, 'over_tolerance': 0, 'unstable': 0,
+                'max_abs_delta_mm': 0.003, 'max_delta_mm': -0.003, 'max_delta_axis': 'Z',
+                'phases': [], 'avg_elapsed_s': 0.51, 'max_elapsed_s': 0.54},
+        'T26': {'total': 155, 'anomalies': 1, 'over_tolerance': 1, 'unstable': 0,
+                'max_abs_delta_mm': 0.018, 'max_delta_mm': -0.018, 'max_delta_axis': 'Z',
+                'phases': ['fine3'], 'avg_elapsed_s': 0.52, 'max_elapsed_s': 2.00},
+        'T12': {'total': 155, 'anomalies': 0, 'over_tolerance': 0, 'unstable': 0,
+                'max_abs_delta_mm': 0.004, 'max_delta_mm': 0.004, 'max_delta_axis': 'X',
+                'phases': [], 'avg_elapsed_s': 0.51, 'max_elapsed_s': 0.54},
+    }
+
     def make_result(lbl: str):
         offsets = (-0.0018, 0.0012, 0.0005)
         delta_w = point_fwhm_delta.get(lbl, 0.0)
@@ -305,7 +323,8 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
                 'z_peak': mean_pk, 'range': rng, 'std': math.sqrt(var),
                 'dof_mm': sum(dofs) / len(dofs) if dofs else None,
                 'dof_range_mm': (max(dofs) - min(dofs)) if len(dofs) >= 2 else None,
-                'dof_covered_count': len(dofs), 'dof_uncovered': 0}
+                'dof_covered_count': len(dofs), 'dof_uncovered': 0,
+                'arrival': dict(point_arrivals[lbl])}
 
     curves = {}
     results = []
@@ -323,6 +342,12 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             'plane': None, 'initial_plane': None, 'results': [], 'feasibility': None,
             'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
             'fine_plan': None, 'coarse_fit': None, 'current_fits': [], 'dof_summary': None,
+            'arrival_summary': {
+                'total_arrivals': 21, 'total_anomalies': 0, 'over_tolerance_count': 0, 'unstable_count': 0,
+                'anomaly_points': [], 'max_abs_delta_mm': 0.004, 'max_delta_mm': 0.004,
+                'max_delta_axis': 'Z', 'max_delta_label': 'T02', 'position_tolerance_mm': 0.01,
+                'avg_elapsed_s': 0.51, 'max_elapsed_s': 0.54,
+            },
             'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
         }, z_cur, lbl)
 
@@ -352,6 +377,12 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
             'fine_plan': make_fine_plan(), 'coarse_fit': make_coarse_fit(lbl),
             'current_fits': [t29_fit1], 'dof_summary': None,
+            'arrival_summary': {
+                'total_arrivals': 405, 'total_anomalies': 3, 'over_tolerance_count': 3, 'unstable_count': 0,
+                'anomaly_points': ['T02'], 'max_abs_delta_mm': 0.023, 'max_delta_mm': 0.023,
+                'max_delta_axis': 'Z', 'max_delta_label': 'T02', 'position_tolerance_mm': 0.01,
+                'avg_elapsed_s': 0.52, 'max_elapsed_s': 2.00,
+            },
             'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
         }, z_cur, lbl)
 
@@ -392,6 +423,12 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
             'fine_plan': make_fine_plan(), 'coarse_fit': results[-1]['coarse_fit'],
             'current_fits': results[-1]['fits'], 'dof_summary': dof_sum,
+            'arrival_summary': {
+                'total_arrivals': 775, 'total_anomalies': 4, 'over_tolerance_count': 4, 'unstable_count': 0,
+                'anomaly_points': ['T02', 'T26'], 'max_abs_delta_mm': 0.023, 'max_delta_mm': 0.023,
+                'max_delta_axis': 'Z', 'max_delta_label': 'T02', 'position_tolerance_mm': 0.01,
+                'avg_elapsed_s': 0.52, 'max_elapsed_s': 2.00,
+            },
             'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
         }, z_cur, 'T12')
 
@@ -417,6 +454,12 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         'plane': None, 'initial_plane': None, 'results': results, 'feasibility': None,
         'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
         'fine_plan': None, 'coarse_fit': None, 'current_fits': [], 'dof_summary': None,
+        'arrival_summary': {
+            'total_arrivals': 176, 'total_anomalies': 3, 'over_tolerance_count': 3, 'unstable_count': 0,
+            'anomaly_points': ['T02'], 'max_abs_delta_mm': 0.023, 'max_delta_mm': 0.023,
+            'max_delta_axis': 'Z', 'max_delta_label': 'T02', 'position_tolerance_mm': 0.01,
+            'avg_elapsed_s': 0.53, 'max_elapsed_s': 2.00,
+        },
         'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
     }, z_cur, 'T05')
 

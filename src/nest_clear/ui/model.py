@@ -326,7 +326,7 @@ def status_indicators(s, m, now=None, supervisor_age=None):
         ready = ('gray', ready_text)
     return {'父程序': parent, '主程序': main_indicator, 'PLC 连接': (plc_color, plc_text), '心跳': (hb_color, hb_text), '40932 就绪': ready}
 
-EVENTS = {'arrival_warning','tooltip_settings_warning','tooltip_preview_error','tooltip_exposure_failed','error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
+EVENTS = {'arrival_warning','depthcal_arrival_warning','tooltip_settings_warning','tooltip_preview_error','tooltip_exposure_failed','error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
 def classify_event(row):
     event = str(row.get('event','')).lower()
     text = ' '.join(str(row.get(k,'')) for k in ('reason_code','code','reason','what','operation','event')).lower()
@@ -335,8 +335,8 @@ def classify_event(row):
     if reply is None and event == 'supervisor_reply_999': reply = 999
     if event not in EVENTS and reply not in (999, 131, 99, 82) and not any(x in text for x in ('readback','回读不一致','采图失败','capture_failed')):
         return None
-    category = '父程序' if row.get('process') == 'supervisor' else '标定' if any(x in text for x in ('camcal','tooltip','tooloffset','pickacc','calib')) or reply in (82, 99, 131, 152) else '通信' if any(x in text for x in ('plc','heartbeat','readback','回读')) else '相机' if any(x in text for x in ('camera','capture','image','采图')) else '配置' if 'config' in text else '算法'
-    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('arrival_warning','warning','tooltip_settings_warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
+    category = '父程序' if row.get('process') == 'supervisor' else '标定' if any(x in text for x in ('camcal','tooltip','tooloffset','pickacc','calib','depthcal')) or reply in (82, 99, 131, 152) else '通信' if any(x in text for x in ('plc','heartbeat','readback','回读')) else '相机' if any(x in text for x in ('camera','capture','image','采图')) else '配置' if 'config' in text else '算法'
+    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('arrival_warning','depthcal_arrival_warning','warning','tooltip_settings_warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
     reason = str(row.get('reason',row.get('message',event)))
     fields = {}
     for line in reason.splitlines():
@@ -504,14 +504,20 @@ def depthcal_stage_info(data):
     """格式化下针深度标定阶段徽标文本与配色。"""
     phase = data.get('phase') or 'idle'
     message = data.get('message') or ''
+    summary = data.get('arrival_summary')
+    has_summary = isinstance(summary, dict) and summary.get('total_anomalies') is not None
+    anom = int(summary.get('total_anomalies') or 0) if has_summary else 0
+    total_arr = int(summary.get('total_arrivals') or 0) if has_summary else 0
     if phase == 'idle':
         return '阶段：空闲（等待 PLC 160）', '#eef2f6', '#1d2939'
     if phase == 'done':
         return '阶段：完成（已回 161）', '#dcfce7', '#166534'
     if phase == 'failed':
-        return '阶段：失败（已回 999）', '#fee2e2', '#b91c1c'
+        suffix = f' · 到位异常 {anom}/{total_arr} 次' if (has_summary and total_arr > 0) else ''
+        return f'阶段：失败（已回 999）{suffix}', '#fee2e2', '#b91c1c'
     if phase == 'plane':
-        return '阶段：平面判定', '#e0f2fe', '#0369a1'
+        suffix = f' · 到位异常 {anom} 次' if has_summary else ''
+        return f'阶段：平面判定{suffix}', '#e0f2fe', '#0369a1'
     if phase in ('center', 'coarse', 'overshoot', 'fine', 'peak'):
         detail = message or {
             'center': '居中',
@@ -520,8 +526,72 @@ def depthcal_stage_info(data):
             'fine': '细扫',
             'peak': '峰位采图',
         }[phase]
-        return f'阶段：{detail}', '#dbeafe', '#1d4ed8'
+        suffix = f' · 到位异常 {anom} 次' if has_summary else ''
+        return f'阶段：{detail}{suffix}', '#dbeafe', '#1d4ed8'
     return f'阶段：{phase}', '#eef2f6', '#1d2939'
+
+
+def depthcal_point_arrival_text(item):
+    """格式化单点结果的“到位超差”列文本及是否异常标记。"""
+    arrival = item.get('arrival') if isinstance(item, dict) else None
+    if not isinstance(arrival, dict):
+        return '—', False
+    anomalies = int(arrival.get('anomalies') or 0)
+    total = int(arrival.get('total') or 0)
+    if anomalies <= 0:
+        return '—', False
+    max_delta = arrival.get('max_delta_mm')
+    max_axis = arrival.get('max_delta_axis')
+    if isinstance(max_delta, (int, float)) and max_axis:
+        detail = f'最大 {max_axis} {float(max_delta):+.3f}'
+    else:
+        detail = '未稳定'
+    return f'{anomalies}/{total} 次 · {detail}', True
+
+
+def depthcal_arrival_summary_text(data):
+    """格式化下针深度标定表上方的到位汇总文本与配色。"""
+    summary = data.get('arrival_summary')
+    results = data.get('results') or []
+    phase = data.get('phase') or 'idle'
+    if not isinstance(summary, dict) or not summary.get('total_arrivals'):
+        pts_arr = [(r.get('label'), r.get('arrival')) for r in results if isinstance(r.get('arrival'), dict)]
+        if not pts_arr:
+            return '到位：等待测点到位数据（详见 arrivals.csv）', '#f8fafc', '#667085'
+        total_arr = sum(int(a.get('total') or 0) for _, a in pts_arr)
+        total_anom = sum(int(a.get('anomalies') or 0) for _, a in pts_arr)
+        anom_pts = [lbl for lbl, a in pts_arr if int(a.get('anomalies') or 0) > 0 and lbl]
+        with_d = [a for _, a in pts_arr if isinstance(a.get('max_abs_delta_mm'), (int, float))]
+        worst = max(with_d, key=lambda a: a['max_abs_delta_mm']) if with_d else None
+        el_vals = [float(a['avg_elapsed_s']) for _, a in pts_arr if isinstance(a.get('avg_elapsed_s'), (int, float))]
+        summary = {
+            'total_arrivals': total_arr,
+            'total_anomalies': total_anom,
+            'anomaly_points': anom_pts,
+            'max_delta_mm': worst.get('max_delta_mm') if worst else None,
+            'max_delta_axis': worst.get('max_delta_axis') if worst else None,
+            'position_tolerance_mm': 0.01,
+            'avg_elapsed_s': (sum(el_vals) / len(el_vals)) if el_vals else None,
+        }
+
+    anomalies = int(summary.get('total_anomalies') or 0)
+    tol = float(summary.get('position_tolerance_mm') or 0.01)
+    avg_el = summary.get('avg_elapsed_s')
+    avg_txt = f'{float(avg_el):.2f}' if isinstance(avg_el, (int, float)) else '0.00'
+    if anomalies > 0:
+        pts = summary.get('anomaly_points') or []
+        pts_txt = '、'.join(pts) if pts else '当前测点'
+        max_delta = summary.get('max_delta_mm')
+        max_axis = summary.get('max_delta_axis')
+        if isinstance(max_delta, (int, float)) and max_axis:
+            detail = f'，最大 {max_axis} {float(max_delta):+.3f} mm'
+        else:
+            detail = '，存在未稳定'
+        return f'到位超差点：{pts_txt}（共 {anomalies} 次{detail}，详见 arrivals.csv）', '#fef3c7', '#916300'
+    text = f'到位：全部在 ±{tol:.2f} mm 内（平均等待 {avg_txt} s）'
+    if phase == 'done':
+        return text, '#ecfdf3', '#166534'
+    return text, '#f8fafc', '#475467'
 
 
 def depthcal_fine_plan_text(data):

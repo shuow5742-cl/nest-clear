@@ -969,7 +969,12 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
             assert '粗扫估计' in ui.depth_dof.options['text']
         elif state == 'done':
             assert len(ui.depth_table.rows) == 5
-            assert len(ui.depth_table.rows['0']['values']) == 12
+            assert len(ui.depth_table.rows['0']['values']) == 13
+            assert ui.depth_table.rows['0']['values'][12] == '3/155 次 · 最大 Z +0.023'
+            assert ui.depth_table.rows['1']['values'][12] == '—'
+            assert ui.depth_table.rows['0'].get('tags') == ('arrival_warn',)
+            assert ui.depth_table.rows['1'].get('tags') == ()
+            assert '到位超差点：T02、T26（共 4 次，最大 Z +0.023 mm，详见 arrivals.csv）' == ui.depth_arrival_summary.options['text']
             assert '细扫3' in ui.depth_dof.options['text'] and 'FWHM' in ui.depth_dof.options['text']
             assert 'dof_ratio=0.80' in ui.depth_dof_summary.options['text']
             assert '均值' in ui.depth_dof_summary.options['text'] and '最小' in ui.depth_dof_summary.options['text']
@@ -981,12 +986,26 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
             assert ui.depth_abort.options['state'] == 'disabled'
         elif state == 'fine':
             assert ui.depth_abort.options['state'] == 'normal'
+            assert '到位异常 3 次' in ui.depth_stage.options['text']
             assert len(ui.depth_table.rows) == 2
             assert '细扫1' in ui.depth_dof.options['text']
             assert '±1.500 mm' in ui.depth_fine_info.options['text']
         elif state == 'failed':
             assert ui.depth_failure_detail.visible
             assert 'DEPTH-PEAK-BOUNDARY' in ui.depth_failure_detail.options['text']
+            assert '到位超差点：T02' in ui.depth_arrival_summary.options['text']
+
+    # 验证全部正常时汇总行显示 ±0.01 mm 内
+    all_ok_data, _, _ = depthcal_demo('done')
+    for res in all_ok_data['results']:
+        res['arrival'] = {'total': 155, 'anomalies': 0}
+    all_ok_data['arrival_summary'] = {
+        'total_arrivals': 775, 'total_anomalies': 0, 'anomaly_points': [],
+        'position_tolerance_mm': 0.01, 'avg_elapsed_s': 0.51,
+    }
+    ui.update_depthcal({'mode': '空闲', 'depthcal': all_ok_data})
+    assert ui.depth_arrival_summary.options['text'] == '到位：全部在 ±0.01 mm 内（平均等待 0.51 s）'
+    assert ui.depth_table.rows['0']['values'][12] == '—'
 
     # 验证拟合点不足 + 回退/截断提示 + 未覆盖 DOF 在界面正确呈现
     warn_data, _, _ = depthcal_demo('done')

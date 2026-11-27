@@ -23,7 +23,8 @@ from .model import (EventTail, camcal_progress, decode_status, display_time, dur
                     page_for_mode, depthcal_session_key, next_auto_page,
                     baseline_preview_display, extract_tooltip_preview,
                     depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout,
-                    depthcal_curve_dof, depthcal_latest_dof_text, depthcal_dof_summary_text)
+                    depthcal_curve_dof, depthcal_latest_dof_text, depthcal_dof_summary_text,
+                    depthcal_point_arrival_text, depthcal_arrival_summary_text)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -1813,14 +1814,24 @@ class App:
             widget.grid_configure(pady=0)
 
         table_body = self.card(self.depth, '各测点对焦重复性结果', 2, 0, columnspan=2)
-        cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'DOF 均值', 'DOF 极差', 'R²')
-        widths = (60, 155, 120, 120, 120, 120, 85, 85, 85, 110, 95, 80)
+        table_body.rowconfigure(0, weight=0)
+        table_body.rowconfigure(1, weight=1)
+        self.depth_arrival_summary = tk.Label(
+            table_body, text='到位：等待测点到位数据（详见 arrivals.csv）',
+            bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 10, 'bold'),
+            anchor='w', justify='left', padx=8, pady=3, wraplength=1360,
+        )
+        self.depth_arrival_summary.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 4))
+        cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'DOF 均值', 'DOF 极差', 'R²', '到位超差')
+        widths = (50, 128, 92, 92, 92, 96, 68, 68, 66, 88, 76, 64, 215)
         self.depth_table = self.table_widget(
             table_body, cols, widths, stretch=cols, height=5,
             anchor='center', heading_anchor='center',
         )
+        self.depth_table.grid(row=1, column=0, sticky='nsew')
+        self.depth_table.tag_configure('arrival_warn', background='#fef3c7', foreground='#916300')
         depth_scroll = ttk.Scrollbar(table_body, orient='vertical', command=self.depth_table.yview)
-        depth_scroll.grid(row=0, column=1, sticky='ns')
+        depth_scroll.grid(row=1, column=1, sticky='ns')
         self.depth_table.configure(yscrollcommand=depth_scroll.set)
 
     def depth_command(self, name, params=None):
@@ -1886,6 +1897,8 @@ class App:
         self.depth_feasibility.config(text=feas_text, bg=feas_bg, fg=feas_fg)
         dof_sum_text, dof_sum_bg, dof_sum_fg = depthcal_dof_summary_text(data)
         self.depth_dof_summary.config(text=dof_sum_text, bg=dof_sum_bg, fg=dof_sum_fg)
+        arr_text, arr_bg, arr_fg = depthcal_arrival_summary_text(data)
+        self.depth_arrival_summary.config(text=arr_text, bg=arr_bg, fg=arr_fg)
 
         plane = data.get('plane') or {}
         initial_plane = data.get('initial_plane') or {}
@@ -1940,6 +1953,7 @@ class App:
                 else:
                     dof_mean_txt = '—'
                 dof_rng_txt = f'{dof_rng:.4f}' if isinstance(dof_rng, (int, float)) else '—'
+                arr_cell, arr_warn = depthcal_point_arrival_text(item)
                 self.depth_table.insert('', 'end', values=(
                     item.get('label') or '—',
                     xy_text,
@@ -1951,7 +1965,8 @@ class App:
                     dof_mean_txt,
                     dof_rng_txt,
                     f'{sum(r2s)/len(r2s):.4f}' if r2s else '—',
-                ))
+                    arr_cell,
+                ), tags=('arrival_warn',) if arr_warn else ())
 
         self.draw_depthcal_curves(data)
 

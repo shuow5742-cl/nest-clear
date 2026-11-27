@@ -24,13 +24,16 @@
    - 后续每次需要移动相机，PC 将目标 `(X, Y, Z)` 写入 **`40942–40946`** 并回 **`160`**；PLC 到位后再发 **`160`**（新 `Task_ID`）推进下一步。
    - **不检查也不回显 `40905`**。
 2. **第 1 步：测点居中**：
-   - 读稳定实时坐标（6 次 / 0.5 s 极差 ≤ 0.02 mm 取均值），连拍 3 帧取中位图，用菲林靶点检测识别离画面中心最近的环心。
+   - 采用非阻塞滑动窗口持续读取 PLC 实时坐标（按 `settle_window_s / (settle_samples - 1)` 间隔采样，取最近 `settle_samples` 个样本，默认 `6` 次 / `0.5 s`）。
+   - **到位判据**：窗口每轴极差 `≤ jitter_tol_mm`（默认 `0.02 mm`）**且**窗口均值与目标 `expected` 每轴偏差 `|均值 − expected| ≤ position_tolerance_mm`（默认 `0.01 mm`）时立即取均值继续（首次 `160` 尚无 `expected` 时只按极差判稳）。
+   - 若超时 `arrival_timeout_s`（默认 `2.0 s`）仍未满足，则取**最后一个窗口的均值**作为实测坐标 `actual` 照常继续流程（**不因到位超差或未稳定回 `999`**），并将本次异常（`超差` / `未稳定` / `超差+未稳定`）记入 `arrivals.csv` 与 `events.jsonl`（`depthcal_arrival_warning`）。仅在读取 PLC 失败、坐标非有限数或实测坐标超出深度行程 / 低于 `camera_z_min_mm` 时回 `999`。
+   - 连拍 3 帧取中位图，用菲林靶点检测识别离画面中心最近的环心。
    - 若初始位置不在计划首点，先按布局毫米差移向计划测点；若当前靶点已在默认 5 点计划内，优先从当前靶点开始测。
    - 重复计算平移量把环心拉到画面中心，直到偏差 `≤ center_tol_px`（默认 `15 px`），最多 `center_max_iter`（默认 `5`）轮。
    - 居中后在环心周围截取固定正方形 ROI（边长 `roi_mm` 默认 `8 mm`，按当前像素尺度换算），整个扫描过程 XY 固定、不再重新检测。
 3. **第 2 步：粗扫（`coarse`）**：
    - 先抬升到 `min(Z0 + coarse_range_mm, travel_z_max)`，再以 `coarse_step_mm`（默认 `0.2 mm`）**逐步向下**扫到 `max(Z0 - coarse_range_mm, camera_z_min_mm)`。
-   - 每步到位稳定后拍 `frames_per_step`（默认 `3`）帧计算清晰度取中位。
+   - 每步按滑动窗口等待稳定且到位（或超时 `arrival_timeout_s` 取最后窗口均值并记录异常）后，拍 `frames_per_step`（默认 `3`）帧计算清晰度取中位。
    - 当越过当前最大值且清晰度 `< defocus_ratio`（默认 `0.3`）× 最大值并连续 2 步时，提前结束粗扫。若最大值出现在最高或最低边界步，报错回 `999`。
 4. **第 3 步：细扫（`fine`，重复 `repeats_per_point` 次，默认 3 次）**：
    - 默认 `fine_range_mode: auto` 时，根据粗扫拟合出的 `FWHM_粗扫` 自适应计算细扫半宽与步距（防止 `FWHM` 达到 1–3 mm 时固定 ±0.6 mm 只扫到峰顶平坦段导致高斯拟合退化）：
@@ -90,8 +93,9 @@
 | `repeat_range_tol_mm` | `0.02` | 可行性判定的重复性门限（mm），与最大极差及最大标准差比较 |
 | `max_points` | `9` | 触发加测后的最大总测点数（5 至 9） |
 | `point_order` / `extra_points` | `null` | 可选覆盖初始 5 点与加测 4 点标签列表（`T00`–`T31`） |
-| `settle_samples` / `settle_window_s` / `jitter_tol_mm` | `6` / `0.5` / `0.02` | PLC 实时坐标稳定窗口采样参数 |
-| `position_tolerance_mm` | `0.01` | 相机 Z 步进到位核对容差（mm） |
+| `settle_samples` / `settle_window_s` / `jitter_tol_mm` | `6` / `0.5` / `0.02` | PLC 实时坐标滑动窗口采样参数（间隔 `settle_window_s / (settle_samples - 1)`） |
+| `position_tolerance_mm` | `0.01` | 相机步进到位均值核对容差（mm），与窗口极差共同判定到位 |
+| `arrival_timeout_s` | `2.0` | 到位等待超时（秒）；超时后取最后一个窗口均值照常继续并记录异常，不回 `999` |
 
 ---
 
@@ -100,14 +104,15 @@
 界面切至 **【下针深度标定】** 页后，重点查看以下四块区域：
 
 1. **阶段栏与“景深”实时显示**：
-   - 阶段栏旁实时显示当前测点最新一次的 **景深 DOF（及 FWHM）**：细扫中/完成后显示最新一次细扫（如 `细扫1`/`细扫3`），仅有粗扫结果时标 `粗扫估计`；若任一侧未跨过阈值则显示 `未覆盖`。
+   - 阶段栏运行中实时显示当前已累计的到位异常次数（失败/放弃时也会显示已测到位统计），其旁显示当前测点最新一次的 **景深 DOF（及 FWHM）**：细扫中/完成后显示最新一次细扫（如 `细扫1`/`细扫3`），仅有粗扫结果时标 `粗扫估计`；若任一侧未跨过阈值则显示 `未覆盖`。
 2. **清晰度曲线图**：
    - 横轴为实测 `PLC Z (mm)`，纵轴为亮度归一化清晰度；每个靶点独立一张子图。
    - **灰线（带圆点）** 为粗扫曲线，应呈单峰钟形；**蓝/绿/橙实线** 分别为第 1/2/3 次细扫曲线，**红色/彩色竖线** 标出拟合峰位 `Z_peak`。
    - **浅蓝色水平虚线** 标出 `dof_ratio × 峰值` 阈值，**浅蓝阴影区域及两端短竖线** 标出交点 `Z_下` 与 `Z_上` 之间的景深区间。
    - 理想情况：3 条细扫曲线几乎重合、峰部光滑对称、竖线基本重叠在一条线上。
-3. **各测点结果表**：
-   - 查看每点 `细扫1/2/3 Z`、`极差`、`标准差`、`FWHM`、`DOF 均值`、`DOF 极差` 和 `R²`（高斯拟合优度，越接近 1 越理想）。
+3. **各测点结果表与到位汇总**：
+   - 表上方显示全程到位汇总：全部正常时显示 `到位：全部在 ±0.01 mm 内（平均等待 x.xx s）`；存在超差/未稳定时显示 `到位超差点：T02、T26（共 N 次，最大 Z +0.023 mm，详见 arrivals.csv）`（失败或放弃时亦展示已有统计）。
+   - 查看每点 `细扫1/2/3 Z`、`极差`、`标准差`、`FWHM`、`DOF 均值`、`DOF 极差`、`R²`（高斯拟合优度，越接近 1 越理想）及 **`到位超差`**（无异常显示 `—`，有则显示如 `3/126 次 · 最大 Z +0.023` 且该行标黄）。到位异常仅做记录与提示，不影响可行性结论判定。
    - 若某测点部分细扫未覆盖，将在 `DOF 均值` 中注明未覆盖次数（不参与均值与极差统计）；全部未覆盖则记 `未覆盖`。
    - 若某点 `R²` 明显偏低或 `FWHM`/`DOF` 过大，需检查该点照明反光或扫描范围是否只覆盖了单侧。
 4. **平面拟合结果与加测说明**：
@@ -146,11 +151,12 @@
 
 每次会话自动保存到 `runs/<日期>/depthcal/<会话>/`：
 - `curves.csv`：每步原始记录（`label, pass, direction, z_cmd, z_actual, tenengrad, laplacian, brenner`）。
+- `arrivals.csv`：每次 160 到位采样记录（`label, phase, seq, expected_x, expected_y, expected_z, actual_x, actual_y, actual_z, delta_x, delta_y, delta_z, max_abs_delta_mm, max_delta_axis, ptp_x, ptp_y, ptp_z, status, elapsed_s, samples`），其中 `status` 为 `ok` / `超差` / `未稳定` / `超差+未稳定`。
 - `roi/*.png`：每步所选中位帧的 ROI 裁剪图。
 - `<标签>_center.png` / `<标签>_peak.png`：每个靶点居中后与均值峰位处的全幅原图。
-- `fits.json`：每个测点的 3 种清晰度拟合结果（含高斯与半高宽对照、每次细扫的 `dof_mm`、`dof_gauss_mm`、`dof_ratio`、交点 `dof_z_lower`/`dof_z_upper`、`dof_covered`、测点 `dof_mm`/`dof_range_mm`）、可行性汇总与全盘 `dof_summary`。
+- `fits.json`：每个测点的 3 种清晰度拟合结果（含高斯与半高宽对照、每次细扫的 `dof_mm`、`dof_gauss_mm`、`dof_ratio`、交点 `dof_z_lower`/`dof_z_upper`、`dof_covered`、测点 `dof_mm`/`dof_range_mm`、测点 `arrival` 统计）、可行性汇总、全盘 `dof_summary` 与顶层 `arrival_summary`。
 - `plane.json`：初测 5 点与加测后平面方程、各点残差、倾斜量及残差变化判定。
-- `plc.jsonl` & `session_record.json`：全部 PLC 请求/应答序列、配置快照、固定曝光值、全盘景深汇总 `dof_summary` 与结束诊断。
+- `plc.jsonl`、`events.jsonl` & `session_record.json`：全部 PLC 请求/应答序列、配置快照、固定曝光值、到位异常警告事件 `depthcal_arrival_warning`、全盘景深汇总 `dof_summary`、到位汇总 `arrival_summary` 与结束诊断。
 
 ---
 
@@ -172,5 +178,4 @@
 | `DEPTH-FINE-RANGE` | Z 行程不足以完成换向过冲与细扫 | 细扫规划 | 调整初始 Z、缩小 `fine_range_mm` / `overshoot_mm` 或确认 Z 行程 |
 | `DEPTH-FIT` | 高斯或半高宽峰拟合失败 | 细扫拟合 | 检查细扫范围是否覆盖半高宽两侧，尝试更换 `metric` 或曝光 |
 | `DEPTH-PLANE` | 测点共线无法拟合平面 | 平面判定 | 确保 `point_order` 包含二维分散靶点 |
-| `DEPTH-SETTLE` / `DEPTH-ARRIVAL` | 实时坐标未稳定或到位超差 | 坐标采样 | 检查 PLC 到位信号时序、机械振动、`jitter_tol_mm` 与 `position_tolerance_mm` |
 | `DEPTH-ABORTED` | 操作员在界面点击【放弃本次标定】 | 会话控制 | 确认放弃后可重新发 `160` 开始新测试 |

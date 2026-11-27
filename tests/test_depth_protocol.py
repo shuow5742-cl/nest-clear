@@ -34,6 +34,17 @@ def test_default_config_z_min_is_minus_12():
     assert cfg.depth_calibration['fine_step_min_mm'] == 0.02
     assert cfg.depth_calibration['fine_step_max_mm'] == 0.1
     assert cfg.depth_calibration['dof_ratio'] == 0.8
+    assert cfg.depth_calibration['arrival_timeout_s'] == 2.0
+
+
+def test_arrival_timeout_config_validation(tmp_path):
+    raw = yaml.safe_load(Path('config/nest_clear.yaml').read_text(encoding='utf-8'))
+    for bad_timeout in (0, -0.5, float('nan'), float('inf'), True, '2.0'):
+        bad = {**raw, 'depth_calibration': {**raw['depth_calibration'], 'arrival_timeout_s': bad_timeout}}
+        p_bad = tmp_path / 'bad_timeout.yaml'
+        p_bad.write_text(yaml.safe_dump(bad), encoding='utf-8')
+        with pytest.raises(GuardError, match='depth_calibration.arrival_timeout_s'):
+            load_config(p_bad, require_tools=False)
 
 
 def test_depth_protocol_missing_z_min_and_reserved_codes(rig):
