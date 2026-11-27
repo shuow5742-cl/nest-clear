@@ -1,6 +1,7 @@
 """下针深度标定的独立配置默认值。"""
 
 DEFAULTS = {
+    'target': 'auto',
     'camera_z_min_mm': None,
     # 独立行程 {x: [lo, hi], y: [lo, hi], z: [lo, hi]}；缺省（None）时回退使用全局 travel。
     'travel': None,

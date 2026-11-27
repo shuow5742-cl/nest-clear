@@ -1099,6 +1099,21 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
     assert ui.depth_table.rows['5']['tags'] == ('point_failed',)
     assert 'T05' in ui.depth_skip_summary.options['text'] and 'T04' in ui.depth_skip_summary.options['text']
 
+    # ChArUco 标定板模式演示状态：测量面类型、测点标签+位置名、板位姿拟合残差、板面平面与可行性结论
+    for cstate in ('charuco_fine', 'charuco_done'):
+        cdata, _, _ = depthcal_demo(cstate)
+        ui.update_depthcal({'mode': '空闲' if cstate == 'charuco_done' else '下针深度标定中', 'depthcal': cdata})
+        assert 'ChArUco 标定板（厚 3.15mm）' in ui.depth_surface.options['text']
+        assert '132 角点' in ui.depth_board_pose.options['text']
+        assert '0.0009 mm' in ui.depth_board_pose.options['text']
+        if cstate == 'charuco_fine':
+            assert 'C278(右下)' in ui.depth_target.options['text']
+        else:
+            assert 'C021(左上)' in ui.depth_table.rows['0']['values'][0]
+            assert '板面平面（板厚 3.15mm' in ui.depth_plane_grid.values_data['测量面 / 板面']
+            assert '标定板平面残差' in ui.depth_feasibility.options['text']
+            assert '≤0.02 可行 / ≤0.05 勉强 / >0.05 不可行' in ui.depth_feasibility.options['text']
+
     ui.root.destroy()
 
 

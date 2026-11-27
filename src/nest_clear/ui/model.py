@@ -764,9 +764,60 @@ def depthcal_fine_plan_text(data):
     return summary, '；'.join(notices)
 
 
+def depthcal_surface_text(data):
+    """格式化下针深度标定测量面类型显示文本。"""
+    label = data.get('target_type_label')
+    if label:
+        return f'测量面：{label}'
+    target_type = data.get('target_type')
+    if target_type == 'film':
+        return '测量面：菲林'
+    if target_type == 'charuco':
+        thickness = data.get('board_thickness_mm')
+        if isinstance(thickness, (int, float)):
+            return f'测量面：ChArUco 标定板（厚 {float(thickness):.2f}mm）'
+        return '测量面：ChArUco 标定板'
+    if (data.get('phase') or 'idle') == 'idle':
+        return '测量面：自动检测（菲林 / ChArUco）'
+    return '测量面：自动检测（识别中）'
+
+
+def depthcal_board_fit_text(data):
+    """格式化 ChArUco 板二维位姿拟合残差文本；非 ChArUco 模式返回空串。"""
+    fit = data.get('board_fit')
+    if not isinstance(fit, dict) or not fit:
+        return ''
+    corners = fit.get('corner_count')
+    angle = fit.get('angle_deg')
+    rms = fit.get('rms_residual_mm')
+    mx = fit.get('max_residual_mm')
+    parts = []
+    if corners is not None:
+        parts.append(f'{int(corners)} 角点')
+    if isinstance(angle, (int, float)):
+        parts.append(f'转角 {float(angle):+.2f}°')
+    if isinstance(rms, (int, float)):
+        parts.append(f'RMS {float(rms):.4f} mm')
+    if isinstance(mx, (int, float)):
+        parts.append(f'最大 {float(mx):.4f} mm')
+    return ('板位姿拟合：' + ' · '.join(parts)) if parts else ''
+
+
+def depthcal_point_position(label, data=None, item=None):
+    """读取测点对应的板面方位名（如 左上/中心/上中）。"""
+    if isinstance(item, dict) and item.get('position_name'):
+        return str(item['position_name'])
+    positions = (data or {}).get('point_positions') if isinstance(data, dict) else None
+    if isinstance(positions, dict) and label in positions and positions[label]:
+        return str(positions[label])
+    return ''
+
+
 def depthcal_feasibility_text(data):
-    """格式化对焦重复性可行性结论栏文本及颜色。"""
+    """格式化对焦重复性可行性结论栏文本及颜色（ChArUco 模式附带板面平面残差判级）。"""
     feas = data.get('feasibility') or {}
+    target_type = data.get('target_type') or feas.get('target_type')
+    plane = data.get('plane') or {}
     if feas and feas.get('max_range') is not None:
         max_range = float(feas['max_range'])
         max_std = feas.get('max_std')
@@ -775,6 +826,43 @@ def depthcal_feasibility_text(data):
         insufficient_fits = int(feas.get('insufficient_fits') or 0)
         total_fits = int(feas.get('total_fits') or 0)
         insufficient_items = feas.get('insufficient_items') or []
+        if target_type == 'charuco':
+            plane_res = plane.get('max_residual')
+            if not isinstance(plane_res, (int, float)):
+                plane_res = feas.get('plane_max_residual')
+            if isinstance(plane_res, (int, float)):
+                res_val = float(plane_res)
+                res_str = f'{res_val:.3f}'
+                plane_verdict = '可行' if res_val <= 0.02 else ('勉强' if res_val <= 0.05 else '不可行')
+            else:
+                res_val = None
+                res_str = '—'
+                plane_verdict = feas.get('plane_verdict') or '待定'
+            if insufficient_fits > 0:
+                items_text = '、'.join(insufficient_items[:6]) + ('…' if len(insufficient_items) > 6 else '')
+                scope = f'{insufficient_fits}/{total_fits}' if total_fits else str(insufficient_fits)
+                detail = f'（{items_text}）' if items_text else ''
+                rep_part = (
+                    f'各点重复性：拟合点不足 {scope} 次{detail}，'
+                    f'最大极差 {max_range:.4f} mm / 最大标准差 {std_text} mm（门限 {threshold:.3f} mm → 不满足）'
+                )
+            else:
+                met = bool(feas.get('met'))
+                verdict = '满足' if met else '不满足'
+                rep_part = (
+                    f'各点重复性：最大极差 {max_range:.4f} mm / 最大标准差 {std_text} mm'
+                    f'（门限 {threshold:.3f} mm → {verdict}）'
+                )
+            text = (
+                f'可行性结论：标定板平面残差 {res_str} mm（≤0.02 可行 / ≤0.05 勉强 / >0.05 不可行，当前{plane_verdict}）'
+                f' + {rep_part}'
+            )
+            if insufficient_fits > 0 or not bool(feas.get('met')) or (res_val is not None and res_val > 0.05):
+                return text, '#fff1f0', '#b42318'
+            if res_val is not None and res_val > 0.02:
+                return text, '#fff7ed', '#b45309'
+            return text, '#ecfdf3', '#168448'
+
         if insufficient_fits > 0:
             items_text = '、'.join(insufficient_items[:6]) + ('…' if len(insufficient_items) > 6 else '')
             scope = f'{insufficient_fits}/{total_fits}' if total_fits else str(insufficient_fits)
@@ -802,12 +890,21 @@ def depthcal_feasibility_text(data):
         if ranges:
             std_text = f'{max(stds):.4f}' if stds else '—'
             extra = f'，拟合点不足 {insufficient} 次（不计入满足）' if insufficient else ''
+            if target_type == 'charuco':
+                return (
+                    f'可行性结论：已完成 {len(results)} 点，当前最大极差 {max(ranges):.4f} mm / 最大标准差 {std_text} mm{extra}'
+                    '（待全部测点完成后按标定板平面残差 ≤0.02 可行 / ≤0.05 勉强 / >0.05 不可行 + 各点重复性评估）',
+                    '#fff7ed' if insufficient else '#f8fafc',
+                    '#b45309' if insufficient else '#475467',
+                )
             return (
                 f'可行性结论：已完成 {len(results)} 点，当前最大极差 {max(ranges):.4f} mm / 最大标准差 {std_text} mm{extra}'
                 '（待全部测点完成后判定，误差预算：总 0.05mm，对焦环节约 0.02mm）',
                 '#fff7ed' if insufficient else '#f8fafc',
                 '#b45309' if insufficient else '#475467',
             )
+    if target_type == 'charuco':
+        return '可行性结论：等待测点完成后按标定板平面残差（≤0.02 可行 / ≤0.05 勉强 / >0.05 不可行）+ 各点重复性评估', '#f8fafc', '#667085'
     return '可行性结论：等待测点完成后评估（总误差预算 0.05mm，对焦环节约 0.02mm）', '#f8fafc', '#667085'
 
 

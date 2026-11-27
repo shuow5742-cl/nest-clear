@@ -30,9 +30,26 @@ class CalibResult:
     calibration: Calibration
     report: dict
 
+def build_charuco_board(cols, rows, square_mm, marker_mm, dictionary_name):
+    """构造 OpenCV ChArUco 标定板对象。"""
+    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dictionary_name))
+    return cv2.aruco.CharucoBoard((int(cols), int(rows)), float(square_mm), float(marker_mm), dictionary)
+
+
+def detect_charuco_corners(image, detector):
+    """用 CharucoDetector 检测灰/彩图中的 ChArUco 内角点像素坐标与 ID。"""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    try:
+        corners, ids, _, _ = detector.detectBoard(gray)
+    except cv2.error:
+        corners = ids = None
+    ids_arr = np.asarray(ids, dtype=int).ravel() if ids is not None else np.empty(0, int)
+    pts_arr = np.asarray(corners, dtype=float).reshape(-1, 2) if corners is not None else np.empty((0, 2))
+    return pts_arr, ids_arr
+
+
 def _board(cfg):
-    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, cfg.dictionary))
-    return cv2.aruco.CharucoBoard((cfg.cols, cfg.rows), cfg.square_mm, cfg.marker_mm, dictionary)
+    return build_charuco_board(cfg.cols, cfg.rows, cfg.square_mm, cfg.marker_mm, cfg.dictionary)
 
 def _rot(v):
     return cv2.Rodrigues(np.asarray(v, dtype=float))[0]
@@ -230,12 +247,7 @@ class CameraCalibrationSession:
         gray = cv2.cvtColor(image,cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
         overlay = cv2.cvtColor(gray,cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image[:,:,:3].copy()
         saturated = np.any(image >= cfg.saturation_level,axis=2) if image.ndim == 3 else image >= cfg.saturation_level
-        try:
-            corners, ids, _, _ = self._detector.detectBoard(gray)
-        except cv2.error:
-            corners=ids=None
-        ids = np.asarray(ids,dtype=int).ravel() if ids is not None else np.empty(0,int)
-        pts = np.asarray(corners,dtype=float).reshape(-1,2) if corners is not None else np.empty((0,2))
+        pts, ids = detect_charuco_corners(gray, self._detector)
         predicted = None
         if len(ids) >= 4:
             try:

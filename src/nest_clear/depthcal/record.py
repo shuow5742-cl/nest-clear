@@ -128,6 +128,11 @@ class DepthRecord:
     def results(self, session):
         self.write('fits.json', {'metric': session.cfg['metric'], 'method': session.cfg['peak_method'],
                                  'dof_ratio': session.cfg['dof_ratio'],
+                                 'target_type': getattr(session, 'target_type', 'film'),
+                                 'target_type_label': getattr(session, 'target_type_label', '菲林'),
+                                 'board_thickness_mm': getattr(session, 'board_thickness_mm', None),
+                                 'board_fit': getattr(session, 'board_fit', None),
+                                 'point_positions': getattr(session, 'point_positions', {}),
                                  'points': session.results,
                                  'failed_points': getattr(session, 'failed_points', []),
                                  'skip_summary': getattr(session, 'skip_summary', None),
@@ -135,7 +140,11 @@ class DepthRecord:
                                  'dof_summary': getattr(session, 'dof_summary', None),
                                  'arrival_summary': getattr(session, 'arrival_summary', None)})
         self.write('plane.json', {'initial': session.initial_plane, 'final': session.plane,
-                                  'tolerance_mm': session.cfg['plane_tol_mm']})
+                                  'tolerance_mm': session.cfg['plane_tol_mm'],
+                                  'target_type': getattr(session, 'target_type', 'film'),
+                                  'target_type_label': getattr(session, 'target_type_label', '菲林'),
+                                  'board_thickness_mm': getattr(session, 'board_thickness_mm', None),
+                                  'board_fit': getattr(session, 'board_fit', None)})
 
     def finish(self, session, outcome, details):
         try:
@@ -157,6 +166,11 @@ class DepthRecord:
             self.write('session_record.json', {
                 'start_time': self.started.isoformat(), 'end_time': self.events.clock().isoformat(),
                 'outcome': outcome, 'diagnostic': details, 'configuration': session.cfg,
+                'target_type': getattr(session, 'target_type', 'film'),
+                'target_type_label': getattr(session, 'target_type_label', '菲林'),
+                'board_thickness_mm': getattr(session, 'board_thickness_mm', None),
+                'board_fit': getattr(session, 'board_fit', None),
+                'point_positions': getattr(session, 'point_positions', {}),
                 'initial_exposure_us': getattr(session, 'initial_exposure_us', None),
                 'initial_exposure_auto': getattr(session, 'initial_exposure_auto', None),
                 'exposure_restored': getattr(session, 'exposure_restored', None),

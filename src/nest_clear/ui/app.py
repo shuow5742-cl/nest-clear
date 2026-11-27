@@ -29,7 +29,8 @@ from .model import (EventTail, camcal_progress, command_timeout_message, decode_
                     depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout,
                     depthcal_curve_dof, depthcal_latest_dof_text, depthcal_dof_summary_text,
                     depthcal_point_arrival_text, depthcal_arrival_summary_text, depthcal_exposure_display,
-                    depthcal_skip_summary_text)
+                    depthcal_skip_summary_text, depthcal_surface_text, depthcal_board_fit_text,
+                    depthcal_point_position)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -1964,6 +1965,7 @@ class App:
 
         expbar = tk.Frame(head, bg=WHITE)
         expbar.grid(row=1, column=0, sticky='ew', pady=(2, 0))
+        expbar.columnconfigure(7, weight=1)
         tk.Label(expbar, text='曝光：', bg=WHITE, fg=MUTED, font=d_body).grid(row=0, column=0, sticky='w')
         self.depth_exp_mode = 'auto'
         self.depth_exp_user_dirty = False
@@ -1988,8 +1990,19 @@ class App:
             bg='#eef2f6', fg=INK, font=d_mono, padx=7, pady=1,
         )
         self.depth_exp_live.grid(row=0, column=6, sticky='w', padx=(0, 8))
-        self.depth_exp_status = tk.Label(expbar, text='', bg=WHITE, fg=MUTED, font=d_body)
-        self.depth_exp_status.grid(row=0, column=7, sticky='w')
+        self.depth_exp_status = tk.Label(expbar, text='', bg=WHITE, fg=MUTED, font=d_body, anchor='w')
+        self.depth_exp_status.grid(row=0, column=7, sticky='ew')
+        self.depth_surface = tk.Label(
+            expbar, text='测量面：自动检测（菲林 / ChArUco）',
+            bg='#eef2f6', fg=INK, font=d_mono_sm, padx=7, pady=1,
+        )
+        self.depth_surface.grid(row=0, column=8, sticky='e', padx=(8, 4))
+        self.depth_board_pose = tk.Label(
+            expbar, text='',
+            bg='#eef2f6', fg='#1d4ed8', font=d_mono_sm, padx=7, pady=1,
+        )
+        self.depth_board_pose.grid(row=0, column=9, sticky='e')
+        self.depth_board_pose.grid_remove()
 
         self.depth_message = tk.Label(head, text='等待 PLC 160 发起料盘多点对焦测试', bg=WHITE, fg=INK,
                                       font=d_body, anchor='w', justify='left', wraplength=1800)
@@ -2065,7 +2078,7 @@ class App:
         )
         self.depth_skip_summary.grid(row=0, column=1, sticky='ew')
         cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'DOF 均值', 'DOF 极差', 'R²', '到位超差')
-        widths = (78, 108, 72, 72, 72, 80, 56, 56, 52, 82, 60, 54, 165)
+        widths = (108, 108, 70, 70, 70, 78, 54, 54, 50, 80, 58, 52, 160)
         self.depth_table = self.table_widget(
             table_body, cols, widths, stretch=cols, height=6,
             anchor='center', heading_anchor='center',
@@ -2084,7 +2097,7 @@ class App:
         plane_body = depth_card(self.depth, '平面拟合结果', 2, 1)
         self.depth_plane_grid = KeyValueGrid(
             plane_body,
-            ('平面方程', '最大 |残差| / 倾斜', '加测判定', '各点残差 (mm)'),
+            ('测量面 / 板面', '平面方程', '最大 |残差| / 倾斜', '加测判定', '各点残差 (mm)'),
             self.theme,
         )
         self.depth_plane_grid.grid(row=0, column=0, sticky='nsew')
@@ -2205,11 +2218,13 @@ class App:
                 dim_txt = '—'
 
             lbl = data.get('label') or '—'
+            pos = depthcal_point_position(lbl, data)
+            lbl_full = f'{lbl}({pos})' if pos else lbl
             z_val = data.get('z')
             z_txt = f'{z_val:.3f}mm' if isinstance(z_val, (int, float)) else '—'
             exp_txt = depthcal_exposure_display(data).replace('当前曝光：', '曝光 ').replace('  |  ', ' | ')
             mode_name = '最新 ROI' if mode == 'roi' else '整幅居中图'
-            state['info'].config(text=f'{mode_name}({dim_txt}) | {lbl} Z={z_txt} | {exp_txt}')
+            state['info'].config(text=f'{mode_name}({dim_txt}) | {lbl_full} Z={z_txt} | {exp_txt}')
 
         if reschedule:
             state['after_id'] = top.after(150, self._refresh_depth_zoom)
@@ -2329,10 +2344,21 @@ class App:
         self.depth_stage.config(text=stage_text, bg=stage_bg, fg=stage_fg)
 
         label = data.get('label')
+        pos = depthcal_point_position(label, data) if label else ''
         point = data.get('point')
         total = data.get('total')
-        target_text = f"靶点：{label or '—'}" + (f" ({point}/{total})" if point and total else '')
+        label_disp = f'{label}({pos})' if (label and pos) else (label or '—')
+        target_text = f"靶点：{label_disp}" + (f" ({point}/{total})" if point and total else '')
         self.depth_target.config(text=target_text)
+
+        self.depth_surface.config(text=depthcal_surface_text(data))
+        board_fit_txt = depthcal_board_fit_text(data)
+        if board_fit_txt:
+            self.depth_board_pose.config(text=board_fit_txt)
+            self.depth_board_pose.grid()
+        else:
+            self.depth_board_pose.config(text='')
+            self.depth_board_pose.grid_remove()
 
         z_val = data.get('z')
         self.depth_z.config(text=f"PLC Z：{z_val:.4f} mm" if isinstance(z_val, (int, float)) else 'PLC Z：— mm')
@@ -2408,6 +2434,9 @@ class App:
 
         plane = data.get('plane') or {}
         initial_plane = data.get('initial_plane') or {}
+        surface_label = depthcal_surface_text(data).replace('测量面：', '')
+        plane_note = plane.get('plane_note')
+        surface_plane_text = f'{surface_label} · {plane_note}' if plane_note else surface_label
         if plane and 'a' in plane:
             eq_text = f"z = {plane['a']:+.5f}x {plane['b']:+.5f}y {plane['c']:+.4f}"
             res_tilt = f"{plane.get('max_residual', 0):.4f} mm  /  倾斜 {plane.get('tilt_mm_per_100mm', 0):.4f} mm/100mm"
@@ -2420,6 +2449,7 @@ class App:
         else:
             eq_text = res_tilt = extra_text = res_text = '—'
         self.depth_plane_grid.set({
+            '测量面 / 板面': surface_plane_text,
             '平面方程': eq_text,
             '最大 |残差| / 倾斜': res_tilt,
             '加测判定': extra_text,
@@ -2466,7 +2496,9 @@ class App:
                     dof_mean_txt = '—'
                 dof_rng_txt = f'{dof_rng:.4f}' if isinstance(dof_rng, (int, float)) else '—'
                 arr_cell, arr_warn = depthcal_point_arrival_text(item)
-                lbl_text = item.get('label') or '—'
+                raw_lbl = item.get('label') or '—'
+                pos_name = depthcal_point_position(raw_lbl, data, item)
+                lbl_text = f'{raw_lbl}({pos_name})' if pos_name else raw_lbl
                 if item.get('retest_of'):
                     lbl_text = f"{lbl_text}(补测 {item['retest_of']})"
                 self.depth_table.insert('', 'end', values=(
@@ -2485,9 +2517,12 @@ class App:
             for fp in failed_points:
                 xy = fp.get('xy') or []
                 xy_text = f'({xy[0]:.2f}, {xy[1]:.2f})' if len(xy) >= 2 else '—'
-                lbl_text = f"{fp.get('label') or '—'}(失败)"
+                raw_fp_lbl = fp.get('label') or '—'
+                fp_pos = depthcal_point_position(raw_fp_lbl, data, fp)
+                fp_disp = f'{raw_fp_lbl}({fp_pos})' if fp_pos else raw_fp_lbl
+                lbl_text = f"{fp_disp}(失败)"
                 if fp.get('retest_of'):
-                    lbl_text = f"{fp.get('label') or '—'}(补测 {fp['retest_of']} 失败)"
+                    lbl_text = f"{fp_disp}(补测 {fp['retest_of']} 失败)"
                 retest_lbl = fp.get('retest_label')
                 if retest_lbl and fp.get('retest_status') == 'success':
                     action_txt = f'由{retest_lbl}补测'

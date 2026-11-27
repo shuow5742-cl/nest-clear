@@ -191,19 +191,38 @@ def _draw_depthcal_demo_roi(root: Path, depthcal_state: str, z_val: float, label
     """用纯 PIL 绘制下针深度标定 ROI 实时图与整幅居中图（无 cv2/numpy 依赖）。"""
     path = live_image_file(root, 'depthcal_roi')
     path.parent.mkdir(parents=True, exist_ok=True)
-    img = Image.new('RGB', (640, 640), (222, 227, 234))
-    draw = ImageDraw.Draw(img)
-    ring_color = (24, 28, 34) if depthcal_state in ('fine', 'done', 'done_skip') else (75, 84, 96)
-    draw.ellipse((210, 210, 430, 430), outline=ring_color, width=12)
-    draw.ellipse((226, 226, 414, 414), outline=(244, 246, 248), width=3)
-    draw.line((100, 320, 540, 320), fill=ring_color, width=4)
-    draw.line((320, 100, 320, 540), fill=ring_color, width=4)
-    # 模拟 ArUco 标记块在左上角
-    draw.rectangle((48, 48, 168, 168), fill=(242, 244, 247), outline=ring_color, width=4)
-    for r in range(3):
-        for c in range(3):
-            if (r + c) % 2 == 0:
-                draw.rectangle((66 + c * 28, 66 + r * 28, 92 + c * 28, 92 + r * 28), fill=ring_color)
+    is_charuco = depthcal_state.startswith('charuco_')
+    if is_charuco:
+        img = Image.new('RGB', (640, 640), (235, 238, 242))
+        draw = ImageDraw.Draw(img)
+        dark = (26, 30, 36) if depthcal_state in ('charuco_fine', 'charuco_done') else (72, 78, 88)
+        # 2×2 棋盘格交汇于中心 (320, 320)，并在白格内绘制 ArUco 码块示意
+        for gx, gy in ((0, 0), (320, 320)):
+            draw.rectangle((gx, gy, gx + 320, gy + 320), fill=dark)
+        for gx, gy in ((320, 0), (0, 320)):
+            draw.rectangle((gx + 44, gy + 44, gx + 276, gy + 276), fill=dark)
+            for mr in range(5):
+                for mc in range(5):
+                    if ((mr * 3 + mc + (gx > 0) * 2) % 2) == 0:
+                        x0 = gx + 76 + mc * 34
+                        y0 = gy + 76 + mr * 34
+                        draw.rectangle((x0, y0, x0 + 32, y0 + 32), fill=(235, 238, 242))
+        draw.line((296, 320, 344, 320), fill=(220, 38, 38), width=2)
+        draw.line((320, 296, 320, 344), fill=(220, 38, 38), width=2)
+    else:
+        img = Image.new('RGB', (640, 640), (222, 227, 234))
+        draw = ImageDraw.Draw(img)
+        ring_color = (24, 28, 34) if depthcal_state in ('fine', 'done', 'done_skip') else (75, 84, 96)
+        draw.ellipse((210, 210, 430, 430), outline=ring_color, width=12)
+        draw.ellipse((226, 226, 414, 414), outline=(244, 246, 248), width=3)
+        draw.line((100, 320, 540, 320), fill=ring_color, width=4)
+        draw.line((320, 100, 320, 540), fill=ring_color, width=4)
+        # 模拟 ArUco 标记块在左上角
+        draw.rectangle((48, 48, 168, 168), fill=(242, 244, 247), outline=ring_color, width=4)
+        for r in range(3):
+            for c in range(3):
+                if (r + c) % 2 == 0:
+                    draw.rectangle((66 + c * 28, 66 + r * 28, 92 + c * 28, 92 + r * 28), fill=ring_color)
     draw.rectangle((10, 10, 630, 44), fill=(255, 255, 255), outline=(190, 200, 212))
     draw.text((18, 20), f'ROI  {label}  Z={z_val:.3f}mm  {depthcal_state}', fill=(20, 40, 80))
     tmp = path.with_suffix('.tmp')
@@ -211,15 +230,36 @@ def _draw_depthcal_demo_roi(root: Path, depthcal_state: str, z_val: float, label
     os.replace(tmp, path)
 
     cpath = live_image_file(root, 'depthcal_center')
-    full = Image.new('RGB', (1006, 759), (212, 218, 226))
-    fdraw = ImageDraw.Draw(full)
-    # 主靶点与相邻靶点示意
-    for ox, oy, active in ((503, 380, True), (190, 380, False), (816, 380, False), (503, 120, False)):
-        col = (26, 30, 36) if active else (110, 118, 128)
-        fdraw.ellipse((ox - 54, oy - 54, ox + 54, oy + 54), outline=col, width=5)
-        fdraw.line((ox - 85, oy, ox + 85, oy), fill=col, width=2)
-        fdraw.line((ox, oy - 85, ox, oy + 85), fill=col, width=2)
-        fdraw.rectangle((ox - 110, oy - 110, ox - 64, oy - 64), outline=col, width=2)
+    if is_charuco:
+        full = Image.new('RGB', (1006, 759), (195, 200, 208))
+        fdraw = ImageDraw.Draw(full)
+        step = 110
+        ox0, oy0 = 503 - 4 * step, 380 - 3 * step
+        for row_i in range(7):
+            for col_i in range(9):
+                x0 = ox0 + col_i * step
+                y0 = oy0 + row_i * step
+                if (row_i + col_i) % 2 == 0:
+                    fdraw.rectangle((x0, y0, x0 + step, y0 + step), fill=(28, 32, 38))
+                else:
+                    fdraw.rectangle((x0, y0, x0 + step, y0 + step), fill=(236, 239, 243))
+                    fdraw.rectangle((x0 + 18, y0 + 18, x0 + step - 18, y0 + step - 18), fill=(32, 36, 42))
+                    for mr in range(3):
+                        for mc in range(3):
+                            if (mr + mc + row_i + col_i) % 2 == 0:
+                                mx0 = x0 + 28 + mc * 18
+                                my0 = y0 + 28 + mr * 18
+                                fdraw.rectangle((mx0, my0, mx0 + 16, my0 + 16), fill=(236, 239, 243))
+    else:
+        full = Image.new('RGB', (1006, 759), (212, 218, 226))
+        fdraw = ImageDraw.Draw(full)
+        # 主靶点与相邻靶点示意
+        for ox, oy, active in ((503, 380, True), (190, 380, False), (816, 380, False), (503, 120, False)):
+            col = (26, 30, 36) if active else (110, 118, 128)
+            fdraw.ellipse((ox - 54, oy - 54, ox + 54, oy + 54), outline=col, width=5)
+            fdraw.line((ox - 85, oy, ox + 85, oy), fill=col, width=2)
+            fdraw.line((ox, oy - 85, ox, oy + 85), fill=col, width=2)
+            fdraw.rectangle((ox - 110, oy - 110, ox - 64, oy - 64), outline=col, width=2)
     fdraw.rectangle((343, 220, 663, 540), outline=(37, 99, 235), width=3)
     fdraw.line((483, 380, 523, 380), fill=(220, 38, 38), width=2)
     fdraw.line((503, 360, 503, 400), fill=(220, 38, 38), width=2)
@@ -231,7 +271,76 @@ def _draw_depthcal_demo_roi(root: Path, depthcal_state: str, z_val: float, label
 
 
 def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
-    """生成下针深度标定页演示状态（粗扫中/细扫中/完成/失败）。"""
+    """生成下针深度标定页演示状态（粗扫中/细扫中/完成/失败/ChArUco）。"""
+    if state.startswith('charuco_'):
+        film_mode_state = state.removeprefix('charuco_')
+        base, z_cur, _ = depthcal_demo(film_mode_state, step)
+        c_plan = ['C021', 'C038', 'C278', 'C261', 'C149']
+        c_pos = {'C021': '左上', 'C038': '右上', 'C278': '右下', 'C261': '左下', 'C149': '中心'}
+        c_coords = {
+            'C021': [52.65, 118.45],
+            'C038': [137.65, 118.45],
+            'C278': [137.65, 58.45],
+            'C261': [52.65, 58.45],
+            'C149': [95.15, 88.45],
+        }
+        old_plan = ['T02', 'T05', 'T29', 'T26', 'T12']
+        lbl_map = dict(zip(old_plan, c_plan))
+        new_curves = {lbl_map.get(k, k): v for k, v in (base.get('curves') or {}).items()}
+        new_results = []
+        for res in (base.get('results') or []):
+            nl = lbl_map.get(res['label'], res['label'])
+            new_results.append({
+                **res,
+                'label': nl,
+                'position_name': c_pos.get(nl, ''),
+                'xy': c_coords.get(nl, res['xy']),
+            })
+        cur_lbl = lbl_map.get(base.get('label'), base.get('label'))
+        board_fit = {
+            'corner_count': 132,
+            'scale': 1.0002,
+            'angle_deg': 0.57,
+            'center_xy_mm': [95.15, 88.45],
+            'rms_residual_mm': 0.0009,
+            'max_residual_mm': 0.0018,
+            'det': -1.0,
+        }
+        base.update({
+            'target_type': 'charuco',
+            'target_type_label': 'ChArUco 标定板（厚 3.15mm）',
+            'board_thickness_mm': 3.15,
+            'board_fit': board_fit,
+            'point_positions': c_pos,
+            'plan': c_plan,
+            'label': cur_lbl,
+            'curves': new_curves,
+            'results': new_results,
+            'message': str(base.get('message', '')).replace('T02', 'C021').replace('T29', 'C278').replace('料盘多点对焦测试', 'ChArUco 标定板多点对焦测试'),
+        })
+        if isinstance(base.get('arrival_summary'), dict):
+            arr = dict(base['arrival_summary'])
+            arr['anomaly_points'] = [lbl_map.get(x, x) for x in (arr.get('anomaly_points') or [])]
+            if arr.get('max_delta_label') in lbl_map:
+                arr['max_delta_label'] = lbl_map[arr['max_delta_label']]
+            base['arrival_summary'] = arr
+        if isinstance(base.get('plane'), dict):
+            pl = dict(base['plane'])
+            pl['residuals'] = {lbl_map.get(k, k): v for k, v in (pl.get('residuals') or {}).items()}
+            pl['surface_type'] = 'charuco'
+            pl['plane_kind'] = 'board_top_surface'
+            pl['board_thickness_mm'] = 3.15
+            pl['plane_note'] = '板面平面（板厚 3.15mm，盘底 = 板面 − 板厚方向换算，暂不用于生产）'
+            base['plane'] = pl
+            base['initial_plane'] = pl
+        if isinstance(base.get('feasibility'), dict):
+            feas = dict(base['feasibility'])
+            feas['target_type'] = 'charuco'
+            feas['plane_max_residual'] = (base.get('plane') or {}).get('max_residual', 0.0015)
+            feas['plane_verdict'] = '可行'
+            base['feasibility'] = feas
+        return base, z_cur, cur_lbl
+
     plan = ['T02', 'T05', 'T29', 'T26', 'T12']
     coords = {
         'T02': [96.0, 25.0],
@@ -797,7 +906,7 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
         path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
         depth_data, z_val, lbl = depthcal_demo(depthcal_state, step)
         data['depthcal'] = depth_data
-        data['mode'] = '空闲' if depthcal_state in ('done', 'done_skip', 'failed') else '下针深度标定中'
+        data['mode'] = '空闲' if depthcal_state in ('done', 'done_skip', 'charuco_done', 'failed') else '下针深度标定中'
         atomic(path, data)
         if initial:
             _draw_depthcal_demo_roi(root, depthcal_state, z_val, lbl)
@@ -894,7 +1003,7 @@ def main():
     parser.add_argument('--wb-state', choices=('running','success','fail'), default=None)
     parser.add_argument('--focus-state', choices=('off','live','exposure'), default=None)
     parser.add_argument('--camcal-state', choices=('running', 'failed', 'preview'), default=None)
-    parser.add_argument('--depthcal-state', choices=('coarse', 'fine', 'done', 'done_skip', 'failed'), default=None)
+    parser.add_argument('--depthcal-state', choices=('coarse', 'fine', 'done', 'done_skip', 'failed', 'charuco_coarse', 'charuco_fine', 'charuco_done'), default=None)
     args = parser.parse_args(); validate_view_arguments(parser, args)
     if args.camcal_state:
         args.preview_state = 'on' if args.camcal_state == 'preview' else 'blocked'

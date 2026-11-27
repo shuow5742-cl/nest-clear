@@ -4,8 +4,10 @@ from collections import deque
 import math
 import statistics
 
+import cv2
 import numpy as np
 
+from nest_clear.camcal.session import build_charuco_board, detect_charuco_corners
 from nest_clear.depth_config import METRICS
 from nest_clear.guard import GuardError, format_pose
 from nest_clear.tooloffset.detection import detect
@@ -16,7 +18,10 @@ from .focus import (
     EXPOSURE_MAX_SATURATED_FRACTION, analyze_coarse_scan, find_side_blur, fit_coarse_fwhm, fit_peak,
     measure_dof, next_auto_exposure, plan_fine_scan, roi_brightness, scores,
 )
-from .layout import corner_labels_for_plan, dof_summary, film_layout, fit_plane, repeatability
+from .layout import (
+    charuco_corner_id, charuco_layout, corner_labels_for_plan, dof_summary,
+    film_layout, fit_board_to_module, fit_plane, repeatability,
+)
 
 # 首两点连续失败提前终止规则开关（规则 a）：前两个计划点（含其补测）均失败时立即回 999。
 ENABLE_FIRST_TWO_FAIL_ABORT = True
@@ -53,19 +58,38 @@ class Session:
         self.cfg = dict(config.depth_calibration)
         self.travel_is_fallback = self.cfg.get('travel') is None
         self.travel = self.cfg.get('travel') or config.travel
-        self.cal = film_calibration(calibration, config.tool_offset['card_thickness_mm'],
-                                    config.camera_calibration['board_thickness_mm'])
+        self.configured_target = self.cfg.get('target', 'auto')
+        self.board_thickness_mm = float(config.camera_calibration['board_thickness_mm'])
+        self.camcal_cfg = dict(config.camera_calibration)
+        self.film_cal = film_calibration(calibration, config.tool_offset['card_thickness_mm'],
+                                         self.board_thickness_mm)
+        self.board_cal = calibration
+        self.target_type = None if self.configured_target == 'auto' else self.configured_target
+        self.cal = self.board_cal if self.target_type == 'charuco' else self.film_cal
         self.z_min = max(self.travel[2][0], self.cfg['camera_z_min_mm'])
         self.z_max = self.travel[2][1]
         self.requests, self.replies = [], []
         self.abort_requested = False
         self.last_sample = None
         self.samples, self.results = [], []
-        self.layout, primary, extra = film_layout()
-        self.plan = list(self.cfg['point_order'] or primary)
-        self.extra = [label for label in (self.cfg['extra_points'] or extra) if label not in self.plan]
-        self.corner_labels = corner_labels_for_plan(self.layout, self.plan)
-        self.plan_slots = {label: idx for idx, label in enumerate(self.plan)}
+        self.board_fit = None
+        self.point_positions = {}
+        self._charuco_board = None
+        self._charuco_detector = None
+        self._charuco_marker_detector = None
+        self._charuco_board_points = None
+        if self.configured_target in ('auto', 'film'):
+            self.layout, primary, extra = film_layout()
+            self.plan = list(self.cfg['point_order'] or primary)
+            self.extra = [label for label in (self.cfg['extra_points'] or extra) if label not in self.plan]
+            self.corner_labels = corner_labels_for_plan(self.layout, self.plan)
+            self.plan_slots = {label: idx for idx, label in enumerate(self.plan)}
+        else:
+            self.layout = {}
+            self.plan = []
+            self.extra = []
+            self.corner_labels = set()
+            self.plan_slots = {}
         self.slot_outcomes = {}
         self.retest_parent = {}
         self.attempted_labels = set()
@@ -90,6 +114,43 @@ class Session:
         self.exposure_restore_error = None
         self.exposure_us = None
         self.reset_point()
+
+    @property
+    def target_type_label(self):
+        if self.target_type == 'film':
+            return '菲林'
+        if self.target_type == 'charuco':
+            return f'ChArUco 标定板（厚 {self.board_thickness_mm:.2f}mm）'
+        return '自动检测（待识别）'
+
+    def _ensure_charuco(self):
+        if self._charuco_detector is None:
+            cfg = self.camcal_cfg
+            self._charuco_board = build_charuco_board(
+                cfg['cols'], cfg['rows'], cfg['square_mm'], cfg['marker_mm'], cfg['dictionary'],
+            )
+            self._charuco_detector = cv2.aruco.CharucoDetector(self._charuco_board)
+            self._charuco_marker_detector = cv2.aruco.ArucoDetector(self._charuco_board.getDictionary())
+            self._charuco_board_points = np.asarray(self._charuco_board.getChessboardCorners(), dtype=float)
+
+    def _detect_film_targets(self, frame):
+        targets = detect(frame)
+        if not targets:
+            return []
+        self._ensure_charuco()
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        m5, _, _ = self._charuco_marker_detector.detectMarkers(gray)
+        if not m5:
+            return targets
+        polys = [m.reshape(4, 2).astype(np.float32) for m in m5]
+        filtered = []
+        for item in targets:
+            mc = np.mean(item.marker, axis=0)
+            pt = (float(mc[0]), float(mc[1]))
+            if any(cv2.pointPolygonTest(poly, pt, False) >= 0 for poly in polys):
+                continue
+            filtered.append(item)
+        return filtered
 
     def set_desired_exposure(self, mode, manual_exposure_us):
         """更新期望曝光设置；若当前点已进入扫描则保持本点锁定，下一测点生效。"""
@@ -441,12 +502,39 @@ class Session:
             raise
 
     def center(self, frame, exposure_us=None):
-        h, w = frame.shape[:2]
-        uv = ((w - 1) / 2, (h - 1) / 2)
-        targets = detect(frame)
+        if self.ref_xy is None:
+            if self.configured_target in ('auto', 'film'):
+                film_targets = self._detect_film_targets(frame)
+                if film_targets:
+                    self.target_type = 'film'
+                    self.cal = self.film_cal
+                    return self._center_film(frame, film_targets, exposure_us)
+                if self.configured_target == 'film':
+                    raise GuardError('DEPTH-TARGET', '未识别到菲林圆环和 ArUco 靶点', self.where,
+                                     '检查初始位置、菲林方向、照明及相机焦距。')
+            self._ensure_charuco()
+            pts, ids = detect_charuco_corners(frame, self._charuco_detector)
+            if len(ids) < 6:
+                if self.configured_target == 'auto':
+                    raise GuardError('DEPTH-TARGET', '未识别到菲林靶点或标定板', self.where,
+                                     '检查初始位置、菲林或标定板方向、照明及相机焦距。')
+                raise GuardError('DEPTH-TARGET', f'未识别到足够 ChArUco 标定板角点（检出 {len(ids)} 个，需 ≥ 6 个）',
+                                 self.where, '检查初始位置、标定板方向、照明及相机焦距。')
+            self.target_type = 'charuco'
+            self.cal = self.board_cal
+            return self._init_charuco_and_center(frame, pts, ids, exposure_us)
+
+        if self.target_type == 'charuco':
+            return self._center_charuco_point(frame, exposure_us)
+        targets = self._detect_film_targets(frame)
         if not targets:
             raise GuardError('DEPTH-TARGET', '未识别到菲林圆环和 ArUco 靶点', self.where,
                              '检查初始位置、菲林方向、照明及相机焦距。')
+        return self._center_film(frame, targets, exposure_us)
+
+    def _center_film(self, frame, targets, exposure_us):
+        h, w = frame.shape[:2]
+        uv = ((w - 1) / 2, (h - 1) / 2)
         target = min(targets, key=lambda item: math.dist(item.ring_uv, uv))
         self.identify(target)
         self.label = target.label
@@ -471,7 +559,188 @@ class Session:
                                  self.where, '检查靶点、标定投影和 PLC 到位。')
             self.center_round += 1
             return self.move((x + self.point_xy[0] - center_xy[0], y + self.point_xy[1] - center_xy[1], z))
-        u, v = target.ring_uv
+        return self._finish_center_roi(frame, target.ring_uv, w, h, x, y, z, exposure_us)
+
+    def _select_in_travel_candidate(self, ref_label, reserved):
+        if ref_label not in self.layout:
+            return None
+        candidates = [
+            cand for cand in self.layout
+            if cand != ref_label
+            and cand not in self.attempted_labels
+            and cand not in reserved
+            and self._in_xy_travel(self._target_camera_xy(cand))
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda cand: (round(float(np.linalg.norm(self.layout[cand] - self.layout[ref_label])), 6), cand),
+        )
+
+    def _init_charuco_and_center(self, frame, pts, ids, exposure_us):
+        h, w = frame.shape[:2]
+        uv = ((w - 1) / 2, (h - 1) / 2)
+        module_pts = np.array([pixel_to_module(u, v, self.actual, self.board_cal)[:2] for u, v in pts], dtype=float)
+        board_pts = self._charuco_board_points[ids, :2]
+        try:
+            transform, fit_info = fit_board_to_module(board_pts, module_pts)
+        except ValueError as exc:
+            raise GuardError('DEPTH-TARGET', f'ChArUco 标定板二维位姿拟合失败：{exc}',
+                             self.where, '检查标定板是否在视野内且角点分布非共线。') from exc
+        board_center = (
+            0.5 * float(self.camcal_cfg['cols']) * float(self.camcal_cfg['square_mm']),
+            0.5 * float(self.camcal_cfg['rows']) * float(self.camcal_cfg['square_mm']),
+        )
+        fit_info['center_xy_mm'] = [float(v) for v in transform(board_center)]
+        self.board_fit = fit_info
+
+        self.layout, primary, extra, self.point_positions = charuco_layout(
+            self.camcal_cfg, self._charuco_board_points, transform,
+        )
+        center_xy = pixel_to_module(*uv, self.actual, self.board_cal)[:2]
+        x, y, z = self.actual
+        self.center_offset = np.array(center_xy) - (x, y)
+        self.ref_label = primary[0]
+        self.ref_xy = np.array(self.layout[self.ref_label], dtype=float)
+        if self.initial_z is None:
+            self.initial_z = z
+
+        raw_corners = set(primary[:4])
+        # 若有计划点已在行程内且靠近当前画面中心，优先从该点开始测
+        in_travel_primary = [lbl for lbl in primary if self._in_xy_travel(self._target_camera_xy(lbl))]
+        ordered_primary = list(primary)
+        if in_travel_primary:
+            nearest_start = min(
+                in_travel_primary,
+                key=lambda lbl: (round(float(np.linalg.norm(self.layout[lbl] - center_xy[:2])), 6), lbl),
+            )
+            ordered_primary.remove(nearest_start)
+            ordered_primary.insert(0, nearest_start)
+
+        planned = []
+        reserved = set(ordered_primary)
+        corner_labels = set()
+        self.plan_slots = {}
+        self.slot_outcomes = {}
+        self.retest_parent = {}
+        remaining_extra = list(extra)
+
+        for slot, lbl in enumerate(ordered_primary):
+            if self._in_xy_travel(self._target_camera_xy(lbl)):
+                planned.append(lbl)
+                self.plan_slots[lbl] = slot
+                if lbl in raw_corners:
+                    corner_labels.add(lbl)
+                continue
+            self.attempted_labels.add(lbl)
+            backup = self._select_in_travel_candidate(lbl, reserved - {lbl})
+            if backup is not None:
+                if backup in remaining_extra:
+                    remaining_extra.remove(backup)
+                reserved.add(backup)
+                planned.append(backup)
+                self.plan_slots[backup] = slot
+                self.retest_parent[backup] = lbl
+                if lbl in raw_corners:
+                    corner_labels.add(backup)
+                if backup not in self.point_positions and lbl in self.point_positions:
+                    self.point_positions[backup] = f"{self.point_positions[lbl]}(补)"
+            else:
+                self.slot_outcomes[slot] = 'failed'
+
+            self.failed_points.append({
+                'label': lbl,
+                'position_name': self.point_positions.get(lbl),
+                'xy': [float(v) for v in self.layout[lbl]],
+                'status': 'failed',
+                'error_code': 'POSITION-TRAVEL',
+                'reason': '超出下针深度标定行程（depth_calibration.travel）',
+                'where': 'ChArUco 测点规划',
+                'phase': 'plan',
+                'is_corner': lbl in raw_corners,
+                'retest_of': None,
+                'retest_label': backup,
+                'retest_status': 'pending' if backup is not None else 'unavailable',
+                'exposure_us': None, 'exposure_mode': None,
+                'roi_mean': None, 'roi_p99': None,
+                'fits': [], 'coarse_fit': None, 'coarse_bounds': None, 'fine_plan': None,
+                'arrival': None,
+            })
+
+        final_extra = []
+        for e_lbl in remaining_extra:
+            if e_lbl not in reserved and self._in_xy_travel(self._target_camera_xy(e_lbl)):
+                final_extra.append(e_lbl)
+                reserved.add(e_lbl)
+            else:
+                rep = self._select_in_travel_candidate(e_lbl, reserved)
+                if rep is not None:
+                    final_extra.append(rep)
+                    reserved.add(rep)
+                    if rep not in self.point_positions and e_lbl in self.point_positions:
+                        self.point_positions[rep] = f"{self.point_positions[e_lbl]}(补)"
+
+        self.plan = planned
+        self.extra = final_extra
+        self.corner_labels = corner_labels
+        self.skip_summary = self._build_skip_summary()
+        self._check_early_fatal_rules()
+        if len(self.plan) < self.cfg['min_valid_points']:
+            raise GuardError(
+                'DEPTH-INSUFFICIENT-POINTS',
+                f'行程内可用 ChArUco 测点数 {len(self.plan)} < min_valid_points({self.cfg["min_valid_points"]})',
+                'ChArUco 测点规划',
+                '请将标定板移入 depth_calibration.travel 行程范围内后重试。',
+            )
+
+        first_lbl = self.plan[0]
+        first_id = charuco_corner_id(first_lbl)
+        matches = np.flatnonzero(ids == first_id) if first_id is not None else np.empty(0, int)
+        if len(matches) > 0:
+            corner_uv = tuple(map(float, pts[int(matches[0])]))
+            if math.dist(corner_uv, uv) <= self.cfg['center_tol_px']:
+                self.label = first_lbl
+                self.current_retest_of = self.retest_parent.get(self.label)
+                self.attempted_labels.add(self.label)
+                for item in self.point_arrivals:
+                    if item['point_label'] is None:
+                        item['point_label'] = self.label
+                self.arrival_summary = self._build_arrival_summary()
+                self.point_xy = pixel_to_module(*corner_uv, self.actual, self.board_cal)[:2]
+                return self._finish_center_roi(frame, corner_uv, w, h, x, y, z, exposure_us)
+        return self.locate(first_lbl, z)
+
+    def _center_charuco_point(self, frame, exposure_us):
+        h, w = frame.shape[:2]
+        uv = ((w - 1) / 2, (h - 1) / 2)
+        self._ensure_charuco()
+        pts, ids = detect_charuco_corners(frame, self._charuco_detector)
+        target_id = charuco_corner_id(self.label)
+        matches = np.flatnonzero(ids == target_id) if target_id is not None else np.empty(0, int)
+        if len(matches) == 0:
+            raise GuardError(
+                'DEPTH-TARGET',
+                f'未识别到 ChArUco 目标角点 {self.label}（画面检出 {len(ids)} 个角点）',
+                self.where,
+                '检查该角点附近标定板表面、照明、行程及相机焦距。',
+            )
+        corner_uv = tuple(map(float, pts[int(matches[0])]))
+        self.point_xy = pixel_to_module(*corner_uv, self.actual, self.board_cal)[:2]
+        center_xy = pixel_to_module(*uv, self.actual, self.board_cal)[:2]
+        x, y, z = self.actual
+        self.center_offset = np.array(center_xy) - (x, y)
+        self.attempted_labels.add(self.label)
+        if math.dist(corner_uv, uv) > self.cfg['center_tol_px']:
+            if self.center_round >= self.cfg['center_max_iter']:
+                raise GuardError('DEPTH-CENTER', f'达到居中轮数上限，角点 {self.label} 仍偏离画面中心',
+                                 self.where, '检查靶点、标定投影和 PLC 到位。')
+            self.center_round += 1
+            return self.move((x + self.point_xy[0] - center_xy[0], y + self.point_xy[1] - center_xy[1], z))
+        return self._finish_center_roi(frame, corner_uv, w, h, x, y, z, exposure_us)
+
+    def _finish_center_roi(self, frame, center_uv, w, h, x, y, z, exposure_us):
+        u, v = center_uv
         dx = math.dist(self.point_xy, pixel_to_module(u + 1, v, self.actual, self.cal)[:2])
         dy = math.dist(self.point_xy, pixel_to_module(u, v + 1, self.actual, self.cal)[:2])
         size = max(3, round(self.cfg['roi_mm'] / ((dx + dy) / 2)))
@@ -862,7 +1131,8 @@ class Session:
             for item in failed_fits
         ]
         self.result = {
-            'label': self.label, 'xy': [float(v) for v in self.point_xy], 'fits': self.fits,
+            'label': self.label, 'position_name': self.point_positions.get(self.label),
+            'xy': [float(v) for v in self.point_xy], 'fits': self.fits,
             'coarse_fit': self.coarse_fit, 'coarse_dof': self.coarse_dof,
             'coarse_bounds': self.coarse_bounds, 'fine_plan': self.fine_plan,
             'insufficient_repeats': insufficient,
@@ -923,6 +1193,7 @@ class Session:
         xy = self._target_module_xy(failed_label)
         fail_entry = {
             'label': failed_label,
+            'position_name': self.point_positions.get(failed_label),
             'xy': [float(v) for v in xy] if xy is not None else None,
             'status': 'failed',
             'error_code': exc.code,
@@ -991,7 +1262,11 @@ class Session:
                 '测点失败跳过规则（规则 b）',
                 '有效测点不足，请检查失败测点原因并调整参数后重试。',
             )
-        self.plane = fit_plane(self.results)
+        self.plane = fit_plane(
+            self.results,
+            surface_type=self.target_type or 'film',
+            board_thickness_mm=self.board_thickness_mm,
+        )
         tol = self.cfg['plane_tol_mm']
         avail_extra = [
             lbl for lbl in self.extra
@@ -1031,7 +1306,12 @@ class Session:
                     )
         if self.point_index < len(self.plan):
             return self.locate(self.plan[self.point_index], z_next)
-        self.feasibility = repeatability(self.results, self.cfg['repeat_range_tol_mm'])
+        self.feasibility = repeatability(
+            self.results,
+            self.cfg['repeat_range_tol_mm'],
+            plane=self.plane,
+            target_type=self.target_type or 'film',
+        )
         self.dof_summary = dof_summary(self.results, self.cfg['dof_ratio'])
         self.skip_summary = self._build_skip_summary()
         return None

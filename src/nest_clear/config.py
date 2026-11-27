@@ -211,6 +211,7 @@ def _depth_config(value, global_travel):
             _fail(f"{path}.camera_z_min_mm", "须在 Z 行程内且低于行程上限")
         settings["camera_z_min_mm"] = lower
     for key, options in (
+        ("target", ("auto", "film", "charuco")),
         ("fine_range_mode", ("auto", "fixed")),
         ("metric", METRICS),
         ("peak_method", ("gauss", "half_height")),

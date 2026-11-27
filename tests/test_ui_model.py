@@ -541,3 +541,34 @@ def test_depthcal_skip_summary_and_failed_repeat_dof():
         ],
     })
     assert '细扫1' in dof_txt and '1.120 mm' in dof_txt
+
+
+def test_depthcal_charuco_model_helpers():
+    from nest_clear.ui.model import (
+        depthcal_board_fit_text, depthcal_feasibility_text, depthcal_point_position, depthcal_surface_text,
+    )
+
+    assert '菲林' in depthcal_surface_text({'target_type': 'film'})
+    assert 'ChArUco 标定板（厚 3.15mm）' in depthcal_surface_text({
+        'target_type': 'charuco', 'board_thickness_mm': 3.15,
+    })
+    assert depthcal_board_fit_text({}) == ''
+    fit_txt = depthcal_board_fit_text({'board_fit': {
+        'corner_count': 120, 'angle_deg': 0.57, 'rms_residual_mm': 0.0009, 'max_residual_mm': 0.0018,
+    }})
+    assert '120 角点' in fit_txt and '0.0009 mm' in fit_txt
+    assert depthcal_point_position('C021', {'point_positions': {'C021': '左上'}}) == '左上'
+
+    for res_val, expected_verdict, expected_bg in (
+        (0.012, '可行', '#ecfdf3'),
+        (0.035, '勉强', '#fff7ed'),
+        (0.068, '不可行', '#fff1f0'),
+    ):
+        txt, bg, _ = depthcal_feasibility_text({
+            'target_type': 'charuco',
+            'plane': {'max_residual': res_val},
+            'feasibility': {'max_range': 0.004, 'max_std': 0.002, 'threshold': 0.02, 'met': True},
+        })
+        assert f'标定板平面残差 {res_val:.3f} mm' in txt
+        assert '≤0.02 可行 / ≤0.05 勉强 / >0.05 不可行' in txt
+        assert expected_verdict in txt and bg == expected_bg
