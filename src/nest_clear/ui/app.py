@@ -42,6 +42,11 @@ WHITE = '#ffffff'
 def modal_window(top, parent):
     """Keep a dialog above its parent, including when the parent is fullscreen."""
     top.transient(parent)
+    try:
+        if parent.attributes('-fullscreen') or parent.overrideredirect() or parent.attributes('-topmost'):
+            top.attributes('-topmost', True)
+    except Exception:
+        pass
     top.grab_set()
     top.lift()
     top.focus_force()
@@ -278,6 +283,9 @@ class Picture(tk.Label):
                 self.aspect_changed()
 
     def enlarge(self, _event=None):
+        hook = getattr(self, 'on_enlarge', None)
+        if hook is not None:
+            return hook()
         if self.image is None:
             return
         parent = self.winfo_toplevel()
@@ -287,7 +295,7 @@ class Picture(tk.Label):
         top.rowconfigure(0, weight=1); top.columnconfigure(0, weight=1)
         canvas = tk.Canvas(top, width=1000, height=700, scrollregion=(0, 0, *self.image.size))
         canvas.grid(row=0, column=0, sticky='nsew')
-        photo = ImageTk.PhotoImage(self.image)
+        photo = ImageTk.PhotoImage(self.image, master=top)
         canvas.create_image(0, 0, image=photo, anchor='nw'); canvas.image = photo
         canvas.bind('<ButtonPress-1>', lambda event: canvas.scan_mark(event.x, event.y))
         canvas.bind('<B1-Motion>', lambda event: canvas.scan_dragto(event.x, event.y, gain=1))
@@ -1763,140 +1771,388 @@ class App:
     def build_depth(self):
         self.depth_pending = 0
         self.depth_ack = 0
-        self.depth.columnconfigure(0, weight=64, uniform='depthcols')
-        self.depth.columnconfigure(1, weight=36, uniform='depthcols')
-        self.depth.rowconfigure(1, weight=3, uniform='depthrows')
-        self.depth.rowconfigure(2, weight=2, uniform='depthrows')
+        self._depth_zoom = None
+        family = self.theme.body[0]
+        mono = self.theme.mono[0]
+        bold = 'bold' if len(self.theme.title) > 2 and self.theme.title[2] == 'bold' else 'normal'
+        d_body = (family, 10)
+        d_title = (family, 11, bold)
+        d_small = (family, 9)
+        d_mono = (mono, 10)
+        d_mono_sm = (mono, 9)
+        self._depth_fonts = {'body': d_body, 'title': d_title, 'small': d_small, 'mono': d_mono, 'mono_sm': d_mono_sm}
+        try:
+            style = ttk.Style(self.root)
+            style.configure('Depth.TButton', font=d_body, padding=(6, 2))
+            style.configure('Depth.Treeview', font=d_mono_sm, rowheight=21, background=WHITE,
+                            fieldbackground=WHITE, foreground=INK, bordercolor=BORDER, borderwidth=1)
+            style.configure('Depth.Treeview.Heading', font=d_small, background='#eaecf0', foreground=INK, relief='flat')
+            style.map('Depth.Treeview', background=[('selected', '#dbeafe')], foreground=[('selected', INK)])
+        except Exception:
+            pass
 
-        head = self.card(self.depth, '下针深度标定 · 料盘多点对焦测试', 0, 0, columnspan=2)
+        def depth_card(parent, title, row, column, **options):
+            card = Card(parent, title, self.theme)
+            card.grid(row=row, column=column, sticky='nsew', padx=2, pady=2, **options)
+            title_lbl = getattr(card, 'title_label', None)
+            if title_lbl is not None:
+                title_lbl.configure(font=d_title)
+                title_lbl.grid_configure(padx=6, pady=(2, 0))
+            card.body.grid_configure(padx=6, pady=(1, 4))
+            return card.body
+
+        self.depth.columnconfigure(0, weight=68, uniform='depthcols')
+        self.depth.columnconfigure(1, weight=32, uniform='depthcols')
+        self.depth.rowconfigure(0, weight=0)
+        self.depth.rowconfigure(1, weight=70, uniform='depthrows')
+        self.depth.rowconfigure(2, weight=30, uniform='depthrows')
+
+        head = depth_card(self.depth, '下针深度标定 · 料盘多点对焦测试', 0, 0, columnspan=2)
         head.columnconfigure(0, weight=1)
+
         bar = tk.Frame(head, bg=WHITE)
         bar.grid(row=0, column=0, sticky='ew')
-        bar.columnconfigure(4, weight=1)
+        bar.columnconfigure(6, weight=1)
         self.depth_stage = tk.Label(bar, text='阶段：空闲（等待 PLC 160）', bg='#eef2f6', fg=INK,
-                                    font=(self.theme.title[0], 13, 'bold'), padx=12, pady=3)
-        self.depth_stage.grid(row=0, column=0, sticky='w', padx=(0, 10))
-        self.depth_target = tk.Label(bar, text='靶点：—', bg='#eef2f6', fg=INK, font=self.theme.mono, padx=10, pady=3)
-        self.depth_target.grid(row=0, column=1, sticky='w', padx=(0, 10))
-        self.depth_z = tk.Label(bar, text='PLC Z：— mm', bg='#eef2f6', fg=INK, font=self.theme.mono, padx=10, pady=3)
-        self.depth_z.grid(row=0, column=2, sticky='w', padx=(0, 10))
-        self.depth_dof = tk.Label(bar, text='景深：—（FWHM —）', bg='#eef2f6', fg=INK, font=self.theme.mono, padx=10, pady=3)
-        self.depth_dof.grid(row=0, column=3, sticky='w', padx=(0, 10))
-        self.depth_abort = ttk.Button(bar, text='放弃本次标定', command=lambda: self.depth_command('depthcal_abort'))
-        self.depth_abort.grid(row=0, column=5, sticky='e', padx=4)
-
-        subbar = tk.Frame(head, bg=WHITE)
-        subbar.grid(row=1, column=0, sticky='ew', pady=(4, 0))
-        self.depth_metric = tk.Label(subbar, text='指标：tenengrad · gauss', bg=WHITE, fg=MUTED, font=self.theme.body)
-        self.depth_metric.grid(row=0, column=0, sticky='w', padx=(0, 12))
-        self.depth_fine_info = tk.Label(subbar, text='细扫：等待粗扫完成后确定', bg='#eef2f6', fg=INK,
-                                        font=self.theme.mono, padx=8, pady=2)
-        self.depth_fine_info.grid(row=0, column=1, sticky='w')
+                                    font=d_title, padx=8, pady=2)
+        self.depth_stage.grid(row=0, column=0, sticky='w', padx=(0, 6))
+        self.depth_target = tk.Label(bar, text='靶点：—', bg='#eef2f6', fg=INK, font=d_mono, padx=7, pady=2)
+        self.depth_target.grid(row=0, column=1, sticky='w', padx=(0, 6))
+        self.depth_z = tk.Label(bar, text='PLC Z：— mm', bg='#eef2f6', fg=INK, font=d_mono, padx=7, pady=2)
+        self.depth_z.grid(row=0, column=2, sticky='w', padx=(0, 6))
+        self.depth_dof = tk.Label(bar, text='景深：—（FWHM —）', bg='#eef2f6', fg=INK, font=d_mono, padx=7, pady=2)
+        self.depth_dof.grid(row=0, column=3, sticky='w', padx=(0, 8))
+        self.depth_metric = tk.Label(bar, text='指标：tenengrad · gauss', bg=WHITE, fg=MUTED, font=d_small)
+        self.depth_metric.grid(row=0, column=4, sticky='w', padx=(0, 8))
+        self.depth_fine_info = tk.Label(bar, text='细扫：等待粗扫完成后确定', bg='#eef2f6', fg=INK,
+                                        font=d_mono_sm, padx=6, pady=2)
+        self.depth_fine_info.grid(row=0, column=5, sticky='w')
+        self.depth_abort = ttk.Button(bar, text='放弃本次标定', style='Depth.TButton',
+                                      command=lambda: self.depth_command('depthcal_abort'))
+        self.depth_abort.grid(row=0, column=7, sticky='e', padx=2)
 
         expbar = tk.Frame(head, bg=WHITE)
-        expbar.grid(row=2, column=0, sticky='ew', pady=(4, 0))
-        tk.Label(expbar, text='曝光：', bg=WHITE, fg=MUTED, font=self.theme.body).grid(row=0, column=0, sticky='w')
+        expbar.grid(row=1, column=0, sticky='ew', pady=(2, 0))
+        tk.Label(expbar, text='曝光：', bg=WHITE, fg=MUTED, font=d_body).grid(row=0, column=0, sticky='w')
         self.depth_exp_mode = 'auto'
         self.depth_exp_user_dirty = False
         self._depth_exp_synced = None
         self.depth_exp_auto_btn = tk.Button(
             expbar, text='◉ 自动', command=lambda: self.select_depth_exposure_mode('auto'),
-            bg='#dbeafe', fg='#1d4ed8', font=self.theme.body, bd=1, relief='sunken', padx=8, pady=1,
+            bg='#dbeafe', fg='#1d4ed8', font=d_body, bd=1, relief='sunken', padx=6, pady=0,
         )
-        self.depth_exp_auto_btn.grid(row=0, column=1, sticky='w', padx=(2, 4))
+        self.depth_exp_auto_btn.grid(row=0, column=1, sticky='w', padx=(2, 3))
         self.depth_exp_manual_btn = tk.Button(
             expbar, text='○ 手动', command=lambda: self.select_depth_exposure_mode('manual'),
-            bg='#f8fafc', fg=INK, font=self.theme.body, bd=1, relief='raised', padx=8, pady=1,
+            bg='#f8fafc', fg=INK, font=d_body, bd=1, relief='raised', padx=6, pady=0,
         )
-        self.depth_exp_manual_btn.grid(row=0, column=2, sticky='w', padx=(0, 8))
-        tk.Label(expbar, text='手动(µs):', bg=WHITE, fg=MUTED, font=self.theme.body).grid(row=0, column=3, sticky='w')
-        self.depth_exp_entry = ttk.Entry(expbar, width=9, font=self.theme.mono)
-        self.depth_exp_entry.grid(row=0, column=4, sticky='w', padx=(4, 4))
-        self.depth_exp_apply = ttk.Button(expbar, text='应用', command=self.apply_depth_exposure)
-        self.depth_exp_apply.grid(row=0, column=5, sticky='w', padx=(0, 10))
+        self.depth_exp_manual_btn.grid(row=0, column=2, sticky='w', padx=(0, 6))
+        tk.Label(expbar, text='手动(µs):', bg=WHITE, fg=MUTED, font=d_body).grid(row=0, column=3, sticky='w')
+        self.depth_exp_entry = ttk.Entry(expbar, width=8, font=d_mono)
+        self.depth_exp_entry.grid(row=0, column=4, sticky='w', padx=(3, 3))
+        self.depth_exp_apply = ttk.Button(expbar, text='应用', style='Depth.TButton', command=self.apply_depth_exposure)
+        self.depth_exp_apply.grid(row=0, column=5, sticky='w', padx=(0, 8))
         self.depth_exp_live = tk.Label(
             expbar, text='当前曝光：— µs  |  ROI 均值 — / p99 —',
-            bg='#eef2f6', fg=INK, font=self.theme.mono, padx=8, pady=2,
+            bg='#eef2f6', fg=INK, font=d_mono, padx=7, pady=1,
         )
-        self.depth_exp_live.grid(row=0, column=6, sticky='w', padx=(0, 10))
-        self.depth_exp_status = tk.Label(expbar, text='', bg=WHITE, fg=MUTED, font=self.theme.body)
+        self.depth_exp_live.grid(row=0, column=6, sticky='w', padx=(0, 8))
+        self.depth_exp_status = tk.Label(expbar, text='', bg=WHITE, fg=MUTED, font=d_body)
         self.depth_exp_status.grid(row=0, column=7, sticky='w')
 
         self.depth_message = tk.Label(head, text='等待 PLC 160 发起料盘多点对焦测试', bg=WHITE, fg=INK,
-                                      font=(self.theme.title[0], 13), anchor='w', justify='left', wraplength=1360)
-        self.depth_message.grid(row=3, column=0, sticky='ew', pady=(4, 2))
+                                      font=d_body, anchor='w', justify='left', wraplength=1800)
+        self.depth_message.grid(row=2, column=0, sticky='ew', pady=(2, 1))
         self.depth_failure_detail = tk.Label(head, text='', bg='#fff1f0', fg=COLORS['red'],
-                                             font=self.theme.body, anchor='w', justify='left', padx=8, pady=4, wraplength=1360)
-        self.depth_failure_detail.grid(row=4, column=0, sticky='ew', pady=(0, 2))
+                                             font=d_small, anchor='w', justify='left', padx=6, pady=2, wraplength=1800)
+        self.depth_failure_detail.grid(row=3, column=0, sticky='ew', pady=(0, 1))
         self.depth_failure_detail.grid_remove()
         self.depth_notice = tk.Label(head, text='', bg='#fff7ed', fg=COLORS['yellow'],
-                                     font=self.theme.body, anchor='w', justify='left', padx=8, pady=3, wraplength=1360)
-        self.depth_notice.grid(row=5, column=0, sticky='ew', pady=(0, 2))
+                                     font=d_small, anchor='w', justify='left', padx=6, pady=2, wraplength=1800)
+        self.depth_notice.grid(row=4, column=0, sticky='ew', pady=(0, 1))
         self.depth_notice.grid_remove()
-        self.depth_feasibility = tk.Label(head, text='可行性结论：等待测点完成后评估（总误差预算 0.05mm，对焦环节约 0.02mm）',
-                                          bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 11, 'bold'),
-                                          anchor='w', justify='left', padx=8, pady=4, wraplength=1360)
-        self.depth_feasibility.grid(row=6, column=0, sticky='ew')
-        self.depth_dof_summary = tk.Label(head, text='全盘景深（dof_ratio=0.80）：等待测点完成后汇总',
-                                          bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 10, 'bold'),
-                                          anchor='w', justify='left', padx=8, pady=3, wraplength=1360)
-        self.depth_dof_summary.grid(row=7, column=0, sticky='ew', pady=(2, 0))
 
-        curves_body = self.card(self.depth, '清晰度曲线（粗扫灰线 · 细扫彩线 · 竖线=峰位 · 浅蓝=DOF 区间）', 1, 0)
+        sum_row = tk.Frame(head, bg=WHITE)
+        sum_row.grid(row=5, column=0, sticky='ew', pady=(1, 0))
+        sum_row.columnconfigure(0, weight=3)
+        sum_row.columnconfigure(1, weight=2)
+        self.depth_feasibility = tk.Label(sum_row, text='可行性结论：等待测点完成后评估（总误差预算 0.05mm，对焦环节约 0.02mm）',
+                                          bg='#f8fafc', fg=MUTED, font=(family, 10, bold),
+                                          anchor='w', justify='left', padx=6, pady=2, wraplength=1100)
+        self.depth_feasibility.grid(row=0, column=0, sticky='ew', padx=(0, 4))
+        self.depth_dof_summary = tk.Label(sum_row, text='全盘景深（dof_ratio=0.80）：等待测点完成后汇总',
+                                          bg='#f8fafc', fg=MUTED, font=(family, 9, bold),
+                                          anchor='w', justify='left', padx=6, pady=2, wraplength=720)
+        self.depth_dof_summary.grid(row=0, column=1, sticky='ew')
+
+        curves_body = depth_card(self.depth, '清晰度曲线（粗扫灰线 · 细扫彩线 · 竖线=峰位 · 浅蓝=DOF 区间）', 1, 0)
         curves_body.grid_propagate(False)
         self.depth_curves = tk.Canvas(curves_body, bg=WHITE, highlightthickness=0)
         self.depth_curves.grid(row=0, column=0, sticky='nsew')
 
-        right = tk.Frame(self.depth, bg=BG)
-        right.grid(row=1, column=1, sticky='nsew')
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=1)
-        right.rowconfigure(1, weight=0)
-
-        roi_body = self.card(right, 'ROI 实时缩略图 · 点击放大', 0, 0)
+        roi_body = depth_card(self.depth, 'ROI 实时图 · 点击放大（支持切看整幅居中图）', 1, 1)
         roi_body.grid_propagate(False)
-        self.depth_roi_pic = self.picture(roi_body, 'depthcal_roi')
+        self.depth_roi_zoom_btn = ttk.Button(roi_body.master, text='放大查看', style='Depth.TButton',
+                                             command=self.open_depth_zoom)
+        self.depth_roi_zoom_btn.grid(row=0, column=0, sticky='e', padx=(0, 6), pady=(1, 0))
+        roi_stage = self.depth_roi_stage = tk.Frame(roi_body, bg='#eef1f5')
+        roi_stage.grid(row=0, column=0)
+        roi_stage.grid_propagate(False)
+        roi_stage.rowconfigure(0, weight=1)
+        roi_stage.columnconfigure(0, weight=1)
+        self.depth_roi_pic = self.picture(roi_stage, 'depthcal_roi')
+        self.depth_roi_pic.configure(font=d_body)
+        self.depth_roi_pic.on_enlarge = self.open_depth_zoom
+        roi_size_cache = [0]
 
-        plane_body = self.card(right, '平面拟合结果', 1, 0)
+        def resize_depth_roi(event):
+            side = max(1, min(event.width, event.height) - 2)
+            if abs(side - roi_size_cache[0]) >= 2:
+                roi_size_cache[0] = side
+                roi_stage.configure(width=side, height=side)
+
+        roi_body.bind('<Configure>', resize_depth_roi)
+
+        table_body = depth_card(self.depth, '各测点对焦重复性结果', 2, 0)
+        table_body.columnconfigure(0, weight=1)
+        table_body.rowconfigure(0, weight=0)
+        table_body.rowconfigure(1, weight=1)
+        table_sum = tk.Frame(table_body, bg=WHITE)
+        table_sum.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 2))
+        table_sum.columnconfigure(0, weight=1)
+        table_sum.columnconfigure(1, weight=1)
+        self.depth_arrival_summary = tk.Label(
+            table_sum, text='到位：等待测点到位数据（详见 arrivals.csv）',
+            bg='#f8fafc', fg=MUTED, font=(family, 9, bold),
+            anchor='w', justify='left', padx=6, pady=2, wraplength=620,
+        )
+        self.depth_arrival_summary.grid(row=0, column=0, sticky='ew', padx=(0, 4))
+        self.depth_skip_summary = tk.Label(
+            table_sum, text='跳过/补测：无失败点',
+            bg='#f8fafc', fg='#475467', font=(family, 9, bold),
+            anchor='w', justify='left', padx=6, pady=2, wraplength=620,
+        )
+        self.depth_skip_summary.grid(row=0, column=1, sticky='ew')
+        cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'DOF 均值', 'DOF 极差', 'R²', '到位超差')
+        widths = (78, 108, 72, 72, 72, 80, 56, 56, 52, 82, 60, 54, 165)
+        self.depth_table = self.table_widget(
+            table_body, cols, widths, stretch=cols, height=6,
+            anchor='center', heading_anchor='center',
+        )
+        try:
+            self.depth_table.configure(style='Depth.Treeview')
+        except Exception:
+            pass
+        self.depth_table.grid(row=1, column=0, sticky='nsew')
+        self.depth_table.tag_configure('arrival_warn', background='#fef3c7', foreground='#916300')
+        self.depth_table.tag_configure('point_failed', background='#fee2e2', foreground='#b42318')
+        depth_scroll = ttk.Scrollbar(table_body, orient='vertical', command=self.depth_table.yview)
+        depth_scroll.grid(row=1, column=1, sticky='ns')
+        self.depth_table.configure(yscrollcommand=depth_scroll.set)
+
+        plane_body = depth_card(self.depth, '平面拟合结果', 2, 1)
         self.depth_plane_grid = KeyValueGrid(
             plane_body,
             ('平面方程', '最大 |残差| / 倾斜', '加测判定', '各点残差 (mm)'),
             self.theme,
         )
         self.depth_plane_grid.grid(row=0, column=0, sticky='nsew')
-        for widget in getattr(self.depth_plane_grid, 'winfo_children', lambda: ())():
-            widget.configure(font=(self.theme.body[0], 10), pady=1)
-            widget.grid_configure(pady=0)
+        for idx, widget in enumerate(getattr(self.depth_plane_grid, 'winfo_children', lambda: ())()):
+            widget.configure(font=d_mono_sm if idx % 2 else d_small, pady=1)
+            widget.grid_configure(pady=1)
 
-        table_body = self.card(self.depth, '各测点对焦重复性结果', 2, 0, columnspan=2)
-        table_body.rowconfigure(0, weight=0)
-        table_body.rowconfigure(1, weight=1)
-        self.depth_arrival_summary = tk.Label(
-            table_body, text='到位：等待测点到位数据（详见 arrivals.csv）',
-            bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 10, 'bold'),
-            anchor='w', justify='left', padx=8, pady=3, wraplength=1360,
+    def _depth_zoom_source(self, mode):
+        """解析放大窗口要显示的图片源路径、内存图回退与状态键。"""
+        data = (getattr(self, '_last_main', None) or {}).get('depthcal') or {}
+        if mode == 'center':
+            candidates = []
+            raw_path = data.get('center_image_path')
+            if isinstance(raw_path, str) and raw_path:
+                candidates.append(Path(raw_path))
+            candidates.append(live_image_file(self.directory, 'depthcal_center'))
+            for path in candidates:
+                try:
+                    stamp = path.stat().st_mtime_ns
+                except OSError:
+                    continue
+                if not self.started_at_ns or stamp >= self.started_at_ns:
+                    return path, stamp, None
+            return None, None, None
+
+        roi_path = getattr(self.depth_roi_pic, 'path', live_image_file(self.directory, 'depthcal_roi'))
+        try:
+            stamp = roi_path.stat().st_mtime_ns
+        except OSError:
+            stamp = None
+        if stamp is not None and (not self.started_at_ns or stamp >= self.started_at_ns):
+            return roi_path, stamp, None
+        mem_img = getattr(self.depth_roi_pic, 'image', None)
+        if mem_img is not None:
+            return None, id(mem_img), mem_img
+        return None, None, None
+
+    def set_depth_zoom_mode(self, mode):
+        state = getattr(self, '_depth_zoom', None)
+        if not state or mode not in ('roi', 'center'):
+            return
+        state['mode'] = mode
+        state['sig'] = None
+        roi_on = mode == 'roi'
+        state['roi_btn'].config(
+            bg='#dbeafe' if roi_on else '#f8fafc',
+            fg='#1d4ed8' if roi_on else INK,
+            relief='sunken' if roi_on else 'raised',
         )
-        self.depth_arrival_summary.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 4))
-        self.depth_skip_summary = tk.Label(
-            table_body, text='跳过/补测：无失败点',
-            bg='#f8fafc', fg='#475467', font=(self.theme.title[0], 10, 'bold'),
-            anchor='w', justify='left', padx=8, pady=2, wraplength=1360,
+        state['center_btn'].config(
+            bg='#f8fafc' if roi_on else '#dbeafe',
+            fg=INK if roi_on else '#1d4ed8',
+            relief='raised' if roi_on else 'sunken',
         )
-        self.depth_skip_summary.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, 4))
-        table_body.rowconfigure(1, weight=0)
-        table_body.rowconfigure(2, weight=1)
-        cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'DOF 均值', 'DOF 极差', 'R²', '到位超差')
-        widths = (50, 128, 92, 92, 92, 96, 68, 68, 66, 88, 76, 64, 215)
-        self.depth_table = self.table_widget(
-            table_body, cols, widths, stretch=cols, height=5,
-            anchor='center', heading_anchor='center',
-        )
-        self.depth_table.grid(row=2, column=0, sticky='nsew')
-        self.depth_table.tag_configure('arrival_warn', background='#fef3c7', foreground='#916300')
-        self.depth_table.tag_configure('point_failed', background='#fee2e2', foreground='#b42318')
-        depth_scroll = ttk.Scrollbar(table_body, orient='vertical', command=self.depth_table.yview)
-        depth_scroll.grid(row=2, column=1, sticky='ns')
-        self.depth_table.configure(yscrollcommand=depth_scroll.set)
+        self._refresh_depth_zoom(reschedule=False)
+
+    def _refresh_depth_zoom(self, reschedule=True):
+        state = getattr(self, '_depth_zoom', None)
+        if not state:
+            return
+        top = state['top']
+        exists = getattr(top, 'winfo_exists', lambda: not getattr(top, 'destroyed', False))
+        try:
+            if not exists():
+                self._depth_zoom = None
+                return
+        except Exception:
+            self._depth_zoom = None
+            return
+
+        mode = state['mode']
+        data = (getattr(self, '_last_main', None) or {}).get('depthcal') or {}
+        path, stamp, mem_img = self._depth_zoom_source(mode)
+        canvas = state['canvas']
+        try:
+            cw = max(200, int(canvas.winfo_width()))
+            ch = max(200, int(canvas.winfo_height()))
+        except Exception:
+            cw, ch = 800, 680
+        if cw <= 10 or ch <= 10:
+            cw, ch = 800, 680
+
+        if stamp != state.get('img_sig'):
+            pil_img = None
+            if mem_img is not None:
+                pil_img = mem_img.copy()
+            elif path is not None:
+                try:
+                    with Image.open(path) as src:
+                        pil_img = src.copy()
+                except Exception:
+                    pil_img = None
+            state['img_sig'] = stamp
+            state['pil_image'] = pil_img
+            state['draw_sig'] = None
+
+        pil_img = state.get('pil_image')
+        draw_sig = (state.get('img_sig'), cw, ch, mode)
+        if draw_sig != state.get('draw_sig'):
+            state['draw_sig'] = draw_sig
+            canvas.delete('all')
+            if pil_img is not None:
+                iw, ih = pil_img.size
+                scale = min((cw - 16) / max(1, iw), (ch - 16) / max(1, ih))
+                nw, nh = max(1, round(iw * scale)), max(1, round(ih * scale))
+                resized = pil_img.resize((nw, nh), Image.Resampling.LANCZOS)
+                try:
+                    photo = ImageTk.PhotoImage(resized, master=top)
+                except TypeError:
+                    photo = ImageTk.PhotoImage(resized)
+                canvas.create_image(cw / 2, ch / 2, image=photo, anchor='center')
+                canvas.image = photo
+                dim_txt = f'{iw}×{ih}'
+            else:
+                canvas.image = None
+                msg = '暂无最近一次整幅居中图，等待测点居中采图…' if mode == 'center' else '暂无 ROI 图像，等待采图…'
+                canvas.create_text(cw / 2, ch / 2, text=msg, fill='#cbd5e1', font=self._depth_fonts['body'])
+                dim_txt = '—'
+
+            lbl = data.get('label') or '—'
+            z_val = data.get('z')
+            z_txt = f'{z_val:.3f}mm' if isinstance(z_val, (int, float)) else '—'
+            exp_txt = depthcal_exposure_display(data).replace('当前曝光：', '曝光 ').replace('  |  ', ' | ')
+            mode_name = '最新 ROI' if mode == 'roi' else '整幅居中图'
+            state['info'].config(text=f'{mode_name}({dim_txt}) | {lbl} Z={z_txt} | {exp_txt}')
+
+        if reschedule:
+            state['after_id'] = top.after(150, self._refresh_depth_zoom)
+
+    def open_depth_zoom(self, _event=None):
+        """打开可实时刷新的深度标定放大窗口，支持在最新 ROI 与最近整幅居中图之间切换。"""
+        existing = getattr(self, '_depth_zoom', None)
+        if existing is not None:
+            top = existing['top']
+            exists = getattr(top, 'winfo_exists', lambda: not getattr(top, 'destroyed', False))
+            try:
+                if exists():
+                    top.lift()
+                    top.focus_force()
+                    self._refresh_depth_zoom(reschedule=False)
+                    return top
+            except Exception:
+                pass
+            self._depth_zoom = None
+
+        top = tk.Toplevel(self.root)
+        modal_window(top, self.root)
+        top.title('下针深度标定 · ROI 与整幅居中图放大')
+        try:
+            sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            ww, wh = min(1060, max(680, sw - 120)), min(820, max(540, sh - 120))
+            px, py = max(0, (sw - ww) // 2), max(0, (sh - wh) // 2)
+            top.geometry(f'{ww}x{wh}+{px}+{py}')
+        except Exception:
+            pass
+        top.rowconfigure(1, weight=1)
+        top.columnconfigure(0, weight=1)
+
+        toolbar = tk.Frame(top, bg=WHITE)
+        toolbar.grid(row=0, column=0, sticky='ew', padx=6, pady=4)
+        toolbar.columnconfigure(2, weight=1)
+        fonts = getattr(self, '_depth_fonts', {'body': self.theme.body, 'mono': self.theme.mono})
+        roi_btn = tk.Button(toolbar, text='最新 ROI', font=fonts['body'], bd=1, padx=8, pady=2,
+                            bg='#dbeafe', fg='#1d4ed8', relief='sunken',
+                            command=lambda: self.set_depth_zoom_mode('roi'))
+        roi_btn.grid(row=0, column=0, padx=(0, 4))
+        center_btn = tk.Button(toolbar, text='最近整幅居中图', font=fonts['body'], bd=1, padx=8, pady=2,
+                               bg='#f8fafc', fg=INK, relief='raised',
+                               command=lambda: self.set_depth_zoom_mode('center'))
+        center_btn.grid(row=0, column=1, padx=(0, 10))
+        info = tk.Label(toolbar, text='', bg=WHITE, fg=INK, font=fonts['mono'], anchor='w')
+        info.grid(row=0, column=2, sticky='ew')
+        close_btn = ttk.Button(toolbar, text='关闭', style='Depth.TButton', command=top.destroy)
+        close_btn.grid(row=0, column=3, padx=(8, 0))
+
+        canvas = tk.Canvas(top, width=860, height=700, bg='#1e293b', highlightthickness=0)
+        canvas.grid(row=1, column=0, sticky='nsew')
+
+        self._depth_zoom = {
+            'top': top, 'canvas': canvas, 'info': info,
+            'roi_btn': roi_btn, 'center_btn': center_btn,
+            'mode': 'roi', 'img_sig': None, 'draw_sig': None, 'pil_image': None, 'after_id': None,
+        }
+
+        def on_close(_event=None):
+            st = getattr(self, '_depth_zoom', None)
+            if st and st.get('top') is top:
+                aid = st.get('after_id')
+                if aid is not None and hasattr(top, 'after_cancel'):
+                    try:
+                        top.after_cancel(aid)
+                    except Exception:
+                        pass
+                self._depth_zoom = None
+
+        top.protocol('WM_DELETE_WINDOW', lambda: (on_close(), top.destroy()))
+        canvas.bind('<Configure>', lambda _e: self._refresh_depth_zoom(reschedule=False))
+        self._refresh_depth_zoom(reschedule=True)
+        return top
 
     def depth_command(self, name, params=None):
         return self._send_page_command('depth', name, params)
@@ -2116,6 +2372,8 @@ class App:
                 ), tags=('point_failed',))
 
         self.draw_depthcal_curves(data)
+        if getattr(self, '_depth_zoom', None) is not None:
+            self._refresh_depth_zoom(reschedule=False)
 
     def draw_depthcal_curves(self, data):
         c = self.depth_curves

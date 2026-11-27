@@ -188,20 +188,46 @@ def _draw_offset_demo_images(root: Path, offset_state: str, step: int = 0) -> No
 
 
 def _draw_depthcal_demo_roi(root: Path, depthcal_state: str, z_val: float, label: str) -> None:
-    """用纯 PIL 绘制下针深度标定 ROI 实时缩略图（无 cv2/numpy 依赖）。"""
+    """用纯 PIL 绘制下针深度标定 ROI 实时图与整幅居中图（无 cv2/numpy 依赖）。"""
     path = live_image_file(root, 'depthcal_roi')
     path.parent.mkdir(parents=True, exist_ok=True)
-    img = Image.new('RGB', (280, 280), (226, 230, 236))
+    img = Image.new('RGB', (640, 640), (222, 227, 234))
     draw = ImageDraw.Draw(img)
-    ring_color = (28, 32, 38) if depthcal_state in ('fine', 'done') else (85, 92, 102)
-    draw.ellipse((96, 96, 184, 184), outline=ring_color, width=6)
-    draw.line((55, 140, 225, 140), fill=ring_color, width=2)
-    draw.line((140, 55, 140, 225), fill=ring_color, width=2)
-    draw.rectangle((4, 4, 276, 30), fill=(255, 255, 255), outline=(200, 210, 220))
-    draw.text((10, 10), f'{label}  Z={z_val:.3f}mm  {depthcal_state}', fill=(20, 40, 80))
+    ring_color = (24, 28, 34) if depthcal_state in ('fine', 'done', 'done_skip') else (75, 84, 96)
+    draw.ellipse((210, 210, 430, 430), outline=ring_color, width=12)
+    draw.ellipse((226, 226, 414, 414), outline=(244, 246, 248), width=3)
+    draw.line((100, 320, 540, 320), fill=ring_color, width=4)
+    draw.line((320, 100, 320, 540), fill=ring_color, width=4)
+    # 模拟 ArUco 标记块在左上角
+    draw.rectangle((48, 48, 168, 168), fill=(242, 244, 247), outline=ring_color, width=4)
+    for r in range(3):
+        for c in range(3):
+            if (r + c) % 2 == 0:
+                draw.rectangle((66 + c * 28, 66 + r * 28, 92 + c * 28, 92 + r * 28), fill=ring_color)
+    draw.rectangle((10, 10, 630, 44), fill=(255, 255, 255), outline=(190, 200, 212))
+    draw.text((18, 20), f'ROI  {label}  Z={z_val:.3f}mm  {depthcal_state}', fill=(20, 40, 80))
     tmp = path.with_suffix('.tmp')
-    img.save(tmp, format='JPEG')
+    img.save(tmp, format='JPEG', quality=92)
     os.replace(tmp, path)
+
+    cpath = live_image_file(root, 'depthcal_center')
+    full = Image.new('RGB', (1006, 759), (212, 218, 226))
+    fdraw = ImageDraw.Draw(full)
+    # 主靶点与相邻靶点示意
+    for ox, oy, active in ((503, 380, True), (190, 380, False), (816, 380, False), (503, 120, False)):
+        col = (26, 30, 36) if active else (110, 118, 128)
+        fdraw.ellipse((ox - 54, oy - 54, ox + 54, oy + 54), outline=col, width=5)
+        fdraw.line((ox - 85, oy, ox + 85, oy), fill=col, width=2)
+        fdraw.line((ox, oy - 85, ox, oy + 85), fill=col, width=2)
+        fdraw.rectangle((ox - 110, oy - 110, ox - 64, oy - 64), outline=col, width=2)
+    fdraw.rectangle((343, 220, 663, 540), outline=(37, 99, 235), width=3)
+    fdraw.line((483, 380, 523, 380), fill=(220, 38, 38), width=2)
+    fdraw.line((503, 360, 503, 400), fill=(220, 38, 38), width=2)
+    fdraw.rectangle((16, 16, 520, 54), fill=(255, 255, 255), outline=(190, 200, 212))
+    fdraw.text((24, 28), f'Center Full Frame  {label}  Z={z_val:.3f}mm  ROI=8.0mm', fill=(20, 40, 80))
+    ctmp = cpath.with_suffix('.tmp')
+    full.save(ctmp, format='JPEG', quality=90)
+    os.replace(ctmp, cpath)
 
 
 def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
@@ -398,6 +424,102 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             },
             'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
         }, z_cur, lbl)
+
+    if state == 'done_skip':
+        skip_plan = ['T02', 'T03', 'T05', 'T29', 'T26', 'T12']
+        curves['T02'] = {'coarse': [[round(-2.0 - 0.5 * i, 2), round(0.155 + 0.002 * (i % 3), 4)] for i in range(13)]}
+        extra_coords = {'T03': [96.0, 55.0]}
+        extra_peaks = {'T03': -5.029}
+        for lbl in ('T03', 'T05', 'T29', 'T26', 'T12'):
+            pk = extra_peaks.get(lbl, true_peaks.get(lbl, -5.01))
+            dw = point_fwhm_delta.get(lbl, 0.0)
+            curves[lbl] = {
+                'coarse': [[round(-2.0 - 0.5 * i, 2), curve_val(round(-2.0 - 0.5 * i, 2), pk, amp=0.84, sigma=0.85)] for i in range(13)],
+                '1': [[round(pk + 1.50 - 0.075 * i, 4), curve_val(round(pk + 1.50 - 0.075 * i, 4), pk - 0.0015, amp=0.92, sigma=(1.985 + dw) / 2.35482)] for i in range(41)],
+                '2': [[round(pk + 1.50 - 0.075 * i, 4), curve_val(round(pk + 1.50 - 0.075 * i, 4), pk + 0.0012, amp=0.92, sigma=(1.993 + dw) / 2.35482)] for i in range(41)],
+                '3': [[round(pk + 1.50 - 0.075 * i, 4), curve_val(round(pk + 1.50 - 0.075 * i, 4), pk + 0.0004, amp=0.92, sigma=(2.001 + dw) / 2.35482)] for i in range(41)],
+            }
+            if lbl in true_peaks:
+                res = make_result(lbl)
+            else:
+                fits_t03 = [
+                    {
+                        'repeat': r_i + 1,
+                        'z_peak': round(pk + off, 5),
+                        'fwhm': 1.99 + r_i * 0.006,
+                        'r2': 0.9972 - r_i * 0.0002,
+                        'dof_mm': 1.158,
+                        'dof_gauss_mm': 1.156,
+                        'dof_ratio': 0.8,
+                        'dof_z_lower': round(pk - 0.579, 4),
+                        'dof_z_upper': round(pk + 0.579, 4),
+                        'dof_covered': True,
+                        'quality_ok': True,
+                    }
+                    for r_i, off in enumerate((-0.0015, 0.0012, 0.0004))
+                ]
+                res = {
+                    'label': 'T03', 'xy': extra_coords['T03'], 'fits': fits_t03,
+                    'coarse_fit': {'z_peak': pk, 'fwhm': 2.0, 'dof_mm': 1.16, 'dof_ratio': 0.8, 'dof_covered': True},
+                    'coarse_bounds': {'blur_low_z': round(pk - 1.5, 2), 'blur_high_z': round(pk + 1.5, 2),
+                                      'blur_low_reached': True, 'blur_high_reached': True},
+                    'fine_plan': make_fine_plan('T05'), 'insufficient_repeats': [],
+                    'retest_of': 'T02',
+                    'z_peak': pk, 'range': 0.0027, 'std': 0.0014,
+                    'dof_mm': 1.158, 'dof_range_mm': 0.004, 'dof_covered_count': 3, 'dof_uncovered': 0,
+                    'exposure_us': 24600.0, 'exposure_mode': 'auto', 'roi_mean': 121.6, 'roi_p99': 192.4,
+                    'arrival': {'total': 155, 'anomalies': 0, 'over_tolerance': 0, 'unstable': 0,
+                                'max_abs_delta_mm': 0.004, 'max_delta_mm': 0.004, 'max_delta_axis': 'Z',
+                                'phases': [], 'avg_elapsed_s': 0.51, 'max_elapsed_s': 0.55},
+                }
+            results.append(res)
+        failed_points = [
+            {
+                'label': 'T02', 'xy': coords['T02'], 'status': 'failed',
+                'error_code': 'DEPTH-CONTRAST', 'reason': '清晰度变化太小，景深过大或画面太暗/对比度不足',
+                'retest_label': 'T03', 'retest_status': 'success',
+                'arrival': dict(point_arrivals['T02']),
+            }
+        ]
+        skip_summary = {
+            'failed_count': 1, 'primary_failed_count': 1, 'retested_ok_count': 1, 'skipped_count': 0,
+            'text': '补测：T02(清晰度变化太小)→补测T03成功',
+        }
+        residuals = {'T03': -0.0010, 'T05': 0.0014, 'T29': -0.0008, 'T26': 0.0010, 'T12': -0.0006}
+        plane = {'a': 0.00050, 'b': 0.00004, 'c': -5.0808, 'residuals': residuals,
+                 'max_residual': 0.0014, 'tilt_mm_per_100mm': 0.0502}
+        feasibility = {'max_range': 0.0030, 'max_std': 0.0016, 'threshold': 0.02,
+                       'insufficient_fits': 0, 'insufficient_items': [], 'total_fits': 15, 'met': True}
+        point_dofs = [r['dof_mm'] for r in results if r.get('dof_mm') is not None]
+        dof_sum = {
+            'dof_ratio': 0.8,
+            'mean_mm': sum(point_dofs) / len(point_dofs),
+            'min_mm': min(point_dofs),
+            'max_mm': max(point_dofs),
+            'covered_points': len(point_dofs),
+            'total_points': len(results),
+            'covered_fits': 15, 'total_fits': 15, 'uncovered_fits': 0, 'uncovered_items': [],
+        }
+        z_cur = results[-1]['z_peak']
+        return ({
+            'phase': 'done', 'message': '料盘多点对焦测试完成（已回 161，T02 由 T03 补测成功）',
+            'label': 'T12', 'z': z_cur, 'point': 6, 'total': 6, 'plan': skip_plan,
+            'plane': plane, 'initial_plane': plane, 'results': results,
+            'failed_points': failed_points, 'skip_summary': skip_summary,
+            'feasibility': feasibility, 'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
+            'fine_plan': make_fine_plan('T12'), 'coarse_fit': results[-1]['coarse_fit'],
+            'exposure_mode': 'auto', 'manual_exposure_us': None,
+            'current_exposure_us': 18500.0, 'point_exposure_mode': 'auto',
+            'roi_mean': 118.4, 'roi_p99': 191.2,
+            'current_fits': results[-1]['fits'], 'dof_summary': dof_sum,
+            'arrival_summary': {
+                'total_arrivals': 790, 'total_anomalies': 4, 'over_tolerance_count': 4, 'unstable_count': 0,
+                'anomaly_points': ['T02', 'T26'], 'max_abs_delta_mm': 0.023, 'max_delta_mm': 0.023,
+                'max_delta_axis': 'Z', 'max_delta_label': 'T02', 'position_tolerance_mm': 0.01,
+                'avg_elapsed_s': 0.52, 'max_elapsed_s': 2.00,
+            },
+            'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
+        }, z_cur, 'T12')
 
     if state == 'done':
         for lbl in plan:
@@ -675,7 +797,7 @@ def write_demo(root, step=0, *, initial=False, preview_state="on", offset_state=
         path = main_status_file(root); data = json.loads(path.read_text(encoding='utf-8'))
         depth_data, z_val, lbl = depthcal_demo(depthcal_state, step)
         data['depthcal'] = depth_data
-        data['mode'] = '空闲' if depthcal_state in ('done', 'failed') else '下针深度标定中'
+        data['mode'] = '空闲' if depthcal_state in ('done', 'done_skip', 'failed') else '下针深度标定中'
         atomic(path, data)
         if initial:
             _draw_depthcal_demo_roi(root, depthcal_state, z_val, lbl)
@@ -772,7 +894,7 @@ def main():
     parser.add_argument('--wb-state', choices=('running','success','fail'), default=None)
     parser.add_argument('--focus-state', choices=('off','live','exposure'), default=None)
     parser.add_argument('--camcal-state', choices=('running', 'failed', 'preview'), default=None)
-    parser.add_argument('--depthcal-state', choices=('coarse', 'fine', 'done', 'failed'), default=None)
+    parser.add_argument('--depthcal-state', choices=('coarse', 'fine', 'done', 'done_skip', 'failed'), default=None)
     args = parser.parse_args(); validate_view_arguments(parser, args)
     if args.camcal_state:
         args.preview_state = 'on' if args.camcal_state == 'preview' else 'blocked'

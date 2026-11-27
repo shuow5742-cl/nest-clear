@@ -192,6 +192,7 @@ class DepthCalibration(DeviceSampling):
                     'exposure_warning': getattr(session, 'point_exposure_warning', None),
                     'exposure_min_us': session.cfg.get('exposure_min_us'),
                     'exposure_max_us': session.cfg.get('exposure_max_us'),
+                    'center_image_path': getattr(session, 'last_center_image', None),
                     'session': session.record.directory.name, 'sample': session.last_sample,
                     'abort_requested': session.abort_requested}
             session.last_sample = None

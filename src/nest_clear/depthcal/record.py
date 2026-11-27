@@ -17,11 +17,13 @@ class DepthRecord:
         self.directory = (events.directory / self.started.date().isoformat() / 'depthcal' /
                           f'{self.started:%H%M%S_%f}_{os.getpid()}')
         self.live = live_image_file(events.directory, 'depthcal_roi')
+        self.live_center = live_image_file(events.directory, 'depthcal_center')
 
     def begin(self):
         self.directory.mkdir(parents=True, exist_ok=False)
         (self.directory / 'roi').mkdir()
         self.live.unlink(missing_ok=True)
+        self.live_center.unlink(missing_ok=True)
         with (self.directory / 'curves.csv').open('w', encoding='utf-8', newline='') as stream:
             csv.writer(stream).writerow(('label', 'pass', 'direction', 'z_cmd', 'z_actual', *METRICS,
                                          'exposure_us', 'roi_mean', 'roi_p99'))
@@ -71,13 +73,29 @@ class DepthRecord:
         path = self.directory / f'{name}.png'
         if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
             raise OSError(f'无法写入 {path.name}')
+        if name.endswith('_center'):
+            self.center_live(frame)
+        return path
+
+    def center_live(self, frame):
+        """同步写入最近一次整幅居中图实时预览，供放大窗口切换查看。"""
+        self.live_center.parent.mkdir(parents=True, exist_ok=True)
+        h, w = frame.shape[:2]
+        ratio = min(1., 1600 / max(h, w))
+        preview = (frame if ratio >= 1. else
+                   cv2.resize(frame, (max(1, round(w * ratio)), max(1, round(h * ratio))),
+                              interpolation=cv2.INTER_AREA))
+        temp = self.live_center.with_suffix('.tmp.jpg')
+        if cv2.imwrite(str(temp), preview):
+            temp.replace(self.live_center)
 
     def roi(self, frame):
         self.live.parent.mkdir(parents=True, exist_ok=True)
         h, w = frame.shape[:2]
-        ratio = min(1., 280 / max(h, w))
-        preview = cv2.resize(frame, (max(1, round(w * ratio)), max(1, round(h * ratio))),
-                             interpolation=cv2.INTER_AREA)
+        ratio = min(1., 960 / max(h, w))
+        preview = (frame if ratio >= 1. else
+                   cv2.resize(frame, (max(1, round(w * ratio)), max(1, round(h * ratio))),
+                              interpolation=cv2.INTER_AREA))
         temp = self.live.with_suffix('.tmp.jpg')
         if not cv2.imwrite(str(temp), preview):
             raise OSError('无法写入 ROI 实时缩略图')

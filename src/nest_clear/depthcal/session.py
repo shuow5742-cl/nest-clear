@@ -74,6 +74,7 @@ class Session:
         self.ref_label = None
         self.ref_xy = None
         self.initial_z = None
+        self.last_center_image = None
         self.current_retest_of = None
         self.point_index = 0
         self.plane = self.initial_plane = self.feasibility = self.dof_summary = None
@@ -479,7 +480,8 @@ class Session:
             raise GuardError('DEPTH-ROI', f'固定 ROI {size} px 超出画面', self.where,
                              '减小 roi_mm，或检查居中和像素比例尺。')
         self.roi = np.s_[top:top + size, left:left + size]
-        self.record.image(f'{self.label}_center', frame)
+        center_path = self.record.image(f'{self.label}_center', frame)
+        self.last_center_image = str(center_path) if center_path is not None else None
         crop = frame[self.roi]
         self.record.roi(crop)
         self.camera_xy = (x, y)

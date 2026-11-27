@@ -654,7 +654,7 @@ def test_restart_clears_old_images_keeps_status(tmp_path, monkeypatch):
         'latest', 'camcal_latest', 'preview_latest',
         'tooloffset_tri_1', 'tooloffset_tri_2', 'tooloffset_tri_3', 'tooloffset_tri_4', 'tooloffset_tri_5',
         'tooloffset_front_latest', 'tooloffset_side_latest',
-        'pickacc_latest', 'pickacc_crop', 'depthcal_roi', 'baseline_front', 'baseline_side',
+        'pickacc_latest', 'pickacc_crop', 'depthcal_roi', 'depthcal_center', 'baseline_front', 'baseline_side',
         'calib_front_latest', 'calib_side_latest',
     )
     old_ns = time.time_ns() - 60_000_000_000
@@ -1181,4 +1181,79 @@ def test_depthcal_autoswitch_on_fast_fail_and_no_regrab(tmp_path, monkeypatch):
     write_status(failed_doc, 4)
     ui.refresh()
     assert ui.tabs.selected == 6
+    ui.root.destroy()
+
+
+def test_depthcal_zoom_window_headless_refresh_and_center_switch(tmp_path, monkeypatch):
+    """D：放大窗口无画面 bug 回归测试——显示最新 ROI、随新样本刷新、可切看最近整幅居中图（无 cv2/numpy/yaml）。"""
+    import os
+    import sys
+    import time
+    from PIL import Image
+    from nest_clear.paths import live_image_file
+
+    for module in ('cv2', 'numpy', 'yaml'):
+        monkeypatch.setitem(sys.modules, module, None)
+    from nest_clear.ui import app
+
+    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
+        monkeypatch.setattr(app.tk, name, Widget)
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox', 'Spinbox'):
+        monkeypatch.setattr(app.ttk, name, Widget)
+    monkeypatch.setattr(app.ttk, 'Style', Style)
+    monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
+
+    class FakeCard(Widget):
+        def __init__(self, parent, title, theme):
+            super().__init__(parent); self.body = Widget(self); self.title_label = Widget(self)
+
+    class FakePicture(Widget):
+        def __init__(self, parent, path, theme, *, min_mtime_ns=0):
+            super().__init__(parent); self.path = path; self.min_mtime_ns = min_mtime_ns; self.image = None
+        def poll(self): pass
+        def enlarge(self, _event=None):
+            hook = getattr(self, 'on_enlarge', None)
+            if hook is not None:
+                return hook()
+
+    class FakeKeyValueGrid(Widget):
+        def __init__(self, parent, keys, theme): super().__init__(parent); self.values_data = {}
+        def set(self, values): self.values_data = values
+
+    photos = []
+    monkeypatch.setattr(app, 'Card', FakeCard)
+    monkeypatch.setattr(app, 'Picture', FakePicture)
+    monkeypatch.setattr(app, 'KeyValueGrid', FakeKeyValueGrid)
+    monkeypatch.setattr(app.ImageTk, 'PhotoImage', lambda img, **kw: photos.append(img.size) or f'photo-{len(photos)}')
+
+    write_demo(tmp_path, initial=True, depthcal_state='coarse')
+    ui = app.App(tmp_path, page='depthcal', ignore_before_ns=0)
+    ui._last_main = {'depthcal': {'label': 'T02', 'z': -5.0, 'current_exposure_us': 18500.0, 'roi_mean': 118.0, 'roi_p99': 191.0}}
+
+    top = ui.depth_roi_pic.enlarge()
+    assert top is not None and ui._depth_zoom is not None
+    canvas = ui._depth_zoom['canvas']
+    assert canvas.image == 'photo-1'
+    assert '最新 ROI' in ui._depth_zoom['info'].options['text']
+
+    # 新 ROI 样本写入（更新 mtime）→ 刷新后生成新 photo
+    roi_path = live_image_file(tmp_path, 'depthcal_roi')
+    Image.new('RGB', (400, 400), 'green').save(roi_path, format='JPEG')
+    future_ns = time.time_ns() + 5_000_000_000
+    os.utime(roi_path, ns=(future_ns, future_ns))
+    ui._refresh_depth_zoom(reschedule=False)
+    assert canvas.image == 'photo-2'
+    assert '400×400' in ui._depth_zoom['info'].options['text']
+
+    # 切看最近一次整幅居中图
+    ui.set_depth_zoom_mode('center')
+    assert ui._depth_zoom['mode'] == 'center'
+    assert canvas.image == 'photo-3'
+    assert '1006×759' in ui._depth_zoom['info'].options['text']
+    assert '整幅居中图' in ui._depth_zoom['info'].options['text']
+
+    # 切回 ROI
+    ui.set_depth_zoom_mode('roi')
+    assert ui._depth_zoom['mode'] == 'roi'
+    assert canvas.image == 'photo-4'
     ui.root.destroy()

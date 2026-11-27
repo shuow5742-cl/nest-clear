@@ -241,3 +241,73 @@ def test_supervisor_ui_python_and_source_path(tmp_path, monkeypatch):
     supervisor._ui_tick()
     assert captured['command'][:3] == ['/custom/python','-m','nest_clear.ui']
     assert captured['env']['PYTHONPATH'].split(os.pathsep) == [str(Path(__file__).resolve().parents[1] / 'src'), '/existing/path']
+
+
+@pytest.mark.skipif(not os.environ.get('DISPLAY'), reason='无 DISPLAY')
+def test_depthcal_1920x1080_layout_and_zoom_with_system_python(tmp_path):
+    import subprocess
+    import tkinter
+    from pathlib import Path
+    python = Path('/usr/bin/python3')
+    if not python.exists():
+        pytest.skip('系统 Python 不存在')
+    try:
+        probe = tkinter.Tk()
+    except tkinter.TclError:
+        pytest.skip('DISPLAY 不可连接')
+    probe.destroy()
+    code = '''
+import os, sys, time
+from PIL import Image
+sys.modules.update(dict.fromkeys(('cv2', 'numpy', 'yaml')))
+from nest_clear.paths import live_image_file
+from nest_clear.ui.app import App
+from nest_clear.ui.demo import write_demo
+
+root_dir = sys.argv[1]
+write_demo(root_dir, initial=True, depthcal_state='done_skip')
+app = App(root_dir, 50, page='depthcal', ignore_before_ns=0)
+try:
+    try:
+        app.root.state('normal')
+        app.root.attributes('-zoomed', False)
+    except Exception:
+        pass
+    app.root.geometry('1920x1080+0+0')
+    app.refresh()
+    for _ in range(20):
+        app.poll_pictures()
+        app.root.update()
+        time.sleep(0.015)
+    rw, rh = app.depth_roi_pic.winfo_width(), app.depth_roi_pic.winfo_height()
+    assert rw >= 480 and rh >= 480, (rw, rh)
+    assert abs(rw - rh) <= 2, (rw, rh)
+    assert app.depth_plane_grid.winfo_rooty() >= app.depth_roi_pic.winfo_rooty() + rh
+    assert app.depth_table.winfo_height() >= 150
+    assert app.depth_curves.winfo_height() >= 380
+
+    # 打开放大窗口并确认有画面、随样本刷新、可切换整幅居中图
+    top = app.open_depth_zoom()
+    for _ in range(10):
+        app.root.update()
+        time.sleep(0.01)
+    canvas = app._depth_zoom['canvas']
+    assert getattr(canvas, 'image', None) is not None
+    roi_path = live_image_file(root_dir, 'depthcal_roi')
+    Image.new('RGB', (512, 512), 'navy').save(roi_path, format='JPEG')
+    ns = time.time_ns() + 5_000_000_000
+    os.utime(roi_path, ns=(ns, ns))
+    app._refresh_depth_zoom(reschedule=False)
+    assert '512×512' in app._depth_zoom['info'].cget('text')
+    app.set_depth_zoom_mode('center')
+    app.root.update()
+    assert getattr(canvas, 'image', None) is not None
+    assert '1006×759' in app._depth_zoom['info'].cget('text')
+    top.destroy()
+finally:
+    app.root.destroy()
+'''
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1] / 'src')
+    result = subprocess.run([str(python), '-c', code, str(tmp_path)], env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
