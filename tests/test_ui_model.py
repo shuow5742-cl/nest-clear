@@ -408,3 +408,51 @@ def test_depthcal_model_helpers_and_status(tmp_path):
     assert st.data['depthcal']['abort_requested'] is True
     if st.timer:
         st.timer.cancel()
+
+
+def test_depthcal_auto_page_switch_model():
+    from nest_clear.ui.model import depthcal_session_key, next_auto_page
+
+    # 空闲且无新会话时不切页
+    page, last_mode, last_session = next_auto_page({'mode': '空闲', 'depthcal': {}}, None, None)
+    assert page is None and last_mode == '空闲' and last_session is None
+
+    # 两次轮询之间发生“空闲→下针深度标定中→空闲（立即失败）”：mode 仍是空闲，仍须切到下针深度标定页
+    failed_status = {
+        'mode': '空闲',
+        'depthcal': {'session': 's1', 'phase': 'failed', 'reason_code': 'POSITION-TRAVEL', 'what': 'X 超限'},
+    }
+    page, last_mode, last_session = next_auto_page(failed_status, last_mode, last_session)
+    assert page == '下针深度标定' and last_session == ('session', 's1')
+
+    # 同一会话内再次轮询（用户已切走）不再抢页
+    page, last_mode, last_session = next_auto_page(failed_status, last_mode, last_session)
+    assert page is None and last_session == ('session', 's1')
+
+    # 新会话 s2 到来时再次切页
+    page, last_mode, last_session = next_auto_page(
+        {'mode': '下针深度标定中', 'depthcal': {'session': 's2', 'phase': 'center'}},
+        last_mode, last_session,
+    )
+    assert page == '下针深度标定' and last_session == ('session', 's2')
+    # 同会话推进阶段不再重复切页
+    page, last_mode, last_session = next_auto_page(
+        {'mode': '下针深度标定中', 'depthcal': {'session': 's2', 'phase': 'coarse'}},
+        last_mode, last_session,
+    )
+    assert page is None and last_session == ('session', 's2')
+
+    # 无 Session 即失败（如缺少 camera_z_min_mm）也能凭事件标识切页一次
+    pre_fail = {'mode': '空闲', 'depthcal': {'phase': 'failed', 'seq_event': 42, 'reason_code': 'DEPTH-Z-MIN'}}
+    assert depthcal_session_key(pre_fail) == ('event', '42')
+    page, last_mode, last_session = next_auto_page(pre_fail, last_mode, last_session)
+    assert page == '下针深度标定'
+    page, _, _ = next_auto_page(pre_fail, last_mode, last_session)
+    assert page is None
+
+    # 其他工作模式进行中（如挑毛中）收到异常 depthcal 状态不抢页
+    page, _, _ = next_auto_page(
+        {'mode': '挑毛中', 'depthcal': {'phase': 'failed', 'seq_event': 43, 'reason_code': 'DEPTH-MODE'}},
+        '空闲', last_session,
+    )
+    assert page == '主页'

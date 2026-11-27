@@ -244,3 +244,61 @@ def test_160_error(tcp_rig, case, reason):
         rec_path, = (rig.root / rig.events.clock().date().isoformat() / 'depthcal').glob('*/session_record.json')
         rec = json.loads(rec_path.read_text(encoding='utf-8'))
         assert rec['outcome'] == 'failed' and rec['diagnostic']['reason_code'] == reason
+
+
+def test_160_independent_depth_travel_tcp(tmp_path):
+    """全局行程外但深度行程内（X=40, Y=180）时 160 正常下发；超出深度行程则回 999 且诊断含轴与范围。"""
+    camera = FilmCamera()
+    # T07 相对中心为 (-45, +105)，origin=(85, 75) 使 T07 位于 (40, 180)
+    camera.origin = np.array([85.0, 75.0])
+    camera.actual = (40.0, 180.0, -5.0)
+    cfg = load_config('config/nest_clear.yaml')
+    cfg = replace(
+        cfg,
+        depth_calibration={**cfg.depth_calibration, 'settle_window_s': .0001, 'frames_per_step': 1},
+        tool_offset={**cfg.tool_offset, 'card_thickness_mm': 0.},
+        camera_calibration={**cfg.camera_calibration, 'board_thickness_mm': 0.},
+    )
+    cal = Calibration(np.array([[2000., 0., 210], [0., 2000., 210], [0., 0., 1.]]),
+                      np.zeros(5), np.diag([1., -1., -1.]), np.zeros(3), -105)
+    events = EventRecorder(tmp_path, run=True)
+    with FakePLC() as plc:
+        io = PLCClient('127.0.0.1', plc.port, 1, plc.contract)
+        board = WorldBoard()
+        clock = BTClock(board)
+        for worker in (PlcWorker(Handshake(io, plc.contract, events=events)), camera):
+            clock.attach_worker(worker)
+        batch = build_batch(board, cfg, [], RequestTracker(0), events, calibration=cal)
+        clock.submit(batch)
+
+        def send_160(xyz):
+            camera.actual = tuple(xyz)
+            plc.set_actual_xyz(camera.actual)
+            task = plc.request(160, tool_id=65535)
+            deadline = time.monotonic() + 6
+            while batch.blackboard.read('committed_func') is None or events.request_pending or plc.io.read('result_id') != task:
+                clock.tick_once()
+                if time.monotonic() > deadline:
+                    pytest.fail(f'未收到 Task_ID={task} 回应')
+                time.sleep(.00015)
+            code = plc.io.read('reply_func')
+            coords = plc.io.read_real32_block(40942, 3) if code == 160 else None
+            return code, coords
+
+        try:
+            # 1) (40, 180, -5) 在全局行程 (80..180, -10..150) 之外，但在 depth_calibration.travel (32..158.6, -15..201) 之内
+            code, target = send_160((40.0, 180.0, -5.0))
+            assert code == 160 and target is not None
+            assert 32.0 <= target[0] <= 158.6 and -15.0 <= target[1] <= 201.0
+
+            # 2) 超出 depth_calibration.travel 上限（X=165 > 158.6）→ 999 且诊断含轴、目标值、范围和行程来源
+            code, _ = send_160((165.0, 180.0, -5.0))
+            assert code == 999 and batch.blackboard.read('mode') == Mode.IDLE
+            diag = events.status.data['depthcal']
+            assert diag['reason_code'] == 'POSITION-TRAVEL'
+            assert 'X' in diag['what'] and '165.000' in diag['what']
+            assert '[32.0, 158.6]' in diag['what']
+            assert '下针深度标定行程（depth_calibration.travel）' in diag['what']
+        finally:
+            clock.shutdown()
+            io.close()

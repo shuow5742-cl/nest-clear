@@ -19,7 +19,8 @@ from .model import (EventTail, camcal_progress, decode_status, display_time, dur
                     read_json, status_indicators, parent_process_row, child_process_row, tooltip_progress, preview_controls, edge_corner_label,
                     pickacc_tray_geometry, pickacc_type, pickacc_z_type, pickacc_z_summary_text, pickacc_z_missing_tools,
                     pickacc_stage, pickacc_note, pickacc_infield,
-                    tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time, page_for_mode,
+                    tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time,
+                    page_for_mode, depthcal_session_key, next_auto_page,
                     baseline_preview_display, extract_tooltip_preview,
                     depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout,
                     depthcal_curve_dof, depthcal_latest_dof_text, depthcal_dof_summary_text)
@@ -333,7 +334,9 @@ class App:
                                     bg='#b00020', fg='white', font=self.theme.status, anchor='center', padx=8, pady=5)
         self.pick_z_banner = tk.Label(self.root, text='', bg='#fef0c7', fg='#b42318', font=self.theme.title, anchor='center', padx=8, pady=4)
         self.tail = EventTail(root); self.pictures = []; self.cache = {}; self.events = []; self.files = {}
-        self.last_mode = read_json(main_status_file(self.directory)).get('mode') if page is not None else None
+        initial_status = read_json(main_status_file(self.directory)) if page is not None else {}
+        self.last_mode = initial_status.get('mode') if page is not None else None
+        self.last_depth_session = depthcal_session_key(initial_status) if page is not None else None
         self.build_status()
         self.tabs = ttk.Notebook(self.root)
         self.tabs.grid(row=2, column=0, sticky='nsew', padx=6, pady=(0, 6))
@@ -2244,11 +2247,11 @@ class App:
         else:
             reason = '主程序状态未就绪或正在运行，空闲后可切换'
         self.film_reason.config(text=reason)
-        mode = main.get('mode')
-        if mode != self.last_mode:
-            self.last_mode = mode
-            page = page_for_mode(main)
-            if page is not None: self.select_page(page)
+        page, self.last_mode, self.last_depth_session = next_auto_page(
+            main, self.last_mode, getattr(self, 'last_depth_session', None),
+        )
+        if page is not None:
+            self.select_page(page)
         try:
             supervisor_age = max(0, time.time() - supervisor_state_file(self.directory).stat().st_mtime)
         except OSError:

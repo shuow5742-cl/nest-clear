@@ -109,6 +109,37 @@ def page_for_mode(status):
     }.get(mode)
 
 
+def depthcal_session_key(status):
+    """提取下针深度标定会话标识，用于识别新会话（含两次轮询间已结束的会话）。"""
+    if not isinstance(status, dict):
+        return None
+    depth = status.get('depthcal')
+    if not isinstance(depth, dict) or not depth:
+        return None
+    session = depth.get('session')
+    if session:
+        return ('session', str(session))
+    phase = depth.get('phase')
+    if phase and phase != 'idle':
+        token = depth.get('task_id') or depth.get('seq_event') or depth.get('wall') or depth.get('ts')
+        if token is not None:
+            return ('event', str(token))
+        return ('phase', str(phase), str(depth.get('reason_code') or ''), str(depth.get('what') or ''))
+    return None
+
+
+def next_auto_page(status, last_mode, last_depth_session):
+    """根据 mode 变化与新下针深度标定会话决定自动切页目标，返回 (page, new_mode, new_depth_session)。"""
+    mode = status.get('mode') if isinstance(status, dict) else None
+    depth_session = depthcal_session_key(status)
+    mode_page = page_for_mode(status) if mode != last_mode else None
+    new_depth = depth_session is not None and depth_session != last_depth_session
+    target_page = mode_page
+    if new_depth and page_for_mode(status) in (None, '下针深度标定'):
+        target_page = '下针深度标定'
+    return target_page, mode, depth_session
+
+
 def pickacc_tray_geometry(width, height):
     """行程框等比例居中；箭头按 0.05 mm 约 30 像素选择常用倍率。"""
     scale = max(.01, min((width - 90) / 100, (height - 45) / 160))

@@ -212,7 +212,7 @@ def test_removed_code_diagnostic(prepared, code):
     import json
     plc, app = prepared
     task = plc.request(code, tool_id=2)
-    drive_until(app, lambda: plc.io.read("result_id") == task and task not in app.events.reply_diagnostics)
+    drive_until(app, lambda: plc.io.read("result_id") == task and not app.events.request_pending and task not in app.events.reply_diagnostics)
     assert plc.io.read("reply_func") == 999
     assert plc.io.read("pc_tool_id") == 2
     rows = [json.loads(line) for line in (app.events.run_directory / "events.jsonl").read_text().splitlines()]

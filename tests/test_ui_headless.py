@@ -1022,3 +1022,90 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
     assert sent == [('depthcal_abort', None)]
     assert ui.depth_pending == 1
     ui.root.destroy()
+
+
+def test_depthcal_autoswitch_on_fast_fail_and_no_regrab(tmp_path, monkeypatch):
+    """两次轮询间 160 开始并立即失败时自动切到下针深度标定页且显示失败原因，同会话不抢页。"""
+    import json
+    import os
+    import sys
+    import time
+    from nest_clear.paths import main_status_file
+
+    for module in ('cv2', 'numpy', 'yaml'):
+        monkeypatch.setitem(sys.modules, module, None)
+    from nest_clear.ui import app
+
+    for name in ('Tk', 'Frame', 'Label', 'Canvas', 'Toplevel', 'Text', 'Button'):
+        monkeypatch.setattr(app.tk, name, Widget)
+    for name in ('Notebook', 'Treeview', 'Progressbar', 'Scrollbar', 'Button', 'Entry', 'Combobox', 'Spinbox'):
+        monkeypatch.setattr(app.ttk, name, Widget)
+    monkeypatch.setattr(app.ttk, 'Style', Style)
+    monkeypatch.setattr(app.tkfont, 'families', lambda root: ['Noto Sans Mono CJK SC'])
+
+    class FakeCard(Widget):
+        def __init__(self, parent, title, theme):
+            super().__init__(parent); self.body = Widget(self); self.title_label = Widget(self)
+
+    class FakePicture(Widget):
+        def __init__(self, parent, path, theme):
+            super().__init__(parent); self.image = None
+        def poll(self): pass
+
+    class FakeKeyValueGrid(Widget):
+        def __init__(self, parent, keys, theme): super().__init__(parent); self.values_data = {}
+        def set(self, values): self.values_data = values
+
+    monkeypatch.setattr(app, 'Card', FakeCard)
+    monkeypatch.setattr(app, 'Picture', FakePicture)
+    monkeypatch.setattr(app, 'KeyValueGrid', FakeKeyValueGrid)
+
+    status_path = main_status_file(tmp_path)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    base_ns = time.time_ns()
+
+    def write_status(doc, step):
+        status_path.write_text(json.dumps(doc, ensure_ascii=False), encoding='utf-8')
+        stamp = base_ns + step * 1_000_000
+        os.utime(status_path, ns=(stamp, stamp))
+
+    write_status({'mode': '空闲', 'depthcal': {}}, 1)
+
+    ui = app.App(tmp_path, ignore_before_ns=0)
+    ui.refresh()
+    assert ui.tabs.selected == 0
+
+    # 模拟两次轮询之间 160 会话启动并在首步超限失败，mode 已回到“空闲”
+    failed_doc = {
+        'mode': '空闲',
+        'depthcal': {
+            'session': '20261126_194000_1001',
+            'phase': 'failed',
+            'message': 'X 轴目标值 165.000 mm 超出下针深度标定行程（depth_calibration.travel）允许范围 [32.0, 158.6] mm',
+            'reason_code': 'POSITION-TRAVEL',
+            'what': 'X 轴目标值 165.000 mm 超出下针深度标定行程（depth_calibration.travel）允许范围 [32.0, 158.6] mm',
+            'where': '初始靶点 居中 第 1 轮',
+            'hint': '检查菲林摆放位置、PLC 实时坐标与 config/nest_clear.yaml 中的下针深度标定行程（depth_calibration.travel）。',
+        },
+    }
+    write_status(failed_doc, 2)
+    ui.refresh()
+    assert ui.tabs.selected == 6
+    assert ui.depth_failure_detail.visible
+    assert 'POSITION-TRAVEL' in ui.depth_failure_detail.options['text']
+    assert 'depth_calibration.travel' in ui.depth_failure_detail.options['text']
+
+    # 同一会话内操作员手动切回主页后，后续轮询不再抢回
+    ui.select_page('主页')
+    assert ui.tabs.selected == 0
+    failed_doc['depthcal']['message'] = failed_doc['depthcal']['what'] + ' '
+    write_status(failed_doc, 3)
+    ui.refresh()
+    assert ui.tabs.selected == 0
+
+    # 新会话开始并立即失败时再次自动切页
+    failed_doc['depthcal']['session'] = '20261126_194100_1002'
+    write_status(failed_doc, 4)
+    ui.refresh()
+    assert ui.tabs.selected == 6
+    ui.root.destroy()
