@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field, fields, replace
 import ipaddress
+import logging
 import math
 from pathlib import Path
 from typing import Any, NoReturn
@@ -12,6 +13,8 @@ from .depth_config import DEFAULTS as DEPTH_DEFAULTS, METRICS
 from .guard import GuardError
 from .vision.hair.config import HairDetectConfig
 from .tooltip.store import load_tools
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -171,7 +174,17 @@ def _mapping(value: Any, path: str, keys: list[str]) -> dict[str, Any]:
     return value
 
 
-def _depth_config(value, z_travel):
+def _travel_bounds(value: Any, path: str) -> tuple[tuple[float, float], ...]:
+    """校验三轴行程映射，确保每轴为 [min, max] 两个有限数且 min < max。"""
+    t = _mapping(value, path, ["x", "y", "z"])
+    bounds = tuple(_vector(t[axis], f"{path}.{axis}", 2) for axis in "xyz")
+    for axis, (lo, hi) in zip("xyz", bounds):
+        if lo >= hi:
+            _fail(f"{path}.{axis}", "最小值必须小于最大值")
+    return bounds
+
+
+def _depth_config(value, global_travel):
     path = "depth_calibration"
     if not isinstance(value, dict):
         _fail(path, "应为映射")
@@ -183,6 +196,14 @@ def _depth_config(value, z_travel):
             settings[key] = _number(item, name, True)
         if type(default) is int and (type(item) is not int or item < 1):
             _fail(name, "须为正整数")
+    # 独立行程：配置 depth_calibration.travel 时校验每轴 [min<max] 与有限数；缺省回退全局 travel。
+    if settings["travel"] is None:
+        logger.info("配置项 depth_calibration.travel 未配置，下针深度标定将回退使用全局 travel %s", global_travel)
+        effective_travel = global_travel
+    else:
+        effective_travel = _travel_bounds(settings["travel"], f"{path}.travel")
+        settings["travel"] = effective_travel
+    z_travel = effective_travel[2]
     lower = settings["camera_z_min_mm"]
     if lower is not None:
         lower = _number(lower, f"{path}.camera_z_min_mm")
@@ -557,12 +578,8 @@ def load_config(path: str | Path, *, require_tools: bool = True) -> Config:
         _number(p["timeout_s"], "plc.timeout_s", True),
         p["write_readback"],
     )
-    t = _mapping(root["travel"], "travel", ["x", "y", "z"])
-    travel = tuple(_vector(t[axis], f"travel.{axis}", 2) for axis in "xyz")
-    for axis, bounds in zip("xyz", travel):
-        if bounds[0] >= bounds[1]:
-            _fail(f"travel.{axis}", "最小值必须小于最大值")
-    depth_calibration = _depth_config(root["depth_calibration"], travel[2])
+    travel = _travel_bounds(root["travel"], "travel")
+    depth_calibration = _depth_config(root["depth_calibration"], travel)
     if start is not None and any(not lo <= value <= hi for value, (lo, hi) in zip(start, travel)):
         _fail("camera_calibration.start_xyz", "必须在 travel 范围内")
     scan_data = {"mode": "corners", "tray": {"origin_xy": [0, 0], "size_mm": [182.7, 171.8], "x_direction": -1, "y_direction": 1}, "fov_mm": None, "min_overlap_mm": 20, **root["scan"]}

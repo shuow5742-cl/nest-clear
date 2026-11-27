@@ -8,7 +8,6 @@ import numpy as np
 
 from nest_clear.depth_config import METRICS
 from nest_clear.guard import GuardError, format_pose
-from nest_clear.plan.scan_path import guard_position
 from nest_clear.tooloffset.detection import detect
 from nest_clear.tooloffset.session import film_calibration
 from nest_clear.vision.geometry import pixel_to_module
@@ -25,7 +24,8 @@ class Session:
     def __init__(self, config, calibration, record):
         self.record = record
         self.cfg = dict(config.depth_calibration)
-        self.travel = config.travel
+        self.travel_is_fallback = self.cfg.get('travel') is None
+        self.travel = self.cfg.get('travel') or config.travel
         self.cal = film_calibration(calibration, config.tool_offset['card_thickness_mm'],
                                     config.camera_calibration['board_thickness_mm'])
         self.z_min = max(self.travel[2][0], self.cfg['camera_z_min_mm'])
@@ -74,7 +74,21 @@ class Session:
         }[self.phase]
 
     def guard(self, xyz):
-        guard_position(xyz, self.travel, self.where)
+        travel_name = ('下针深度标定行程（depth_calibration.travel，缺省回退全局 travel）'
+                       if self.travel_is_fallback else '下针深度标定行程（depth_calibration.travel）')
+        if len(xyz) != 3 or len(self.travel) != 3:
+            raise GuardError('POSITION-TRAVEL',
+                             f'坐标 {format_pose(xyz)} 无效，无法校验{travel_name}',
+                             self.where, '检查下针深度标定行程（depth_calibration.travel）及目标坐标。')
+        for axis, value, (lo, hi) in zip('XYZ', xyz, self.travel):
+            if not math.isfinite(value) or not lo <= value <= hi:
+                target = f'{value:.3f} mm' if math.isfinite(value) else repr(value)
+                raise GuardError(
+                    'POSITION-TRAVEL',
+                    f'{axis} 轴目标值 {target} 超出{travel_name}允许范围 [{lo}, {hi}] mm（完整目标 {format_pose(xyz)}）',
+                    self.where,
+                    '检查菲林摆放位置、PLC 实时坐标与 config/nest_clear.yaml 中的下针深度标定行程（depth_calibration.travel）。',
+                )
         if xyz[2] < self.z_min:
             raise GuardError('DEPTH-Z-LIMIT', f'相机 Z={xyz[2]:.6f} mm 低于安全下限 {self.z_min} mm',
                              self.where, '检查 PLC 到位坐标与现场核定的工具安全间隙。')

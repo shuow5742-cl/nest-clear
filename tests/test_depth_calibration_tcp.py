@@ -74,7 +74,8 @@ def tcp_rig(tmp_path):
     cfg = load_config('config/nest_clear.yaml')
     settings = {**cfg.depth_calibration, 'camera_z_min_mm': -7.0, 'coarse_range_mm': 1.6,
                 'coarse_step_mm': .20, 'fine_steps_target': 24, 'overshoot_mm': .15,
-                'settle_window_s': .0001, 'frames_per_step': 1}
+                'settle_window_s': .0001, 'frames_per_step': 1,
+                'travel': ((80, 220), (0, 230), (-15, 0))}  # 仿真场景需要更宽的下针深度标定行程
     cfg = replace(cfg, depth_calibration=settings, travel=((80, 220), (0, 230), (-15, 0)),
                   tool_offset={**cfg.tool_offset, 'card_thickness_mm': 0.},
                   camera_calibration={**cfg.camera_calibration, 'board_thickness_mm': 0.})

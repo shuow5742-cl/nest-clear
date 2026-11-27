@@ -2,6 +2,8 @@
 
 DEFAULTS = {
     'camera_z_min_mm': None,
+    # 独立行程 {x: [lo, hi], y: [lo, hi], z: [lo, hi]}；缺省（None）时回退使用全局 travel。
+    'travel': None,
     'center_tol_px': 15.,
     'center_max_iter': 5,
     'roi_mm': 8.,
