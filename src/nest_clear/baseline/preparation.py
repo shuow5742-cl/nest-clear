@@ -46,6 +46,7 @@ def make_tip_tracker(detector_cfg, ui_config=None):
         return BandGradientTracker(
             smooth_frames=int(focus_cfg['focus_smooth_frames']),
             pass_percent=float(focus_cfg['focus_pass_percent']),
+            peak_reset_margin_percent=float(focus_cfg['peak_reset_margin_percent']),
         )
     return EdgeWidthTracker(reset_distance=50, pass_percent=float(focus_cfg['focus_pass_percent']))
 
@@ -150,6 +151,7 @@ def build_preview_camera_payload(
         'axis_rms_limit': axis_rms_limit,
         'focus_smooth_frames': focus_cfg['focus_smooth_frames'],
         'focus_pass_percent': focus_cfg['focus_pass_percent'],
+        'peak_reset_margin_percent': focus_cfg['peak_reset_margin_percent'],
         'focus_good_px': focus_cfg['focus_good_px'],
         'focus_warn_px': focus_cfg['focus_warn_px'],
         'focus_max_px': focus_cfg['focus_max_px'],
@@ -162,9 +164,14 @@ def build_preview_camera_payload(
         'sample_count': sample_count,
         'peak_valid': peak_valid,
         'peak_confirmed': bool(readiness['peak_confirmed']) if readiness is not None else bool(tracked.get('peak_confirmed')),
+        'best_updated': bool(tracked.get('best_updated')),
+        'peak_confirm_kept': bool(tracked.get('peak_confirm_kept')),
+        'peak_event': str(tracked.get('peak_event') or ''),
+        'last_peak_event': str(tracked.get('last_peak_event') or ''),
         'stage': readiness['stage'] if readiness is not None else 'ascending',
         'stage_text': readiness['stage_text'] if readiness is not None else STAGE_ASCENDING_TEXT,
         'wide_edge_note': readiness['wide_edge_note'] if readiness is not None else '',
+        'peak_update_note': readiness['peak_update_note'] if readiness is not None else '',
         'consecutive_ready': consec,
         'edge_near': bool(readiness['edge_near']) if readiness is not None else False,
         'manual_confirmed': bool(manual_confirmed),
@@ -294,6 +301,10 @@ def draw_tip_preview(frame, name, detection, ui_config, scale):
         labels.append(((20, 58), focus_line, focus_en, focus_color, 26))
         if readiness and readiness.get('wide_edge_note'):
             labels.append(((20, 90), readiness['wide_edge_note'], 'Wide edge accepted', (0, 145, 220), 22))
+        if readiness and readiness.get('peak_update_note'):
+            y_pos = 118 if readiness.get('wide_edge_note') else 90
+            peak_en = 'Peak updated, confirm kept' if readiness.get('peak_confirmed') else 'New peak >= margin, re-overshoot'
+            labels.append(((20, y_pos), readiness['peak_update_note'], peak_en, (0, 145, 220), 22))
     return _draw_labels(image, labels)
 
 
@@ -807,6 +818,9 @@ class Preparation:
                         'peak': tracked['best'],
                         'sample_count': tracked.get('sample_count', 0),
                         'peak_confirmed': tracked.get('peak_confirmed', False),
+                        'best_updated': tracked.get('best_updated', False),
+                        'peak_confirm_kept': tracked.get('peak_confirm_kept', False),
+                        'last_peak_event': tracked.get('last_peak_event', ''),
                         'edge_width_px': metrics['edge_width_px'],
                     },
                     self.ui_config,
@@ -825,6 +839,10 @@ class Preparation:
                         ready=readiness['ready'], ready_reason=readiness['reason'],
                         peak_confirmed=readiness['peak_confirmed'], stage=readiness['stage'],
                         stage_text=readiness['stage_text'], wide_edge_note=readiness['wide_edge_note'],
+                        peak_update_note=readiness['peak_update_note'],
+                        best_updated=bool(tracked.get('best_updated')),
+                        peak_confirm_kept=bool(tracked.get('peak_confirm_kept')),
+                        last_peak_event=tracked.get('last_peak_event', ''),
                         sample_count=tracked.get('sample_count', 0), consecutive_ready=readiness['consecutive_ready'],
                         history=[v for _,v in self.history[name]], fps=fps)
                 preview_cfg = {**self.ui_config, '_live_readiness': readiness, '_live_tracked': tracked}

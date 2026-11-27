@@ -101,6 +101,7 @@ def test_settings_includes_t95_focus_readiness_defaults(tmp_path):
     assert loaded["focus_smooth_frames"] == 5
     assert loaded["focus_pass_percent"] == pytest.approx(92.0)
     assert loaded["focus_ready_percent"] == pytest.approx(95.0)
+    assert loaded["peak_reset_margin_percent"] == pytest.approx(3.0)
     assert loaded["focus_good_px"] == pytest.approx(2.0)
     assert loaded["focus_warn_px"] == pytest.approx(3.0)
     assert loaded["focus_max_px"] == pytest.approx(3.0)
@@ -132,6 +133,26 @@ def test_settings_includes_t95_focus_readiness_defaults(tmp_path):
     bad_frames.write_text("baseline_ui:\n  peak_min_frames: 0\n", encoding="utf-8")
     with pytest.raises(ValueError, match="peak_min_frames"):
         baseline_settings(bad_frames)
+
+    ok_zero_margin = tmp_path / "ok_zero_margin.yaml"
+    ok_zero_margin.write_text("baseline_ui:\n  peak_reset_margin_percent: 0\n", encoding="utf-8")
+    assert baseline_settings(ok_zero_margin)["peak_reset_margin_percent"] == pytest.approx(0.0)
+
+    for bad_text in (
+        "baseline_ui:\n  peak_reset_margin_percent: -0.1\n",
+        "baseline_ui:\n  focus_pass_percent: 92\n  peak_reset_margin_percent: 8.0\n",
+        "baseline_ui:\n  focus_pass_percent: 92\n  peak_reset_margin_percent: 9.5\n",
+        "baseline_ui:\n  peak_reset_margin_percent: true\n",
+    ):
+        bad_margin = tmp_path / "bad_margin.yaml"
+        bad_margin.write_text(bad_text, encoding="utf-8")
+        with pytest.raises(ValueError, match="peak_reset_margin_percent"):
+            baseline_settings(bad_margin)
+
+    with pytest.raises(ValueError, match="peak_reset_margin_percent"):
+        BandGradientTracker(smooth_frames=5, pass_percent=92.0, peak_reset_margin_percent=-0.5)
+    with pytest.raises(ValueError, match="peak_reset_margin_percent"):
+        BandGradientTracker(smooth_frames=5, pass_percent=92.0, peak_reset_margin_percent=8.0)
 
 
 def _feed_readiness(rtracker, tracked, status, reason, tip_uv, edge_px, cfg, manual_confirmed=False):
@@ -233,6 +254,101 @@ def test_overshoot_median_peak_reset_and_edge_fallback():
         final_r, _ = step_val(118.0, edge_px=1.6)
     assert final_r["ready"] is True
     assert final_r["peak_confirmed"] is True
+
+
+def test_peak_reset_margin_keeps_confirmation_on_small_gain_and_resets_on_large_gain():
+    """越峰后回到峰值附近略超旧峰（1–2%）更新 best 且保留确认并能就绪；高出 >=3% 清除确认需重越峰。"""
+    cfg = dict(DEFAULTS, peak_min_frames=10, focus_ready_frames=5, peak_reset_margin_percent=3.0)
+
+    def feed(tracker, rtracker, val: float, edge_px: float = 1.6):
+        tracked = tracker.update(val, (300.0, 450.0))
+        readiness = rtracker.update(
+            "front",
+            {
+                "detection_status": "精定位",
+                "detection_reason": "",
+                "tip_uv": [300.0, 450.0],
+                "image_size": [600, 600],
+                "percent": tracked["percent"],
+                "peak": tracked["best"],
+                "peak_confirmed": tracked["peak_confirmed"],
+                "best_updated": tracked["best_updated"],
+                "peak_confirm_kept": tracked["peak_confirm_kept"],
+                "last_peak_event": tracked["last_peak_event"],
+                "sample_count": tracked["sample_count"],
+                "edge_width_px": edge_px,
+            },
+            cfg,
+        )
+        return readiness, tracked
+
+    # 1. 建峰 100.0，越峰到 88.0（<=92%），再往回点动到 101.5（+1.5%）和 102.0（+2.0%）
+    tracker = BandGradientTracker(smooth_frames=5, pass_percent=92.0, peak_reset_margin_percent=3.0)
+    rtracker = ReadinessTracker()
+    for _ in range(10):
+        feed(tracker, rtracker, 100.0)
+    for _ in range(5):
+        r, t = feed(tracker, rtracker, 88.0, edge_px=2.2)
+    assert r["peak_confirmed"] is True
+
+    # 前两帧受窗口中旧 88 影响，第 3 帧中值跃升到 101.5（+1.5% < 3%）
+    for _ in range(2):
+        feed(tracker, rtracker, 101.5)
+    r1, t1 = feed(tracker, rtracker, 101.5)
+    assert t1["best"] == pytest.approx(101.5)
+    assert t1["best_updated"] is True
+    assert t1["peak_confirm_kept"] is True
+    assert t1["peak_event"] == "kept"
+    assert t1["peak_confirmed"] is True
+    assert r1["peak_confirmed"] is True
+    assert "保留越峰确认" in r1["peak_update_note"]
+
+    # 继续微调到 102.0（累计 +2.0% < 3%）并稳定 5 帧 -> 仍保留确认且直接就绪
+    r2 = None
+    t2 = None
+    for _ in range(7):
+        r2, t2 = feed(tracker, rtracker, 102.0)
+    assert t2["best"] == pytest.approx(102.0)
+    assert t2["peak_confirmed"] is True
+    assert r2["ready"] is True
+    assert r2["stage_text"] == STAGE_READY_TEXT
+    assert "保留越峰确认" in r2["peak_update_note"]
+
+    # 2. 若继续爬升至 103.5（相对原已确认峰 100.0 高出 3.5% >= 3%，即使相对 102.0 仅 +1.47%）-> 清除确认，防止阶梯爬坡绕过门限
+    for _ in range(3):
+        r3, t3 = feed(tracker, rtracker, 103.5)
+    assert t3["best"] == pytest.approx(103.5)
+    assert t3["best_updated"] is True
+    assert t3["peak_confirm_kept"] is False
+    assert t3["peak_event"] == "reset"
+    assert t3["peak_confirmed"] is False
+    assert r3["ready"] is False
+    assert r3["stage_text"] == STAGE_ASCENDING_TEXT
+    assert "清除确认" in r3["peak_update_note"]
+
+    # 3. 边界测试：直接高出恰好 3.0%（100.0 -> 越峰 88.0 -> 103.0）-> 清除确认，必须重新越峰后才能就绪
+    tracker2 = BandGradientTracker(smooth_frames=5, pass_percent=92.0, peak_reset_margin_percent=3.0)
+    rtracker2 = ReadinessTracker()
+    for _ in range(10):
+        feed(tracker2, rtracker2, 100.0)
+    for _ in range(5):
+        feed(tracker2, rtracker2, 88.0, edge_px=2.2)
+    for _ in range(7):
+        r_big, t_big = feed(tracker2, rtracker2, 103.0)
+    assert t_big["best"] == pytest.approx(103.0)
+    assert t_big["peak_confirmed"] is False
+    assert r_big["ready"] is False
+    assert t_big["last_peak_event"] == "reset"
+
+    # 重新越峰到 94.0（91.26% <= 92%），再回到 102.0（99.0% >= 95%）连续 5 帧 -> 就绪
+    for _ in range(5):
+        r_over, _ = feed(tracker2, rtracker2, 94.0, edge_px=2.1)
+    assert r_over["peak_confirmed"] is True
+    for _ in range(7):
+        r_done, _ = feed(tracker2, rtracker2, 102.0, edge_px=1.6)
+    assert r_done["ready"] is True
+    assert r_done["peak_confirmed"] is True
+    assert r_done["peak_update_note"] == ""
 
 
 def test_peak_min_frames_consecutive_edge_margin_and_reset():
@@ -466,6 +582,7 @@ def test_simulated_y_front_x_side_sweep_offcenter_ready_and_save(tmp_path, monke
         assert saved_raw["focus_criteria"]["focus_smooth_frames"] == 5
         assert saved_raw["focus_criteria"]["focus_pass_percent"] == pytest.approx(92.0)
         assert saved_raw["focus_criteria"]["focus_ready_percent"] == pytest.approx(95.0)
+        assert saved_raw["focus_criteria"]["peak_reset_margin_percent"] == pytest.approx(3.0)
         assert saved_raw["focus_criteria"]["focus_max_px"] == pytest.approx(3.0)
         assert saved_raw["focus_criteria"]["peak_min_frames"] == 10
         for v in saved_raw["views"]:
@@ -484,11 +601,13 @@ def test_simulated_y_front_x_side_sweep_offcenter_ready_and_save(tmp_path, monke
             "timestamp", "camera", "raw_sharpness", "smoothed_sharpness",
             "peak", "percent", "edge_width_px", "contrast",
             "axis_rms_px", "detection_status", "peak_confirmed", "peak_stage", "ready",
+            "best_updated", "peak_confirm_kept", "peak_event",
         }
         assert set(rows[0].keys()) == expected_cols
         assert {r["camera"] for r in rows} == {"front", "side"}
         assert any(r["peak_confirmed"] == "0" for r in rows)
         assert any(r["peak_confirmed"] == "1" and r["ready"] == "1" for r in rows)
+        assert any(r["best_updated"] == "1" for r in rows)
 
         loaded = load_baseline(cal / "tool1_baseline.yaml")
         assert loaded.baseline_rule == BASELINE_RULE
@@ -816,3 +935,106 @@ def test_ui_overall_banner_and_disabled_reason_without_cv_numpy_yaml(tmp_path, m
     assert ui.baseline_measure.options["state"] == "normal"
     assert ui.baseline_measure_reason.options["text"] == ""
     assert ui.baseline_overall.options["text"] == "✔ 两路针尖都最清晰，可作为对刀基准 → 点【对刀基准】"
+
+    # 3. 界面显示“峰值略升保留确认”与“发现更高新峰（≥3%）清除确认”状态
+    preview_path.write_text(json.dumps({
+        "updated_at": now_iso,
+        "cameras": {
+            "front": {
+                "source": "band_gradient_p995", "band_gradient": 159.1, "peak": 159.1, "percent": 100.0,
+                "edge_width_px": 1.40, "edge_width_um": 18.9, "contrast": 225, "axis_rms_px": 0.28,
+                "axis_rms_limit": 0.7, "detection_status": "精定位", "tip_uv": [300.0, 500.0],
+                "image_size": [1920, 1080], "sample_count": 20, "peak_confirmed": True,
+                "best_updated": True, "peak_confirm_kept": True, "last_peak_event": "kept",
+                "consecutive_ready": 5, "ready": True, "history": [90.0, 96.0, 100.0], "updated_at": now_iso,
+            },
+            "side": {
+                "source": "band_gradient_p995", "band_gradient": 160.0, "peak": 160.0, "percent": 100.0,
+                "edge_width_px": 1.45, "edge_width_um": 19.6, "contrast": 215, "axis_rms_px": 0.30,
+                "axis_rms_limit": 0.7, "detection_status": "精定位", "tip_uv": [960.0, 500.0],
+                "image_size": [1920, 1080], "sample_count": 22, "peak_confirmed": False,
+                "best_updated": True, "peak_confirm_kept": False, "last_peak_event": "reset",
+                "consecutive_ready": 0, "ready": False, "history": [90.0, 96.0, 100.0], "updated_at": now_iso,
+            },
+        },
+    }), encoding="utf-8")
+    ui.update_baseline({
+        "mode": "对刀基准建立中",
+        "command_seq": 0,
+        "baseline": {
+            "phase": "live",
+            "tool": 1,
+            "live_delta": [0.0, 0.0],
+            "live_inside": True,
+            "preview": {"front": {"on": False}, "side": {"on": False}},
+        },
+    })
+    assert "峰值略升已更新，保留越峰确认" in ui.baseline_views["front"]["focus_summary"].options["text"]
+    assert "发现更高新峰" in ui.baseline_views["side"]["focus_summary"].options["text"]
+    assert "已清除确认需重越峰" in ui.baseline_views["side"]["hint"].options["text"]
+    assert ui.baseline_measure.options["state"] == "disabled"
+
+
+def test_session_focus_trace_records_peak_kept_and_reset(tmp_path, monkeypatch):
+    """会话实时链路在回到峰值附近高 1.5% 时保留确认并写 focus_trace.csv；高 >=3% 时重置确认。"""
+    base_det = TridentTipDetector().detect(scene())
+    assert base_det.status == "精定位"
+    img = scene()
+    session = object.__new__(BaselineSession)
+    session.config = SimpleNamespace(
+        tool_calibration=SimpleNamespace(detection={"front": {"method": "trident", "threshold": 127}, "side": {"method": "trident", "threshold": 127}})
+    )
+    session.cfg = dict(DEFAULTS, peak_min_frames=8, focus_ready_frames=3, focus_smooth_frames=3)
+    session.events = _Events(tmp_path)
+    session.record_dir = tmp_path / "run" / "baseline" / "trace_test"
+    session.trackers = {n: BandGradientTracker(smooth_frames=3, pass_percent=92.0, peak_reset_margin_percent=3.0) for n in ("front", "side")}
+    session.readiness_trackers = {n: ReadinessTracker() for n in ("front", "side")}
+    session.history = {"front": [], "side": []}
+    session.manual_points = {}
+    session.live_snapshots = {}
+    session._live_last_ts = None
+    session._read_exposure_ms = lambda name: 10.0
+    session._target = lambda image: (300.0, 300.0)
+
+    def push_sharpness(front_val: float, side_val: float):
+        dets = {
+            "front": replace(base_det, sharpness={**base_det.sharpness, "band_gradient_p995": front_val, "edge_width_px": 1.5}),
+            "side": replace(base_det, sharpness={**base_det.sharpness, "band_gradient_p995": side_val, "edge_width_px": 1.5}),
+        }
+        now = time.monotonic()
+        session._publish_live_focus({"front": img, "side": img}, dets, now, now)
+
+    # 建峰 100 -> 越峰 88 -> 正面回 101.5 (+1.5% 保留确认并就绪)，侧面回 104.0 (+4.0% 重置确认)
+    for _ in range(8):
+        push_sharpness(100.0, 100.0)
+    for _ in range(3):
+        push_sharpness(88.0, 88.0)
+    assert session.live_snapshots["front"]["peak_confirmed"] is True
+    assert session.live_snapshots["side"]["peak_confirmed"] is True
+
+    for _ in range(5):
+        push_sharpness(101.5, 104.0)
+
+    assert session.live_snapshots["front"]["peak"] == pytest.approx(101.5)
+    assert session.live_snapshots["front"]["peak_confirmed"] is True
+    assert session.live_snapshots["front"]["ready"] is True
+    assert "保留越峰确认" in session.live_snapshots["front"]["peak_update_note"]
+
+    assert session.live_snapshots["side"]["peak"] == pytest.approx(104.0)
+    assert session.live_snapshots["side"]["peak_confirmed"] is False
+    assert session.live_snapshots["side"]["ready"] is False
+    assert "清除确认" in session.live_snapshots["side"]["peak_update_note"]
+
+    trace_path = session.record_dir / "focus_trace.csv"
+    with trace_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    front_kept = [r for r in rows if r["camera"] == "front" and r["peak_event"] == "kept"]
+    side_reset = [r for r in rows if r["camera"] == "side" and r["peak_event"] == "reset"]
+    assert len(front_kept) == 1
+    assert front_kept[0]["best_updated"] == "1"
+    assert front_kept[0]["peak_confirm_kept"] == "1"
+    assert front_kept[0]["peak_confirmed"] == "1"
+    assert len(side_reset) == 1
+    assert side_reset[0]["best_updated"] == "1"
+    assert side_reset[0]["peak_confirm_kept"] == "0"
+    assert side_reset[0]["peak_confirmed"] == "0"

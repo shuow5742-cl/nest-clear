@@ -150,6 +150,18 @@ def settings(path: str | Path) -> dict[str, Any]:
     margin = cfg["edge_margin_px"]
     if isinstance(margin, bool) or not isinstance(margin, (int, float)) or not math.isfinite(margin) or margin < 0:
         raise ValueError("edge_margin_px 必须为非负有限数")
+    reset_margin = cfg["peak_reset_margin_percent"]
+    max_reset_margin = 100.0 - float(cfg["focus_pass_percent"])
+    if (
+        isinstance(reset_margin, bool)
+        or not isinstance(reset_margin, (int, float))
+        or not math.isfinite(reset_margin)
+        or reset_margin < 0
+        or reset_margin >= max_reset_margin
+    ):
+        raise ValueError(
+            f"peak_reset_margin_percent 必须满足 0 <= x < 100 - focus_pass_percent（当前上限 {max_reset_margin:g}）"
+        )
     target = cfg["main_target_uv"]
     if target is not None and (
         not isinstance(target, (tuple, list))
@@ -649,6 +661,10 @@ class BaselineSession:
                     labels.append(((12, 58 if name == "front" else 34), EDGE_MARGIN_MESSAGE, "Near image edge", (0, 0, 220), 14))
                 elif readiness.get("wide_edge_note"):
                     labels.append(((12, 58 if name == "front" else 34), readiness["wide_edge_note"], "Wide edge accepted", (0, 145, 220), 14))
+                if not readiness["edge_near"] and readiness.get("peak_update_note"):
+                    base_y = (58 if name == "front" else 34) + (20 if readiness.get("wide_edge_note") else 0)
+                    peak_en = "Peak updated, confirm kept" if readiness.get("peak_confirmed") else "New peak >= margin, re-overshoot"
+                    labels.append(((12, base_y), readiness["peak_update_note"], peak_en, (0, 145, 220), 14))
             else:
                 labels.append((
                     (12, 34 if name == "front" else 10),
@@ -956,6 +972,7 @@ class BaselineSession:
             "focus_smooth_frames": int(self.cfg.get("focus_smooth_frames", 5)),
             "focus_pass_percent": float(self.cfg.get("focus_pass_percent", 92.0)),
             "focus_ready_percent": float(self.cfg.get("focus_ready_percent", 95.0)),
+            "peak_reset_margin_percent": float(self.cfg.get("peak_reset_margin_percent", 3.0)),
             "focus_good_px": float(self.cfg.get("focus_good_px", 2.0)),
             "focus_warn_px": float(self.cfg.get("focus_warn_px", 3.0)),
             "focus_max_px": float(self.cfg.get("focus_max_px", 3.0)),
@@ -1210,6 +1227,9 @@ class BaselineSession:
                     "percent": tracked["percent"],
                     "peak": tracked["best"],
                     "peak_confirmed": tracked.get("peak_confirmed", False),
+                    "best_updated": tracked.get("best_updated", False),
+                    "peak_confirm_kept": tracked.get("peak_confirm_kept", False),
+                    "last_peak_event": tracked.get("last_peak_event", ""),
                     "sample_count": tracked.get("sample_count", 0),
                     "edge_width_px": metrics["edge_width_px"],
                 },
@@ -1253,6 +1273,9 @@ class BaselineSession:
                 int(bool(readiness.get("peak_confirmed"))),
                 readiness.get("stage", ""),
                 int(bool(readiness.get("ready"))),
+                int(bool(tracked.get("best_updated"))),
+                int(bool(tracked.get("peak_confirm_kept"))),
+                tracked.get("peak_event", ""),
             ])
         if self.record_dir is not None and trace_rows:
             self._append_focus_trace(trace_rows)
@@ -1283,6 +1306,9 @@ class BaselineSession:
                     "peak_confirmed",
                     "peak_stage",
                     "ready",
+                    "best_updated",
+                    "peak_confirm_kept",
+                    "peak_event",
                 ])
             writer.writerows(rows)
 

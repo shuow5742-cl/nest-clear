@@ -1349,6 +1349,8 @@ class App:
                 summary_text += f" · {cam_ready['stage_text']}"
                 if cam_ready.get('wide_edge_note'):
                     summary_text += f"（{cam_ready['wide_edge_note']}）"
+                if cam_ready.get('peak_update_note'):
+                    summary_text += f"（{cam_ready['peak_update_note']}）"
             widgets['focus_summary'].config(text=summary_text, bg=bar_bg, fg=bar_fg)
             widgets['focus_graph'].config(bg=bar_bg)
             hint_text = display.get('hint', '')
@@ -1379,21 +1381,22 @@ class App:
                 axis_hint = CAMERA_AXES[name]['jog_hint']
                 stage_text = cam_ready['stage_text']
                 wide_note = cam_ready.get('wide_edge_note') or ''
+                peak_note = cam_ready.get('peak_update_note') or ''
                 if cam_ready['edge_near']:
                     color = COLORS['red']
                     hint_text = hint_text or EDGE_MARGIN_MESSAGE
                     hint_color = COLORS['red']
                 elif cam_ready['ready']:
                     color = COLORS['green']
-                    hint_text = hint_text or wide_note or stage_text
+                    hint_text = hint_text or wide_note or peak_note or stage_text
                     hint_color = '#b45309' if wide_note else COLORS['green']
                 elif cam_ready.get('peak_confirmed') or (isinstance(pct, (int, float)) and pct >= 80):
                     color = COLORS['yellow']
-                    hint_text = hint_text or stage_text
+                    hint_text = hint_text or (f"{stage_text}（{peak_note}）" if peak_note else stage_text)
                     hint_color = COLORS['yellow'] if color != COLORS['red'] else COLORS['red']
                 else:
                     color = COLORS.get(focus_info['color_key'], COLORS['red'])
-                    hint_text = hint_text or stage_text
+                    hint_text = hint_text or (f"{stage_text}（{peak_note}）" if peak_note else stage_text)
                 if src.get('source') == 'band_gradient_p995':
                     text = f'清晰度 {percent_text}%（相对本次峰值）　当前 {number(src.get("band_gradient"))} / 本次最佳 {number(src.get("peak"))}　{axis_hint}'
                 else:

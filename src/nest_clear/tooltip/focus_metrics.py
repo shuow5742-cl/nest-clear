@@ -94,33 +94,80 @@ class EdgeWidthTracker:
 
 class BandGradientTracker:
     """N-frame smoothed median, smoothed peak reference, and overshoot confirmation."""
-    def __init__(self, smooth_frames=5, pass_percent=92.0):
+    def __init__(self, smooth_frames=5, pass_percent=92.0, peak_reset_margin_percent=3.0):
         self.smooth_frames = max(1, int(smooth_frames))
         self.pass_percent = float(pass_percent)
+        self.peak_reset_margin_percent = float(peak_reset_margin_percent)
+        if not (0.0 <= self.peak_reset_margin_percent < 100.0 - self.pass_percent):
+            raise ValueError(
+                f"peak_reset_margin_percent must satisfy 0 <= x < 100 - pass_percent ({100.0 - self.pass_percent:g})"
+            )
         self.reset()
 
     def reset(self):
         self.values = deque(maxlen=self.smooth_frames)
         self.best = None
+        self._confirmed_peak = None
         self.sample_count = 0
         self.peak_confirmed = False
+        self.last_peak_event = ""
 
     def update(self, value, position=None):
         if value is None or not np.isfinite(value) or value <= 0:
-            return {'raw': None, 'current': None, 'best': self.best, 'percent': None,
-                    'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed}
+            return {
+                'raw': None, 'current': None, 'best': self.best, 'percent': None,
+                'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed,
+                'best_updated': False, 'peak_confirm_kept': False,
+                'peak_event': '', 'last_peak_event': self.last_peak_event,
+            }
         raw = float(value)
         self.sample_count += 1
         self.values.append(raw)
         if len(self.values) < self.smooth_frames:
-            return {'raw': raw, 'current': None, 'best': self.best, 'percent': None,
-                    'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed}
+            return {
+                'raw': raw, 'current': None, 'best': self.best, 'percent': None,
+                'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed,
+                'best_updated': False, 'peak_confirm_kept': False,
+                'peak_event': '', 'last_peak_event': self.last_peak_event,
+            }
         current = float(np.median(self.values))
-        if self.best is None or current > self.best:
+        best_updated = False
+        peak_confirm_kept = False
+        peak_event = ''
+        if self.best is None:
             self.best = current
+            self._confirmed_peak = None
             self.peak_confirmed = False
+            best_updated = True
+            peak_event = 'init'
+            self.last_peak_event = peak_event
+        elif current > self.best:
+            best_updated = True
+            was_confirmed = self.peak_confirmed
+            # Anchor reset check to the confirmed peak so slow ramp steps cannot bypass the margin.
+            ref_peak = self._confirmed_peak if (was_confirmed and self._confirmed_peak is not None) else self.best
+            exceeds_margin = current >= ref_peak * (1.0 + self.peak_reset_margin_percent / 100.0)
+            self.best = current
+            if not was_confirmed:
+                peak_event = 'new_peak'
+            elif exceeds_margin:
+                self.peak_confirmed = False
+                self._confirmed_peak = None
+                peak_event = 'reset'
+            else:
+                peak_confirm_kept = True
+                peak_event = 'kept'
+            self.last_peak_event = peak_event
         percent = 100 * current / self.best if self.best else None
         if percent is not None and percent <= self.pass_percent:
+            if not self.peak_confirmed:
+                peak_event = 'confirmed'
+                self.last_peak_event = peak_event
             self.peak_confirmed = True
-        return {'raw': raw, 'current': current, 'best': self.best, 'percent': percent,
-                'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed}
+            self._confirmed_peak = self.best
+        return {
+            'raw': raw, 'current': current, 'best': self.best, 'percent': percent,
+            'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed,
+            'best_updated': best_updated, 'peak_confirm_kept': peak_confirm_kept,
+            'peak_event': peak_event, 'last_peak_event': self.last_peak_event,
+        }

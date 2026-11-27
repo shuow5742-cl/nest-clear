@@ -9,6 +9,7 @@ FOCUS_DEFAULTS: dict[str, Any] = {
     "focus_smooth_frames": 5,
     "focus_pass_percent": 92.0,
     "focus_ready_percent": 95.0,
+    "peak_reset_margin_percent": 3.0,
     "focus_good_px": 2.0,
     "focus_warn_px": 3.0,
     "focus_max_px": 3.0,
@@ -80,10 +81,20 @@ def resolve_focus_config(live: dict[str, Any] | None = None, config: dict[str, A
     pass_pct = pick_float("focus_pass_percent", float(FOCUS_DEFAULTS["focus_pass_percent"]))
     if pass_pct >= ready_pct:
         pass_pct = max(1.0, ready_pct - 3.0)
+    margin_limit = max(0.0, 100.0 - pass_pct)
+    reset_margin_pct = pick_float(
+        "peak_reset_margin_percent",
+        float(FOCUS_DEFAULTS["peak_reset_margin_percent"]),
+        minimum=0.0,
+        allow_zero=True,
+    )
+    if reset_margin_pct >= margin_limit:
+        reset_margin_pct = min(float(FOCUS_DEFAULTS["peak_reset_margin_percent"]), max(0.0, margin_limit - 0.5))
     return {
         "focus_smooth_frames": pick_int("focus_smooth_frames", int(FOCUS_DEFAULTS["focus_smooth_frames"])),
         "focus_pass_percent": pass_pct,
         "focus_ready_percent": ready_pct,
+        "peak_reset_margin_percent": reset_margin_pct,
         "focus_good_px": good_px,
         "focus_warn_px": warn_px,
         "focus_max_px": max_px,
@@ -137,6 +148,10 @@ def evaluate_camera_readiness(
             "stage": "ascending",
             "stage_text": STAGE_ASCENDING_TEXT,
             "wide_edge_note": "",
+            "peak_update_note": "",
+            "best_updated": False,
+            "peak_confirm_kept": False,
+            "last_peak_event": "",
             "manual_confirmed": bool(manual_confirmed),
             "color_key": "gray",
             "reason": f"{label}等待实时检测数据（{jog_hint}）",
@@ -214,6 +229,15 @@ def evaluate_camera_readiness(
         if (ready and edge_px is not None and edge_px > float(cfg["focus_good_px"]))
         else ""
     )
+    last_peak_event = str(src.get("last_peak_event") or "")
+    peak_confirm_kept = bool(src.get("peak_confirm_kept"))
+    best_updated = bool(src.get("best_updated"))
+    if peak_confirmed and (last_peak_event == "kept" or (best_updated and peak_confirm_kept)):
+        peak_update_note = "峰值略升已更新，保留越峰确认"
+    elif (not peak_confirmed) and last_peak_event == "reset":
+        peak_update_note = f"发现更高新峰（≥{cfg['peak_reset_margin_percent']:g}%），已清除确认需重越峰"
+    else:
+        peak_update_note = ""
 
     if ready:
         stage = "ready"
@@ -287,6 +311,10 @@ def evaluate_camera_readiness(
         "stage": stage,
         "stage_text": stage_text,
         "wide_edge_note": wide_edge_note,
+        "peak_update_note": peak_update_note,
+        "best_updated": best_updated,
+        "peak_confirm_kept": peak_confirm_kept,
+        "last_peak_event": last_peak_event,
         "manual_confirmed": is_manual,
         "color_key": color_key,
         "reason": reason,
