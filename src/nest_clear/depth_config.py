@@ -22,6 +22,7 @@ DEFAULTS = {
     'frames_per_step': 3,
     'metric': 'tenengrad',
     'peak_method': 'gauss',
+    'dof_ratio': .8,
     'plane_tol_mm': .02,
     'repeat_range_tol_mm': .02,
     'max_points': 9,

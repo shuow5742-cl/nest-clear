@@ -82,7 +82,12 @@ class DepthCalibration(DeviceSampling):
                     'plan': session.plan, 'plane': session.plane, 'initial_plane': session.initial_plane,
                     'results': session.results, 'feasibility': session.feasibility,
                     'metric': session.cfg['metric'], 'method': session.cfg['peak_method'],
+                    'dof_ratio': session.cfg['dof_ratio'],
                     'fine_plan': session.fine_plan,
+                    'coarse_fit': session.coarse_fit,
+                    'coarse_dof': getattr(session, 'coarse_dof', None),
+                    'current_fits': list(session.fits),
+                    'dof_summary': getattr(session, 'dof_summary', None),
                     'session': session.record.directory.name, 'sample': session.last_sample,
                     'abort_requested': session.abort_requested}
             session.last_sample = None

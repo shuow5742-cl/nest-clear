@@ -222,6 +222,14 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         'T12': -5.013,
     }
 
+    point_fwhm_delta = {
+        'T02': -0.018,
+        'T05': 0.012,
+        'T29': 0.025,
+        'T26': -0.006,
+        'T12': 0.002,
+    }
+
     def curve_val(z: float, z0: float, amp: float = 0.85, sigma: float = 0.85) -> float:
         return round(0.04 + amp * math.exp(-0.5 * ((z - z0) / sigma) ** 2), 4)
 
@@ -232,12 +240,12 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             zs = zs[:limit]
         return [[round(z, 3), curve_val(z, z0, amp=0.84, sigma=0.85)] for z in zs]
 
-    def make_fine(lbl: str, offset: float, limit: int | None = None):
+    def make_fine(lbl: str, offset: float, limit: int | None = None, sigma: float = 0.85):
         z0 = true_peaks[lbl] + offset
         zs = [round(true_peaks[lbl] + 1.50 - 0.075 * i, 4) for i in range(41)]
         if limit is not None:
             zs = zs[:limit]
-        return [[z, curve_val(z, z0, amp=0.92, sigma=0.85)] for z in zs]
+        return [[z, curve_val(z, z0, amp=0.92, sigma=sigma)] for z in zs]
 
     def make_fine_plan():
         return {
@@ -247,17 +255,57 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             'truncated': False, 'truncation_note': None,
         }
 
+    from nest_clear.ui.model import depthcal_curve_dof
+
+    def make_coarse_fit(lbl: str):
+        pts = make_coarse(lbl)
+        dof = depthcal_curve_dof(pts, 0.8) or {}
+        return {
+            'z_peak': true_peaks[lbl],
+            'fwhm': 2.002,
+            'dof_mm': dof.get('dof_mm'),
+            'dof_gauss_mm': 0.85 * 2.0 * math.sqrt(2.0 * math.log(1.0 / 0.8)),
+            'dof_ratio': 0.8,
+            'dof_z_lower': dof.get('dof_z_lower'),
+            'dof_z_upper': dof.get('dof_z_upper'),
+            'dof_covered': dof.get('dof_covered', False),
+        }
+
+    def make_fine_fit(lbl: str, repeat: int, off: float, fwhm: float, r2: float):
+        sigma = fwhm / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+        pts = make_fine(lbl, off, sigma=sigma)
+        dof = depthcal_curve_dof(pts, 0.8) or {}
+        return {
+            'repeat': repeat,
+            'z_peak': round(true_peaks[lbl] + off, 5),
+            'fwhm': fwhm,
+            'r2': r2,
+            'dof_mm': dof.get('dof_mm'),
+            'dof_gauss_mm': round(sigma * 2.0 * math.sqrt(2.0 * math.log(1.0 / 0.8)), 4),
+            'dof_ratio': 0.8,
+            'dof_z_lower': dof.get('dof_z_lower'),
+            'dof_z_upper': dof.get('dof_z_upper'),
+            'dof_covered': dof.get('dof_covered', False),
+            'quality_ok': True,
+            'insufficient_points': False,
+        }
+
     def make_result(lbl: str):
         offsets = (-0.0018, 0.0012, 0.0005)
-        peaks = [round(true_peaks[lbl] + off, 5) for off in offsets]
+        delta_w = point_fwhm_delta.get(lbl, 0.0)
+        fits = [make_fine_fit(lbl, i + 1, off, 1.985 + delta_w + i * 0.008, 0.9974 - i * 0.0003)
+                for i, off in enumerate(offsets)]
+        peaks = [f['z_peak'] for f in fits]
         mean_pk = sum(peaks) / len(peaks)
         rng = max(peaks) - min(peaks)
         var = sum((p - mean_pk) ** 2 for p in peaks) / (len(peaks) - 1)
-        fits = [{'repeat': i + 1, 'z_peak': p, 'fwhm': 1.985 + i * 0.008, 'r2': 0.9974 - i * 0.0003,
-                 'quality_ok': True, 'insufficient_points': False}
-                for i, p in enumerate(peaks)]
-        return {'label': lbl, 'xy': coords[lbl], 'fits': fits, 'fine_plan': make_fine_plan(),
-                'insufficient_repeats': [], 'z_peak': mean_pk, 'range': rng, 'std': math.sqrt(var)}
+        dofs = [f['dof_mm'] for f in fits if isinstance(f.get('dof_mm'), (int, float))]
+        return {'label': lbl, 'xy': coords[lbl], 'fits': fits, 'coarse_fit': make_coarse_fit(lbl),
+                'fine_plan': make_fine_plan(), 'insufficient_repeats': [],
+                'z_peak': mean_pk, 'range': rng, 'std': math.sqrt(var),
+                'dof_mm': sum(dofs) / len(dofs) if dofs else None,
+                'dof_range_mm': (max(dofs) - min(dofs)) if len(dofs) >= 2 else None,
+                'dof_covered_count': len(dofs), 'dof_uncovered': 0}
 
     curves = {}
     results = []
@@ -267,47 +315,54 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
 
     if state == 'coarse':
         lbl = 'T02'
-        curves[lbl] = {'coarse': make_coarse(lbl, limit=18)}
+        curves[lbl] = {'coarse': make_coarse(lbl, limit=21)}
         z_cur = curves[lbl]['coarse'][-1][0]
         return ({
             'phase': 'coarse', 'message': 'T02 粗扫中（Z 向下步进 0.20 mm）',
             'label': lbl, 'z': z_cur, 'point': 1, 'total': 5, 'plan': plan,
             'plane': None, 'initial_plane': None, 'results': [], 'feasibility': None,
-            'metric': 'tenengrad', 'method': 'gauss', 'fine_plan': None, 'session': 'demo_depthcal',
-            'curves': curves, 'abort_requested': False,
+            'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
+            'fine_plan': None, 'coarse_fit': None, 'current_fits': [], 'dof_summary': None,
+            'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
         }, z_cur, lbl)
 
     if state == 'fine':
         for done_lbl in ('T02', 'T05'):
+            dw = point_fwhm_delta[done_lbl]
             curves[done_lbl] = {
                 'coarse': make_coarse(done_lbl),
-                '1': make_fine(done_lbl, -0.0018),
-                '2': make_fine(done_lbl, 0.0012),
-                '3': make_fine(done_lbl, 0.0005),
+                '1': make_fine(done_lbl, -0.0018, sigma=(1.985 + dw) / 2.35482),
+                '2': make_fine(done_lbl, 0.0012, sigma=(1.993 + dw) / 2.35482),
+                '3': make_fine(done_lbl, 0.0005, sigma=(2.001 + dw) / 2.35482),
             }
             results.append(make_result(done_lbl))
         lbl = 'T29'
+        dw = point_fwhm_delta[lbl]
+        t29_fit1 = make_fine_fit(lbl, 1, -0.0014, 1.990 + dw, 0.9973)
         curves[lbl] = {
             'coarse': make_coarse(lbl),
-            '1': make_fine(lbl, -0.0014),
-            '2': make_fine(lbl, 0.0011, limit=25),
+            '1': make_fine(lbl, -0.0014, sigma=(1.990 + dw) / 2.35482),
+            '2': make_fine(lbl, 0.0011, limit=25, sigma=(1.996 + dw) / 2.35482),
         }
         z_cur = curves[lbl]['2'][-1][0]
         return ({
             'phase': 'fine', 'message': 'T29 细扫 第 2/3 次（单向向下 0.075 mm）',
             'label': lbl, 'z': z_cur, 'point': 3, 'total': 5, 'plan': plan,
             'plane': None, 'initial_plane': None, 'results': results, 'feasibility': None,
-            'metric': 'tenengrad', 'method': 'gauss', 'fine_plan': make_fine_plan(), 'session': 'demo_depthcal',
-            'curves': curves, 'abort_requested': False,
+            'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
+            'fine_plan': make_fine_plan(), 'coarse_fit': make_coarse_fit(lbl),
+            'current_fits': [t29_fit1], 'dof_summary': None,
+            'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
         }, z_cur, lbl)
 
     if state == 'done':
         for lbl in plan:
+            dw = point_fwhm_delta[lbl]
             curves[lbl] = {
                 'coarse': make_coarse(lbl),
-                '1': make_fine(lbl, -0.0018),
-                '2': make_fine(lbl, 0.0012),
-                '3': make_fine(lbl, 0.0005),
+                '1': make_fine(lbl, -0.0018, sigma=(1.985 + dw) / 2.35482),
+                '2': make_fine(lbl, 0.0012, sigma=(1.993 + dw) / 2.35482),
+                '3': make_fine(lbl, 0.0005, sigma=(2.001 + dw) / 2.35482),
             }
             results.append(make_result(lbl))
         residuals = {'T02': -0.0012, 'T05': 0.0015, 'T29': -0.0009, 'T26': 0.0011, 'T12': -0.0005}
@@ -316,21 +371,37 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         initial_plane = plane
         feasibility = {'max_range': 0.0030, 'max_std': 0.0016, 'threshold': 0.02,
                        'insufficient_fits': 0, 'insufficient_items': [], 'total_fits': 15, 'met': True}
+        point_dofs = [r['dof_mm'] for r in results if r.get('dof_mm') is not None]
+        dof_sum = {
+            'dof_ratio': 0.8,
+            'mean_mm': sum(point_dofs) / len(point_dofs),
+            'min_mm': min(point_dofs),
+            'max_mm': max(point_dofs),
+            'covered_points': len(point_dofs),
+            'total_points': len(results),
+            'covered_fits': 15,
+            'total_fits': 15,
+            'uncovered_fits': 0,
+            'uncovered_items': [],
+        }
         z_cur = results[-1]['z_peak']
         return ({
             'phase': 'done', 'message': '料盘多点对焦测试完成（已回 161）',
             'label': 'T12', 'z': z_cur, 'point': 5, 'total': 5, 'plan': plan,
             'plane': plane, 'initial_plane': initial_plane, 'results': results, 'feasibility': feasibility,
-            'metric': 'tenengrad', 'method': 'gauss', 'fine_plan': make_fine_plan(), 'session': 'demo_depthcal',
-            'curves': curves, 'abort_requested': False,
+            'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
+            'fine_plan': make_fine_plan(), 'coarse_fit': results[-1]['coarse_fit'],
+            'current_fits': results[-1]['fits'], 'dof_summary': dof_sum,
+            'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
         }, z_cur, 'T12')
 
     # failed
+    dw_t02 = point_fwhm_delta['T02']
     curves['T02'] = {
         'coarse': make_coarse('T02'),
-        '1': make_fine('T02', -0.0018),
-        '2': make_fine('T02', 0.0012),
-        '3': make_fine('T02', 0.0005),
+        '1': make_fine('T02', -0.0018, sigma=(1.985 + dw_t02) / 2.35482),
+        '2': make_fine('T02', 0.0012, sigma=(1.993 + dw_t02) / 2.35482),
+        '3': make_fine('T02', 0.0005, sigma=(2.001 + dw_t02) / 2.35482),
     }
     results.append(make_result('T02'))
     curves['T05'] = {'coarse': [[round(-8.0 - 0.2 * i, 3), round(0.12 + 0.03 * i, 4)] for i in range(21)]}
@@ -344,8 +415,9 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         'hint': '核查工具间隙及安全 Z 下限，再评估是否扩大向下的可用扫描范围。',
         'label': 'T05', 'z': z_cur, 'point': 2, 'total': 5, 'plan': plan,
         'plane': None, 'initial_plane': None, 'results': results, 'feasibility': None,
-        'metric': 'tenengrad', 'method': 'gauss', 'fine_plan': None, 'session': 'demo_depthcal',
-        'curves': curves, 'abort_requested': False,
+        'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
+        'fine_plan': None, 'coarse_fit': None, 'current_fits': [], 'dof_summary': None,
+        'session': 'demo_depthcal', 'curves': curves, 'abort_requested': False,
     }, z_cur, 'T05')
 
 

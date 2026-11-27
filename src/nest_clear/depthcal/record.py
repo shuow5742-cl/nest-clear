@@ -63,7 +63,9 @@ class DepthRecord:
 
     def results(self, session):
         self.write('fits.json', {'metric': session.cfg['metric'], 'method': session.cfg['peak_method'],
-                                 'points': session.results, 'feasibility': session.feasibility})
+                                 'dof_ratio': session.cfg['dof_ratio'],
+                                 'points': session.results, 'feasibility': session.feasibility,
+                                 'dof_summary': getattr(session, 'dof_summary', None)})
         self.write('plane.json', {'initial': session.initial_plane, 'final': session.plane,
                                   'tolerance_mm': session.cfg['plane_tol_mm']})
 
@@ -79,6 +81,7 @@ class DepthRecord:
                 'outcome': outcome, 'diagnostic': details, 'configuration': session.cfg,
                 'exposure_us': getattr(session, 'exposure_us', None), 'plan': session.plan,
                 'fine_plans': fine_plans,
+                'dof_summary': getattr(session, 'dof_summary', None),
                 'requests': session.requests, 'replies': session.replies, 'samples': len(session.samples),
             })
         except (OSError, ValueError) as exc:

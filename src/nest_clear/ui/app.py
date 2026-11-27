@@ -21,7 +21,8 @@ from .model import (EventTail, camcal_progress, decode_status, display_time, dur
                     pickacc_stage, pickacc_note, pickacc_infield,
                     tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time, page_for_mode,
                     baseline_preview_display, extract_tooltip_preview,
-                    depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout)
+                    depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout,
+                    depthcal_curve_dof, depthcal_latest_dof_text, depthcal_dof_summary_text)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -1741,7 +1742,7 @@ class App:
         head.columnconfigure(0, weight=1)
         bar = tk.Frame(head, bg=WHITE)
         bar.grid(row=0, column=0, sticky='ew')
-        bar.columnconfigure(3, weight=1)
+        bar.columnconfigure(4, weight=1)
         self.depth_stage = tk.Label(bar, text='阶段：空闲（等待 PLC 160）', bg='#eef2f6', fg=INK,
                                     font=(self.theme.title[0], 13, 'bold'), padx=12, pady=3)
         self.depth_stage.grid(row=0, column=0, sticky='w', padx=(0, 10))
@@ -1749,8 +1750,10 @@ class App:
         self.depth_target.grid(row=0, column=1, sticky='w', padx=(0, 10))
         self.depth_z = tk.Label(bar, text='PLC Z：— mm', bg='#eef2f6', fg=INK, font=self.theme.mono, padx=10, pady=3)
         self.depth_z.grid(row=0, column=2, sticky='w', padx=(0, 10))
+        self.depth_dof = tk.Label(bar, text='景深：—（FWHM —）', bg='#eef2f6', fg=INK, font=self.theme.mono, padx=10, pady=3)
+        self.depth_dof.grid(row=0, column=3, sticky='w', padx=(0, 10))
         self.depth_abort = ttk.Button(bar, text='放弃本次标定', command=lambda: self.depth_command('depthcal_abort'))
-        self.depth_abort.grid(row=0, column=4, sticky='e', padx=4)
+        self.depth_abort.grid(row=0, column=5, sticky='e', padx=4)
 
         subbar = tk.Frame(head, bg=WHITE)
         subbar.grid(row=1, column=0, sticky='ew', pady=(4, 0))
@@ -1775,8 +1778,12 @@ class App:
                                           bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 11, 'bold'),
                                           anchor='w', justify='left', padx=8, pady=4, wraplength=1360)
         self.depth_feasibility.grid(row=5, column=0, sticky='ew')
+        self.depth_dof_summary = tk.Label(head, text='全盘景深（dof_ratio=0.80）：等待测点完成后汇总',
+                                          bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 10, 'bold'),
+                                          anchor='w', justify='left', padx=8, pady=3, wraplength=1360)
+        self.depth_dof_summary.grid(row=6, column=0, sticky='ew', pady=(2, 0))
 
-        curves_body = self.card(self.depth, '清晰度曲线（粗扫灰线 · 细扫彩线 · 竖线=峰位）', 1, 0)
+        curves_body = self.card(self.depth, '清晰度曲线（粗扫灰线 · 细扫彩线 · 竖线=峰位 · 浅蓝=DOF 区间）', 1, 0)
         curves_body.grid_propagate(False)
         self.depth_curves = tk.Canvas(curves_body, bg=WHITE, highlightthickness=0)
         self.depth_curves.grid(row=0, column=0, sticky='nsew')
@@ -1803,8 +1810,8 @@ class App:
             widget.grid_configure(pady=0)
 
         table_body = self.card(self.depth, '各测点对焦重复性结果', 2, 0, columnspan=2)
-        cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'R²')
-        widths = (70, 175, 130, 130, 130, 145, 100, 100, 100, 95)
+        cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'DOF 均值', 'DOF 极差', 'R²')
+        widths = (60, 155, 120, 120, 120, 120, 85, 85, 85, 110, 95, 80)
         self.depth_table = self.table_widget(
             table_body, cols, widths, stretch=cols, height=5,
             anchor='center', heading_anchor='center',
@@ -1833,10 +1840,12 @@ class App:
 
         z_val = data.get('z')
         self.depth_z.config(text=f"PLC Z：{z_val:.4f} mm" if isinstance(z_val, (int, float)) else 'PLC Z：— mm')
+        self.depth_dof.config(text=depthcal_latest_dof_text(data))
 
         metric = data.get('metric') or 'tenengrad'
         method = data.get('method') or 'gauss'
-        self.depth_metric.config(text=f'指标：{metric} · {method}')
+        ratio = float(data.get('dof_ratio') or 0.8)
+        self.depth_metric.config(text=f'指标：{metric} · {method} · dof_ratio={ratio:.2f}')
         fine_text, fine_notice = depthcal_fine_plan_text(data)
         self.depth_fine_info.config(text=fine_text)
 
@@ -1872,6 +1881,8 @@ class App:
 
         feas_text, feas_bg, feas_fg = depthcal_feasibility_text(data)
         self.depth_feasibility.config(text=feas_text, bg=feas_bg, fg=feas_fg)
+        dof_sum_text, dof_sum_bg, dof_sum_fg = depthcal_dof_summary_text(data)
+        self.depth_dof_summary.config(text=dof_sum_text, bg=dof_sum_bg, fg=dof_sum_fg)
 
         plane = data.get('plane') or {}
         initial_plane = data.get('initial_plane') or {}
@@ -1916,6 +1927,16 @@ class App:
                 z_mean = item.get('z_peak')
                 z_rng = item.get('range')
                 z_std = item.get('std')
+                dof_mean = item.get('dof_mm')
+                dof_rng = item.get('dof_range_mm')
+                dof_uncov = int(item.get('dof_uncovered') or 0)
+                if isinstance(dof_mean, (int, float)):
+                    dof_mean_txt = f'{dof_mean:.3f}' + (f' ({dof_uncov}未覆盖)' if dof_uncov else '')
+                elif dof_uncov > 0 or fits:
+                    dof_mean_txt = '未覆盖'
+                else:
+                    dof_mean_txt = '—'
+                dof_rng_txt = f'{dof_rng:.4f}' if isinstance(dof_rng, (int, float)) else '—'
                 self.depth_table.insert('', 'end', values=(
                     item.get('label') or '—',
                     xy_text,
@@ -1924,6 +1945,8 @@ class App:
                     f'{z_rng:.4f}' if isinstance(z_rng, (int, float)) else '—',
                     f'{z_std:.4f}' if isinstance(z_std, (int, float)) else '—',
                     f'{sum(fwhms)/len(fwhms):.3f}' if fwhms else '—',
+                    dof_mean_txt,
+                    dof_rng_txt,
                     f'{sum(r2s)/len(r2s):.4f}' if r2s else '—',
                 ))
 
@@ -1940,20 +1963,24 @@ class App:
                 plan.append(lbl)
         results_by_label = {r.get('label'): r for r in (data.get('results') or []) if r.get('label')}
         current_label = data.get('label')
-        key = (json.dumps([curves, plan, current_label, data.get('results')], ensure_ascii=False, default=str), w, h)
+        dof_ratio = float(data.get('dof_ratio') or 0.8)
+        current_fits = data.get('current_fits') or []
+        key = (json.dumps([curves, plan, current_label, data.get('results'), current_fits, dof_ratio],
+                          ensure_ascii=False, default=str), w, h)
         if self.cache.get('depth_curves') == key:
             return
         self.cache['depth_curves'] = key
         c.delete('all')
 
         # 顶部图例
-        legend_items = [('粗扫(灰)', '#98a2b3'), ('细扫1', '#2563eb'), ('细扫2', '#168448'),
-                        ('细扫3', '#d97706'), ('峰位(竖线)', '#b42318')]
+        legend_items = [('粗扫(灰)', '#98a2b3', ()), ('细扫1', '#2563eb', ()), ('细扫2', '#168448', ()),
+                        ('细扫3', '#d97706', ()), ('峰位(竖线)', '#b42318', (4, 2)),
+                        (f'DOF({dof_ratio:.0%})', '#0284c7', (3, 2))]
         lx = 12
-        for text, color in legend_items:
-            c.create_line(lx, 12, lx + 16, 12, fill=color, width=2, dash=(4, 2) if '竖线' in text else ())
+        for text, color, dash in legend_items:
+            c.create_line(lx, 12, lx + 16, 12, fill=color, width=2, dash=dash)
             c.create_text(lx + 20, 12, text=text, anchor='w', fill=INK, font=(self.theme.body[0], 9))
-            lx += 88 if '粗扫' in text else 96 if '竖线' in text else 66
+            lx += 88 if '粗扫' in text else 96 if '竖线' in text else 92 if 'DOF' in text else 66
 
         if not plan:
             c.create_text(w / 2, h / 2, text='暂无清晰度扫描曲线，等待 PLC 160 发起测试',
@@ -1968,7 +1995,9 @@ class App:
             res = results_by_label.get(label)
             title = f'{label}'
             if res and isinstance(res.get('z_peak'), (int, float)):
-                title += f"  峰={res['z_peak']:.4f}mm  Δ={res.get('range', 0):.4f}"
+                dof_part = (f" DOF={res['dof_mm']:.2f}" if isinstance(res.get('dof_mm'), (int, float))
+                            else ' DOF=未覆盖')
+                title += f" 峰={res['z_peak']:.4f} Δ={res.get('range', 0):.4f}{dof_part}"
             elif is_current:
                 title += '  (扫描中)'
             c.create_text(x0 + 8, y0 + 5, text=title, anchor='nw',
@@ -1996,6 +2025,38 @@ class App:
                 sy = py1 - (py1 - py0) * (yv - y_lo) / (y_hi - y_lo)
                 return sx, sy
 
+            fine_keys = sorted([k for k in series if k != 'coarse' and len(series.get(k) or []) >= 3],
+                               key=lambda k: int(k) if k.isdigit() else 999)
+            ref_pts = series.get(fine_keys[-1]) if fine_keys else series.get('coarse')
+            curve_dof = depthcal_curve_dof(ref_pts, dof_ratio) if ref_pts else None
+            y_thresh = curve_dof['threshold'] if curve_dof else (max(ys) * dof_ratio)
+            z_dof_lo = curve_dof['dof_z_lower'] if curve_dof else None
+            z_dof_hi = curve_dof['dof_z_upper'] if curve_dof else None
+            fit_pool = (res.get('fits') if res else None) or (current_fits if label == current_label else None) or []
+            covered_fits = [f for f in fit_pool if f.get('dof_covered') and isinstance(f.get('dof_z_lower'), (int, float))
+                            and isinstance(f.get('dof_z_upper'), (int, float))]
+            if covered_fits:
+                latest_fit = covered_fits[-1]
+                z_dof_lo = latest_fit['dof_z_lower']
+                z_dof_hi = latest_fit['dof_z_upper']
+                fit_pts = series.get(str(latest_fit.get('repeat', '')), ref_pts)
+                if fit_pts:
+                    y_thresh = max(pt[1] for pt in fit_pts if len(pt) >= 2) * dof_ratio
+            elif fit_pool:
+                latest_fit = fit_pool[-1]
+                if latest_fit.get('dof_covered') is False:
+                    z_dof_lo = latest_fit.get('dof_z_lower')
+                    z_dof_hi = latest_fit.get('dof_z_upper')
+
+            sy_thr = None
+            if y_lo <= y_thresh <= y_hi:
+                _, sy_thr = to_px(z_lo, y_thresh)
+                if (z_dof_lo is not None and z_dof_hi is not None
+                        and z_lo <= z_dof_lo < z_dof_hi <= z_hi):
+                    sx_lo, _ = to_px(z_dof_lo, y_lo)
+                    sx_hi, _ = to_px(z_dof_hi, y_lo)
+                    c.create_rectangle(sx_lo, sy_thr, sx_hi, py1, fill='#e0f2fe', outline='')
+
             c.create_line(px0, py0, px0, py1, fill='#cbd5e1')
             c.create_line(px0, py1, px1, py1, fill='#cbd5e1')
             c.create_text(px0 - 3, py0, text=f'{y_hi:.2f}', anchor='ne', fill=MUTED, font=(self.theme.body[0], 8))
@@ -2018,6 +2079,15 @@ class App:
                         c.create_oval(sx - 2, sy - 2, sx + 2, sy + 2, fill=color, outline=color)
                 if len(coords) >= 4:
                     c.create_line(*coords, fill=color, width=width_px)
+
+            if sy_thr is not None:
+                c.create_line(px0, sy_thr, px1, sy_thr, fill='#38bdf8', dash=(4, 2), width=1.5)
+                for z_cross in (z_dof_lo, z_dof_hi):
+                    if isinstance(z_cross, (int, float)) and z_lo <= z_cross <= z_hi:
+                        sx_c, _ = to_px(z_cross, y_lo)
+                        c.create_line(sx_c, max(py0, sy_thr - 8), sx_c, py1, fill='#0284c7', width=1.5, dash=(2, 2))
+                        c.create_oval(sx_c - 2.5, sy_thr - 2.5, sx_c + 2.5, sy_thr + 2.5,
+                                      fill='#0284c7', outline='#0284c7')
 
             if res:
                 for idx, fit in enumerate(res.get('fits') or [], 1):

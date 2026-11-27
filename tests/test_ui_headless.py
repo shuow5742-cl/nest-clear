@@ -965,8 +965,14 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
     for state in ('coarse', 'fine', 'done', 'failed'):
         data, _, _ = depthcal_demo(state)
         ui.update_depthcal({'mode': '空闲' if state in ('done', 'failed') else '下针深度标定中', 'depthcal': data})
-        if state == 'done':
+        if state == 'coarse':
+            assert '粗扫估计' in ui.depth_dof.options['text']
+        elif state == 'done':
             assert len(ui.depth_table.rows) == 5
+            assert len(ui.depth_table.rows['0']['values']) == 12
+            assert '细扫3' in ui.depth_dof.options['text'] and 'FWHM' in ui.depth_dof.options['text']
+            assert 'dof_ratio=0.80' in ui.depth_dof_summary.options['text']
+            assert '均值' in ui.depth_dof_summary.options['text'] and '最小' in ui.depth_dof_summary.options['text']
             assert '满足下针深度标定误差预算' in ui.depth_feasibility.options['text']
             assert '0.0502 mm/100mm' in ui.depth_plane_grid.values_data['最大 |残差| / 倾斜']
             assert '±1.500 mm' in ui.depth_fine_info.options['text']
@@ -976,23 +982,38 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
         elif state == 'fine':
             assert ui.depth_abort.options['state'] == 'normal'
             assert len(ui.depth_table.rows) == 2
+            assert '细扫1' in ui.depth_dof.options['text']
             assert '±1.500 mm' in ui.depth_fine_info.options['text']
         elif state == 'failed':
             assert ui.depth_failure_detail.visible
             assert 'DEPTH-PEAK-BOUNDARY' in ui.depth_failure_detail.options['text']
 
-    # 验证拟合点不足 + 回退/截断提示在界面正确呈现
+    # 验证拟合点不足 + 回退/截断提示 + 未覆盖 DOF 在界面正确呈现
     warn_data, _, _ = depthcal_demo('done')
     warn_data['fine_plan'] = {'mode': 'fixed_fallback', 'half_width_mm': 0.6, 'fine_step_mm': 0.02,
                               'fallback': True, 'fallback_reason': '粗扫 FWHM 无效',
                               'truncated': True, 'truncation_note': '下限截断'}
     warn_data['results'][0]['fits'][0]['quality_ok'] = False
+    warn_data['results'][0]['dof_uncovered'] = 1
+    warn_data['results'][1]['dof_mm'] = None
+    warn_data['results'][1]['dof_range_mm'] = None
+    warn_data['results'][1]['dof_uncovered'] = 3
+    warn_data['current_fits'] = [{'repeat': 3, 'dof_mm': None, 'fwhm': 1.99, 'dof_covered': False}]
+    warn_data['dof_summary'] = {'dof_ratio': 0.8, 'mean_mm': 1.15, 'min_mm': 1.13, 'max_mm': 1.18,
+                                'covered_points': 4, 'total_points': 5, 'covered_fits': 11,
+                                'total_fits': 15, 'uncovered_fits': 4,
+                                'uncovered_items': ['T02#1', 'T05#1', 'T05#2', 'T05#3']}
     warn_data['feasibility'] = {'max_range': 0.003, 'max_std': 0.0016, 'threshold': 0.02,
                                 'insufficient_fits': 1, 'insufficient_items': ['T02#1'], 'total_fits': 15, 'met': False}
     ui.update_depthcal({'mode': '空闲', 'depthcal': warn_data})
     assert ui.depth_notice.visible and '回退 fixed' in ui.depth_notice.options['text']
     assert '拟合点不足 1/15 次' in ui.depth_feasibility.options['text']
     assert '(点不足)' in ui.depth_table.rows['0']['values'][2]
+    assert '(1未覆盖)' in ui.depth_table.rows['0']['values'][9]
+    assert ui.depth_table.rows['1']['values'][9] == '未覆盖'
+    assert ui.depth_table.rows['1']['values'][10] == '—'
+    assert '未覆盖' in ui.depth_dof.options['text']
+    assert '未覆盖 4/15 次' in ui.depth_dof_summary.options['text']
 
     # 点击放弃按钮写入 depthcal_abort 命令
     sent = []

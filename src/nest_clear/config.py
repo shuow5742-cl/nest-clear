@@ -202,6 +202,8 @@ def _depth_config(value, z_travel):
         _fail(f"{path}.fine_step_min_mm", "不能大于 fine_step_max_mm")
     if not 0 < settings["defocus_ratio"] < 1:
         _fail(f"{path}.defocus_ratio", "须在 0 和 1 之间")
+    if not 0 < settings["dof_ratio"] < 1:
+        _fail(f"{path}.dof_ratio", "须在 0 和 1 之间")
     if settings["settle_samples"] < 2:
         _fail(f"{path}.settle_samples", "须至少为 2")
     if not 5 <= settings["max_points"] <= 9:

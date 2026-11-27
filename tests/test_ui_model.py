@@ -332,7 +332,11 @@ def test_main_preview_controls_use_mode_and_hosted_focus_state():
 
 def test_depthcal_model_helpers_and_status(tmp_path):
     from nest_clear.ui.demo import depthcal_demo
-    from nest_clear.ui.model import depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout
+    from nest_clear.ui.model import (
+        depthcal_curve_dof, depthcal_dof_summary_text, depthcal_feasibility_text,
+        depthcal_fine_plan_text, depthcal_latest_dof_text, depthcal_stage_info,
+        depthcal_subplot_layout,
+    )
     from nest_clear.ui.status import MainStatus
     assert depthcal_stage_info({'phase': 'idle'})[0] == '阶段：空闲（等待 PLC 160）'
     assert depthcal_stage_info({'phase': 'done'})[0] == '阶段：完成（已回 161）'
@@ -365,6 +369,28 @@ def test_depthcal_model_helpers_and_status(tmp_path):
 
     demo_done, _, _ = depthcal_demo('done')
     assert 1.8 <= demo_done['results'][0]['fits'][0]['fwhm'] <= 2.2
+    assert demo_done['dof_summary']['dof_ratio'] == pytest.approx(0.8)
+    assert demo_done['results'][0]['dof_mm'] > 0
+
+    # DOF 辅助函数：纯 Python 插值、粗扫估计、细扫、未覆盖、全盘汇总
+    pts = [[-6.0, 0.5], [-5.5, 0.8], [-5.0, 1.0], [-4.5, 0.8], [-4.0, 0.5]]
+    cdof = depthcal_curve_dof(pts, 0.8)
+    assert cdof['dof_covered'] and cdof['dof_mm'] == pytest.approx(1.0)
+    assert cdof['dof_z_lower'] == pytest.approx(-5.5) and cdof['dof_z_upper'] == pytest.approx(-4.5)
+    assert depthcal_curve_dof([[-5.5, 0.9], [-5.0, 1.0], [-4.5, 0.7]], 0.8)['dof_covered'] is False
+
+    assert depthcal_latest_dof_text({'label': 'T02', 'coarse_fit': {'dof_mm': 1.25, 'fwhm': 2.1, 'dof_covered': True}}) == '景深：1.250 mm（粗扫估计，FWHM 2.100 mm）'
+    assert depthcal_latest_dof_text({'label': 'T02', 'current_fits': [{'repeat': 2, 'dof_mm': 1.14, 'fwhm': 2.0, 'dof_covered': True}]}) == '景深：1.140 mm（细扫2，FWHM 2.000 mm）'
+    assert depthcal_latest_dof_text({'label': 'T02', 'current_fits': [{'repeat': 1, 'dof_mm': None, 'fwhm': 2.0, 'dof_covered': False}]}) == '景深：未覆盖（细扫1，FWHM 2.000 mm）'
+
+    sum_ok, sum_bg, _ = depthcal_dof_summary_text(demo_done)
+    assert 'dof_ratio=0.80' in sum_ok and '均值' in sum_ok and '最小' in sum_ok and '最大' in sum_ok and sum_bg == '#ecfdf3'
+    sum_uncov, sum_uncov_bg, _ = depthcal_dof_summary_text({
+        'dof_ratio': 0.8,
+        'dof_summary': {'mean_mm': 1.15, 'min_mm': 1.12, 'max_mm': 1.18, 'covered_points': 4, 'total_points': 5,
+                        'uncovered_fits': 3, 'total_fits': 15, 'uncovered_items': ['T05#1', 'T05#2', 'T05#3']},
+    })
+    assert '未覆盖 3/15 次' in sum_uncov and '不计入统计' in sum_uncov and sum_uncov_bg == '#fff7ed'
 
     boxes = depthcal_subplot_layout(['T02', 'T05', 'T29', 'T26', 'T12'], 900, 400)
     assert len(boxes) == 5

@@ -1,5 +1,8 @@
 """菲林布局测点选择与模组坐标中的平面拟合。"""
 
+import math
+import statistics
+
 import numpy as np
 
 from nest_clear.guard import GuardError
@@ -64,4 +67,34 @@ def repeatability(results, threshold):
         'insufficient_items': insufficient_items,
         'total_fits': total_fits,
         'met': len(insufficient_items) == 0 and max_std is not None and max(max_range, max_std) <= threshold,
+    }
+
+
+def dof_summary(results, dof_ratio):
+    """汇总所有测点 DOF 均值/最小/最大（未覆盖的细扫及全未覆盖测点不参与统计）。"""
+    point_dofs = [
+        float(r['dof_mm']) for r in results
+        if isinstance(r.get('dof_mm'), (int, float)) and math.isfinite(r['dof_mm'])
+    ]
+    uncovered_items = [
+        f"{r['label']}#{fit['repeat']}"
+        for r in results
+        for fit in (r.get('fits') or [])
+        if fit.get('dof_covered') is False
+    ]
+    total_fits = sum(len(r.get('fits') or []) for r in results)
+    covered_fits = sum(
+        1 for r in results for fit in (r.get('fits') or []) if fit.get('dof_covered') is True
+    )
+    return {
+        'dof_ratio': float(dof_ratio),
+        'mean_mm': float(statistics.mean(point_dofs)) if point_dofs else None,
+        'min_mm': float(min(point_dofs)) if point_dofs else None,
+        'max_mm': float(max(point_dofs)) if point_dofs else None,
+        'covered_points': len(point_dofs),
+        'total_points': len(results),
+        'covered_fits': covered_fits,
+        'total_fits': total_fits,
+        'uncovered_fits': len(uncovered_items),
+        'uncovered_items': uncovered_items,
     }

@@ -5,7 +5,7 @@ import math
 import cv2
 import numpy as np
 
-from nest_clear.depth_config import METRICS
+from nest_clear.depth_config import DEFAULTS as DEPTH_DEFAULTS, METRICS
 from nest_clear.guard import GuardError
 
 
@@ -44,28 +44,53 @@ def peak_index(z, values, where):
     return index
 
 
-def _half_height(z, values, index):
-    half = values[index] * .5
+def _threshold_crossings(z, values, index, ratio):
+    """在实测峰值两侧找跨过 ratio×峰值 的相邻两点并线性插值，返回 (Z_下, Z_上)。"""
+    peak_val = float(values[index])
+    threshold = peak_val * float(ratio)
+    if peak_val <= 0 or not math.isfinite(threshold):
+        return None, None
     crossings = []
     for direction in (-1, 1):
         inner = index
         outer = inner + direction
-        while 0 <= outer < len(z) and values[outer] > half:
+        while 0 <= outer < len(z) and values[outer] > threshold:
             inner, outer = outer, outer + direction
         if not 0 <= outer < len(z) or values[inner] == values[outer]:
-            return None
-        fraction = (half - values[inner]) / (values[outer] - values[inner])
-        crossings.append(z[inner] + fraction * (z[outer] - z[inner]))
-    lo, hi = crossings
+            crossings.append(None)
+        else:
+            fraction = (threshold - values[inner]) / (values[outer] - values[inner])
+            crossings.append(float(z[inner] + fraction * (z[outer] - z[inner])))
+    return crossings[0], crossings[1]
+
+
+def _half_height(z, values, index):
+    lo, hi = _threshold_crossings(z, values, index, .5)
+    if lo is None or hi is None:
+        return None
     return {'z_peak': float((lo + hi) / 2), 'fwhm': float(hi - lo)}
 
 
-def fit_peak(rows, metric, method, where):
+def measure_dof(z, values, index, ratio=DEPTH_DEFAULTS['dof_ratio']):
+    """计算清晰度 >= ratio×峰值 的插值景深区间；任一侧未跨过阈值时记为未覆盖。"""
+    z_lo, z_hi = _threshold_crossings(z, values, index, ratio)
+    covered = z_lo is not None and z_hi is not None
+    return {
+        'dof_mm': float(z_hi - z_lo) if covered else None,
+        'dof_ratio': float(ratio),
+        'dof_z_lower': z_lo,
+        'dof_z_upper': z_hi,
+        'dof_covered': covered,
+    }
+
+
+def fit_peak(rows, metric, method, where, dof_ratio=DEPTH_DEFAULTS['dof_ratio']):
     ordered = sorted(rows, key=lambda row: row['z_actual'])
     z = np.array([row['z_actual'] for row in ordered])
     values = np.array([row[metric] for row in ordered])
     index = peak_index(z, values, where)
     half = _half_height(z, values, index)
+    dof = measure_dof(z, values, index, dof_ratio)
     mask = values >= .5 * values[index]
     origin = z[index]
     gauss = None
@@ -80,6 +105,7 @@ def fit_peak(rows, metric, method, where):
                 residual = y - np.polynomial.polynomial.polyval(x, quadratic)
                 total = np.sum(np.square(y - y.mean()))
                 gauss = {'z_peak': peak, 'fwhm': 2 * math.sqrt(-math.log(2) / a),
+                         'dof_gauss_mm': 2 * math.sqrt(-math.log(1 / dof_ratio) / a),
                          'r2': float(1 - np.sum(residual ** 2) / total) if total > 0 else None}
     selected = gauss if method == 'gauss' else half
     if selected is None:
@@ -102,6 +128,8 @@ def fit_peak(rows, metric, method, where):
         'r2': gauss['r2'] if gauss else None,
         'gauss': gauss,
         'half_height': half,
+        'dof_gauss_mm': gauss['dof_gauss_mm'] if gauss else None,
+        **dof,
         'quality_ok': quality_ok,
         'insufficient_points': not quality_ok,
         'left_points': left_points,
@@ -112,10 +140,10 @@ def fit_peak(rows, metric, method, where):
     }
 
 
-def fit_coarse_fwhm(rows, metric, method, where):
+def fit_coarse_fwhm(rows, metric, method, where, dof_ratio=DEPTH_DEFAULTS['dof_ratio']):
     """粗扫峰拟合；若窄峰导致半高以上点不足 3 个则回退半高宽法估计 FWHM。"""
     try:
-        fit = fit_peak(rows, metric, method, where)
+        fit = fit_peak(rows, metric, method, where, dof_ratio=dof_ratio)
     except GuardError as exc:
         ordered = sorted(rows, key=lambda row: row['z_actual'])
         z = np.array([row['z_actual'] for row in ordered])
@@ -124,7 +152,9 @@ def fit_coarse_fwhm(rows, metric, method, where):
         if method == 'gauss' and int(np.sum(values >= .5 * values[index])) < 3:
             half = _half_height(z, values, index)
             if half and isinstance(half.get('fwhm'), (int, float)) and math.isfinite(half['fwhm']) and half['fwhm'] > 0:
-                return {**half, 'r2': None, 'gauss': None, 'half_height': half, 'coarse_fallback': 'half_height'}, None
+                dof = measure_dof(z, values, index, dof_ratio)
+                return {**half, 'r2': None, 'gauss': None, 'half_height': half,
+                        'dof_gauss_mm': None, **dof, 'coarse_fallback': 'half_height'}, None
         return None, exc.what
     fwhm = fit.get('fwhm')
     if not isinstance(fwhm, (int, float)) or not math.isfinite(fwhm) or fwhm <= 0:

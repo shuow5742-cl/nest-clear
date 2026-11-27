@@ -152,7 +152,9 @@ def test_160_multisite(tcp_rig, anomaly):
     session_dir = session.record.directory
     assert session_dir.is_dir() and session_dir.parent.name == 'depthcal'
     with (session_dir / 'curves.csv').open(encoding='utf-8', newline='') as f:
-        rows = list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        assert tuple(reader.fieldnames) == ('label', 'pass', 'direction', 'z_cmd', 'z_actual', 'tenengrad', 'laplacian', 'brenner')
+        rows = list(reader)
     assert len(rows) == len(session.samples) > 0
     assert all(r['direction'] == 'down' for r in rows)
     assert all(r[m] for r in rows for m in ('tenengrad', 'laplacian', 'brenner'))
@@ -161,12 +163,26 @@ def test_160_multisite(tcp_rig, anomaly):
         assert (session_dir / f"{result['label']}_center.png").is_file()
         assert (session_dir / f"{result['label']}_peak.png").is_file()
     fits_doc = json.loads((session_dir / 'fits.json').read_text(encoding='utf-8'))
+    assert fits_doc['dof_ratio'] == pytest.approx(0.8)
     assert len(fits_doc['points']) == len(session.results)
     assert fits_doc['feasibility']['met']
+    for pt in fits_doc['points']:
+        assert pt['dof_mm'] > 0 and pt['dof_range_mm'] >= 0 and pt['dof_uncovered'] == 0
+        assert pt['coarse_fit']['dof_ratio'] == pytest.approx(0.8)
+        for fit_item in pt['fits']:
+            assert fit_item['dof_covered'] is True
+            assert fit_item['dof_ratio'] == pytest.approx(0.8)
+            assert fit_item['dof_mm'] > 0 and fit_item['dof_gauss_mm'] > 0
+            assert fit_item['dof_z_lower'] < fit_item['z_peak'] < fit_item['dof_z_upper']
     plane_doc = json.loads((session_dir / 'plane.json').read_text(encoding='utf-8'))
     assert plane_doc['final']['max_residual'] == pytest.approx(session.plane['max_residual'])
     rec_doc = json.loads((session_dir / 'session_record.json').read_text(encoding='utf-8'))
     assert rec_doc['outcome'] == 'done' and rec_doc['exposure_us'] == 6000.0
+    assert rec_doc['dof_summary'] == fits_doc['dof_summary']
+    assert rec_doc['dof_summary']['dof_ratio'] == pytest.approx(0.8)
+    assert rec_doc['dof_summary']['covered_points'] == len(session.results)
+    assert rec_doc['dof_summary']['uncovered_fits'] == 0
+    assert rec_doc['dof_summary']['min_mm'] <= rec_doc['dof_summary']['mean_mm'] <= rec_doc['dof_summary']['max_mm']
     assert len(rec_doc['requests']) == len(rec_doc['replies']) == len(rig.writes)
     plc_lines = [json.loads(line) for line in (session_dir / 'plc.jsonl').read_text(encoding='utf-8').splitlines()]
     assert len(plc_lines) == 2 * len(rig.writes)

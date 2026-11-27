@@ -8,8 +8,8 @@ import pytest
 
 from nest_clear.config import load_config
 from nest_clear.depth_config import DEFAULTS as DEPTH_DEFAULTS
-from nest_clear.depthcal.focus import fit_coarse_fwhm, fit_peak, plan_fine_scan, scores
-from nest_clear.depthcal.layout import fit_plane, repeatability
+from nest_clear.depthcal.focus import fit_coarse_fwhm, fit_peak, measure_dof, plan_fine_scan, scores
+from nest_clear.depthcal.layout import dof_summary, fit_plane, repeatability
 from nest_clear.depthcal.session import descending
 from nest_clear.guard import GuardError
 
@@ -116,6 +116,99 @@ def test_auto_fine_range_and_accuracy_across_fwhm(label, k, exp_half_rng, exp_st
     assert error <= tol
     assert fit['quality_ok'] and not fit['insufficient_points']
     assert fit['left_points'] >= 5 and fit['right_points'] >= 5 and fit['min_ratio'] <= 0.6
+    assert fit['dof_covered'] and fit['dof_ratio'] == pytest.approx(0.8)
+    assert fit['dof_z_lower'] < fit['z_peak'] < fit['dof_z_upper']
+    assert 0 < fit['dof_mm'] < fit['fwhm'] and fit['dof_gauss_mm'] > 0
+
+
+@pytest.mark.parametrize('fwhm_mm', [0.5, 2.0, 4.0])
+def test_synthetic_gaussian_dof_matches_analytical_within_two_steps(fwhm_mm):
+    focus = -5.137
+    cfg = dict(DEPTH_DEFAULTS)
+    sigma = fwhm_mm / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+    ratio = cfg['dof_ratio']
+    analytical_dof = sigma * 2.0 * math.sqrt(2.0 * math.log(1.0 / ratio))
+
+    coarse_rows = [
+        {'z_actual': z, 'tenengrad': math.exp(-0.5 * ((z - focus) / sigma) ** 2)}
+        for z in descending(-1.0, -9.0, cfg['coarse_step_mm'])
+    ]
+    coarse_fit, err_msg = fit_coarse_fwhm(coarse_rows, 'tenengrad', 'gauss', '粗扫', dof_ratio=ratio)
+    assert coarse_fit is not None and err_msg is None and coarse_fit['dof_covered']
+
+    plan = plan_fine_scan(cfg, coarse_fit['fwhm'], coarse_fit['z_peak'], -12.0, 0.0)
+    step = plan['fine_step_mm']
+    fine_rows = [
+        {'z_actual': z, 'tenengrad': math.exp(-0.5 * ((z - focus) / sigma) ** 2)}
+        for z in descending(plan['high_mm'], plan['low_mm'], step)
+    ]
+    fit = fit_peak(fine_rows, 'tenengrad', 'gauss', '细扫', dof_ratio=ratio)
+    err_gauss = abs(fit['dof_mm'] - fit['dof_gauss_mm'])
+    err_true = abs(fit['dof_mm'] - analytical_dof)
+    print(f'FWHM={fwhm_mm}mm step={step:.4f} interp={fit["dof_mm"]:.6f} '
+          f'gauss={fit["dof_gauss_mm"]:.6f} analytical={analytical_dof:.6f} err={err_gauss:.6f}')
+    assert fit['dof_covered'] is True
+    assert err_gauss <= 2.0 * step
+    assert err_true <= 2.0 * step
+
+
+def test_single_side_uncovered_dof_excluded_from_stats():
+    focus = -5.0
+    sigma = 2.0 / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+    # 上侧覆盖到下降段，下侧在 -5.15 处截断（清晰度 > 0.96 > 0.80），因此单侧未跨过 0.8×峰值
+    zs_uncovered = descending(-3.5, -5.15, 0.05)
+    uncovered_rows = [
+        {'z_actual': z, 'tenengrad': math.exp(-0.5 * ((z - focus) / sigma) ** 2)}
+        for z in zs_uncovered
+    ]
+    fit_uncov = fit_peak(uncovered_rows, 'tenengrad', 'gauss', '细扫', dof_ratio=0.8)
+    assert fit_uncov['dof_covered'] is False
+    assert fit_uncov['dof_mm'] is None
+    assert fit_uncov['dof_z_upper'] is not None
+    assert fit_uncov['dof_z_lower'] is None
+    assert fit_uncov['dof_gauss_mm'] > 0
+
+    # 另一侧完整覆盖的曲线应正常参与统计，未覆盖次不计入
+    zs_covered = descending(-3.5, -6.5, 0.05)
+    covered_rows = [
+        {'z_actual': z, 'tenengrad': math.exp(-0.5 * ((z - focus) / sigma) ** 2)}
+        for z in zs_covered
+    ]
+    fit_cov1 = fit_peak(covered_rows, 'tenengrad', 'gauss', '细扫', dof_ratio=0.8)
+    fit_cov2 = fit_peak(
+        [{'z_actual': z, 'tenengrad': math.exp(-0.5 * ((z - focus) / (sigma * 1.02)) ** 2)} for z in zs_covered],
+        'tenengrad', 'gauss', '细扫', dof_ratio=0.8,
+    )
+    assert fit_cov1['dof_covered'] and fit_cov2['dof_covered']
+
+    p1_fits = [
+        {'repeat': 1, **fit_cov1},
+        {'repeat': 2, **fit_uncov},
+        {'repeat': 3, **fit_cov2},
+    ]
+    p1_dofs = [f['dof_mm'] for f in p1_fits if f['dof_covered']]
+    p2_fits = [{'repeat': 1, **fit_uncov}, {'repeat': 2, **fit_uncov}]
+    results = [
+        {'label': 'T02', 'fits': p1_fits,
+         'dof_mm': sum(p1_dofs) / len(p1_dofs),
+         'dof_range_mm': max(p1_dofs) - min(p1_dofs),
+         'dof_uncovered': 1},
+        {'label': 'T05', 'fits': p2_fits, 'dof_mm': None, 'dof_range_mm': None, 'dof_uncovered': 2},
+    ]
+    summary = dof_summary(results, 0.8)
+    assert summary['covered_points'] == 1 and summary['total_points'] == 2
+    assert summary['covered_fits'] == 2 and summary['total_fits'] == 5
+    assert summary['uncovered_fits'] == 3
+    assert summary['uncovered_items'] == ['T02#2', 'T05#1', 'T05#2']
+    assert summary['mean_mm'] == pytest.approx(sum(p1_dofs) / len(p1_dofs))
+    assert summary['min_mm'] == pytest.approx(summary['mean_mm'])
+    assert summary['max_mm'] == pytest.approx(summary['mean_mm'])
+
+    # measure_dof 直接调用覆盖边界行为
+    z_arr = np.array([-6.0, -5.5, -5.0, -4.5, -4.0])
+    v_arr = np.array([0.85, 0.92, 1.0, 0.70, 0.50])
+    md = measure_dof(z_arr, v_arr, 2, 0.8)
+    assert not md['dof_covered'] and md['dof_mm'] is None and md['dof_z_lower'] is None and md['dof_z_upper'] is not None
 
 
 def test_2mm_fixed_triggers_insufficient_points_while_auto_passes():
@@ -175,3 +268,4 @@ def test_coarse_fallback_and_z_truncation_and_config():
     loaded = load_config('config/nest_clear.yaml')
     assert loaded.depth_calibration['fine_range_mode'] == 'auto'
     assert loaded.depth_calibration['fine_steps_target'] == 40
+    assert loaded.depth_calibration['dof_ratio'] == 0.8

@@ -12,8 +12,8 @@ from nest_clear.plan.scan_path import guard_position
 from nest_clear.tooloffset.detection import detect
 from nest_clear.tooloffset.session import film_calibration
 from nest_clear.vision.geometry import pixel_to_module
-from .focus import fit_coarse_fwhm, fit_peak, peak_index, plan_fine_scan, scores
-from .layout import film_layout, fit_plane, repeatability
+from .focus import fit_coarse_fwhm, fit_peak, measure_dof, peak_index, plan_fine_scan, scores
+from .layout import dof_summary, film_layout, fit_plane, repeatability
 
 
 def descending(top, bottom, step):
@@ -38,7 +38,7 @@ class Session:
         self.plan = list(self.cfg['point_order'] or primary)
         self.extra = [label for label in (self.cfg['extra_points'] or extra) if label not in self.plan]
         self.point_index = 0
-        self.plane = self.initial_plane = self.feasibility = None
+        self.plane = self.initial_plane = self.feasibility = self.dof_summary = None
         self.actual = None
         self.reset_point()
 
@@ -52,6 +52,7 @@ class Session:
         self.scan_rows = []
         self.repeat = 0
         self.coarse_fit = None
+        self.coarse_dof = None
         self.fine_plan = None
 
     @property
@@ -216,20 +217,35 @@ class Session:
                 return self.next_step()
             z_values = [item['z_actual'] for item in self.scan_rows]
             peak_index(z_values, values, self.where)
-            coarse_fit, coarse_error = fit_coarse_fwhm(self.scan_rows, primary, self.cfg['peak_method'], self.where)
+            dof_ratio = self.cfg['dof_ratio']
+            coarse_fit, coarse_error = fit_coarse_fwhm(
+                self.scan_rows, primary, self.cfg['peak_method'], self.where, dof_ratio=dof_ratio,
+            )
             self.coarse_fit = coarse_fit
+            if coarse_fit is not None:
+                self.coarse_dof = {
+                    k: coarse_fit[k]
+                    for k in ('dof_mm', 'dof_gauss_mm', 'dof_ratio', 'dof_z_lower', 'dof_z_upper', 'dof_covered')
+                    if k in coarse_fit
+                }
+            else:
+                ordered = sorted(self.scan_rows, key=lambda item: item['z_actual'])
+                z_arr = np.array([item['z_actual'] for item in ordered])
+                v_arr = np.array([item[primary] for item in ordered])
+                self.coarse_dof = {**measure_dof(z_arr, v_arr, int(np.argmax(v_arr)), dof_ratio), 'dof_gauss_mm': None}
             self.coarse_peak = coarse_fit['z_peak'] if coarse_fit else z_values[index]
             coarse_fwhm = coarse_fit['fwhm'] if coarse_fit else None
             self.fine_plan = plan_fine_scan(self.cfg, coarse_fwhm, self.coarse_peak, self.z_min, self.z_max, coarse_error)
             return self.begin_fine()
         if self.steps:
             return self.next_step()
-        fit = fit_peak(self.scan_rows, primary, self.cfg['peak_method'], self.where)
+        dof_ratio = self.cfg['dof_ratio']
+        fit = fit_peak(self.scan_rows, primary, self.cfg['peak_method'], self.where, dof_ratio=dof_ratio)
         comparisons = {primary: fit}
         for metric in METRICS:
             if metric != primary:
                 try:
-                    comparisons[metric] = fit_peak(self.scan_rows, metric, self.cfg['peak_method'], self.where)
+                    comparisons[metric] = fit_peak(self.scan_rows, metric, self.cfg['peak_method'], self.where, dof_ratio=dof_ratio)
                 except GuardError as exc:
                     comparisons[metric] = {'failure': exc.what}
         self.fits.append({'repeat': self.repeat, **fit, 'metrics': comparisons})
@@ -237,11 +253,20 @@ class Session:
             return self.begin_fine()
         peaks = [item['z_peak'] for item in self.fits]
         insufficient = [item['repeat'] for item in self.fits if not item.get('quality_ok', True)]
-        self.result = {'label': self.label, 'xy': [float(v) for v in self.point_xy], 'fits': self.fits,
-                       'coarse_fit': self.coarse_fit, 'fine_plan': self.fine_plan,
-                       'insufficient_repeats': insufficient,
-                       'z_peak': statistics.mean(peaks), 'range': max(peaks) - min(peaks),
-                       'std': statistics.stdev(peaks) if len(peaks) > 1 else None}
+        covered_dofs = [item['dof_mm'] for item in self.fits if item.get('dof_covered') and item.get('dof_mm') is not None]
+        uncovered_dofs = [item['repeat'] for item in self.fits if not item.get('dof_covered')]
+        self.result = {
+            'label': self.label, 'xy': [float(v) for v in self.point_xy], 'fits': self.fits,
+            'coarse_fit': self.coarse_fit, 'coarse_dof': self.coarse_dof, 'fine_plan': self.fine_plan,
+            'insufficient_repeats': insufficient,
+            'z_peak': statistics.mean(peaks), 'range': max(peaks) - min(peaks),
+            'std': statistics.stdev(peaks) if len(peaks) > 1 else None,
+            'dof_mm': statistics.mean(covered_dofs) if covered_dofs else None,
+            'dof_range_mm': (max(covered_dofs) - min(covered_dofs)) if len(covered_dofs) >= 2 else None,
+            'dof_covered_count': len(covered_dofs),
+            'dof_uncovered': len(uncovered_dofs),
+            'dof_uncovered_repeats': uncovered_dofs,
+        }
         self.results.append(self.result)
         self.phase = 'peak'
         return self.move((*self.camera_xy, self.result['z_peak']))
@@ -264,5 +289,6 @@ class Session:
                                              '加测后残差增大' if delta > 1e-6 else '加测后残差不变')
         if self.point_index == len(self.plan):
             self.feasibility = repeatability(self.results, self.cfg['repeat_range_tol_mm'])
+            self.dof_summary = dof_summary(self.results, self.cfg['dof_ratio'])
             return None
         return self.locate(self.plan[self.point_index], self.result['z_peak'])

@@ -591,6 +591,131 @@ def depthcal_feasibility_text(data):
     return '可行性结论：等待测点完成后评估（总误差预算 0.05mm，对焦环节约 0.02mm）', '#f8fafc', '#667085'
 
 
+def depthcal_curve_dof(points, ratio=0.8):
+    """纯 Python 计算清晰度曲线上 >= ratio×峰值 的线性插值景深与交点。"""
+    pts = sorted((float(p[0]), float(p[1])) for p in (points or []) if len(p) >= 2)
+    if len(pts) < 3:
+        return None
+    index = max(range(len(pts)), key=lambda i: pts[i][1])
+    peak_val = pts[index][1]
+    if peak_val <= 0 or not math.isfinite(peak_val):
+        return None
+    threshold = peak_val * float(ratio)
+    crossings = []
+    for direction in (-1, 1):
+        inner = index
+        outer = inner + direction
+        while 0 <= outer < len(pts) and pts[outer][1] > threshold:
+            inner, outer = outer, outer + direction
+        if not 0 <= outer < len(pts) or pts[inner][1] == pts[outer][1]:
+            crossings.append(None)
+        else:
+            frac = (threshold - pts[inner][1]) / (pts[outer][1] - pts[inner][1])
+            crossings.append(pts[inner][0] + frac * (pts[outer][0] - pts[inner][0]))
+    z_lo, z_hi = crossings
+    covered = z_lo is not None and z_hi is not None
+    return {
+        'dof_mm': float(z_hi - z_lo) if covered else None,
+        'dof_ratio': float(ratio),
+        'dof_z_lower': z_lo,
+        'dof_z_upper': z_hi,
+        'dof_covered': covered,
+        'threshold': threshold,
+        'peak_val': peak_val,
+    }
+
+
+def depthcal_latest_dof_text(data):
+    """格式化阶段栏旁的当前测点最新景深 DOF（及 FWHM）显示文本。"""
+    label = data.get('label')
+    results = data.get('results') or []
+    current_fits = data.get('current_fits') or []
+    matched = next((r for r in results if r.get('label') == label), None) if label else None
+
+    src = None
+    tag = ''
+    fwhm = None
+    if current_fits:
+        src = current_fits[-1]
+        tag = f"细扫{src.get('repeat', len(current_fits))}"
+        fwhm = src.get('fwhm')
+    elif matched and matched.get('fits'):
+        src = matched['fits'][-1]
+        tag = f"细扫{src.get('repeat', len(matched['fits']))}"
+        fwhm = src.get('fwhm')
+    else:
+        coarse_fit = data.get('coarse_fit') or (matched.get('coarse_fit') if matched else None)
+        coarse_dof = data.get('coarse_dof') or (matched.get('coarse_dof') if matched else None)
+        if isinstance(coarse_fit, dict) and coarse_fit:
+            src = coarse_fit
+            tag = '粗扫估计'
+            fwhm = coarse_fit.get('fwhm')
+        elif isinstance(coarse_dof, dict) and coarse_dof:
+            src = coarse_dof
+            tag = '粗扫估计'
+        else:
+            curves = data.get('curves') or {}
+            coarse_pts = (curves.get(label) or {}).get('coarse') if label else None
+            if coarse_pts:
+                est = depthcal_curve_dof(coarse_pts, data.get('dof_ratio') or 0.8)
+                if est and est.get('dof_covered'):
+                    src = est
+                    tag = '粗扫估计'
+
+    if not isinstance(src, dict):
+        return '景深：—（FWHM —）'
+    dof_mm = src.get('dof_mm')
+    covered = src.get('dof_covered')
+    dof_txt = f'{float(dof_mm):.3f} mm' if (covered is not False and isinstance(dof_mm, (int, float))) else '未覆盖'
+    fwhm_txt = f'{float(fwhm):.3f} mm' if isinstance(fwhm, (int, float)) else '—'
+    return f'景深：{dof_txt}（{tag}，FWHM {fwhm_txt}）'
+
+
+def depthcal_dof_summary_text(data):
+    """格式化全盘景深汇总文本与配色（含 dof_ratio 与未覆盖注明）。"""
+    ratio = float(data.get('dof_ratio') or 0.8)
+    summary = data.get('dof_summary')
+    results = data.get('results') or []
+    if isinstance(summary, dict) and summary.get('total_points') is not None:
+        uncov = int(summary.get('uncovered_fits') or 0)
+        uncov_items = summary.get('uncovered_items') or []
+        uncov_note = ''
+        if uncov > 0:
+            items_txt = '、'.join(uncov_items[:6]) + ('…' if len(uncov_items) > 6 else '')
+            detail = f'（{items_txt}）' if items_txt else ''
+            uncov_note = f'；未覆盖 {uncov}/{summary.get("total_fits", 0)} 次{detail}，不计入统计'
+        if summary.get('mean_mm') is not None:
+            text = (
+                f"全盘景深汇总（dof_ratio={ratio:.2f}）：均值 {summary['mean_mm']:.3f} mm / "
+                f"最小 {summary['min_mm']:.3f} mm / 最大 {summary['max_mm']:.3f} mm"
+                f"（有效 {summary['covered_points']}/{summary['total_points']} 点{uncov_note}）"
+            )
+            return (text, '#fff7ed', '#b45309') if uncov > 0 else (text, '#ecfdf3', '#166534')
+        text = (
+            f"全盘景深汇总（dof_ratio={ratio:.2f}）：未覆盖"
+            f"（0/{summary['total_points']} 点有效{uncov_note}）"
+        )
+        return text, '#fff7ed', '#b45309'
+
+    if results:
+        dofs = [float(r['dof_mm']) for r in results if isinstance(r.get('dof_mm'), (int, float))]
+        uncov = sum(int(r.get('dof_uncovered') or 0) for r in results)
+        if dofs:
+            extra = f'，未覆盖 {uncov} 次（不计入）' if uncov else ''
+            return (
+                f'全盘景深（dof_ratio={ratio:.2f}）：已完成 {len(results)} 点，'
+                f'均值 {sum(dofs)/len(dofs):.3f} / 最小 {min(dofs):.3f} / 最大 {max(dofs):.3f} mm{extra}',
+                '#fff7ed' if uncov else '#f8fafc',
+                '#b45309' if uncov else '#475467',
+            )
+        return (
+            f'全盘景深（dof_ratio={ratio:.2f}）：已完成 {len(results)} 点，均未覆盖（不计入统计）',
+            '#fff7ed',
+            '#b45309',
+        )
+    return f'全盘景深（dof_ratio={ratio:.2f}）：等待测点完成后汇总', '#f8fafc', '#667085'
+
+
 def depthcal_subplot_layout(labels, width, height):
     """计算多测点清晰度曲线子图的网格列数、行数与像素区域。"""
     count = max(1, len(labels))
