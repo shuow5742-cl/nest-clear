@@ -58,7 +58,16 @@ class MainStatus:
                         d['tooloffset'].pop(key, None)
                 d['tooloffset'].update(row)
             if e == 'pickacc_state': d['pickacc'].update(row)
-            if e == 'depthcal_state': d['depthcal'] = row
+            if e == 'depthcal_state':
+                depth = d['depthcal']
+                curves = depth.get('curves', {}) if row.get('session') == depth.get('session') else {}
+                sample = row.get('sample')
+                if sample:
+                    points = curves.setdefault(sample['label'], {}).setdefault(str(sample['pass']), [])
+                    points.append([sample['z_actual'], sample[row['metric']]])
+                d['depthcal'] = {**row, 'curves': curves}
+            if e == 'depthcal_abort_requested':
+                d['depthcal'].update(abort_requested=True, message='已放弃，下一个 PLC 请求将回 999')
             if e == 'baseline_state': d['baseline'].update(row)
             if e == 'tooltip_start': d['tooltip'] = {}
             if e.startswith('tooltip_') and not e.startswith(('tooltip_preview_', 'tooltip_exposure_', 'tooltip_camera_', 'tooltip_preparation_', 'tooltip_focus_', 'tooltip_runout_')):

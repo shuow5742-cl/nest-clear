@@ -37,6 +37,9 @@ arrival_settle:  # 11-23 用户定：采样间隔、稳定窗口样本数、逐�
   jitter_tol_mm: 0.02
   settle_timeout_s: 1.0
 pick_depth_z: 0.0  # 下针深度的模组 Z 坐标，单位 mm，按现场测量填写
+depth_calibration:
+  camera_z_min_mm: null  # 由现场核定两把工具共轴下降时的安全下限，空值拒绝 160
+
 travel:  # 模组各轴允许的最小和最大坐标，单位 mm，按设备行程填写
   x: [80.0, 180.0]  # X 轴最小、最大坐标，单位 mm
   y: [-10.0, 150.0]  # Y 轴最小、最大坐标，单位 mm

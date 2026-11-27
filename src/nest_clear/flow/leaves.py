@@ -109,6 +109,7 @@ class WaitRequest(CallWorker):
         reader_ctx = type("CommandContext", (), {"events": self.events})()
         accuracy_session = self._blackboard.read("pickaccuracy_session", None)
         offset_session = self._blackboard.read("tooloffset_session", None)
+        depth_session = self._blackboard.read("depth_session", None)
         baseline_commands = {'baseline_start', 'baseline_select', 'baseline_measure', 'baseline_manual',
                              'baseline_aux', 'baseline_save', 'baseline_confirm', 'baseline_end'}
         preview_commands = PREVIEW_COMMANDS
@@ -117,6 +118,8 @@ class WaitRequest(CallWorker):
             abort_commands.add("abort")
         if offset_session:
             abort_commands.update(("tooloffset_abort", "abort"))
+        if depth_session:
+            abort_commands.add("depthcal_abort")
         command = reader(reader_ctx).poll(baseline_commands | preview_commands | abort_commands)
         preparation = getattr(self.events, 'tooltip_preparation', None)
         baseline = getattr(self.events, 'baseline_session', None)
@@ -147,6 +150,9 @@ class WaitRequest(CallWorker):
             elif name == 'baseline_end' and preparation and preparation.active:
                 for camera in ('front', 'side'):
                     if preparation.enabled[camera]: preparation.command('tooltip_preview', {'camera':camera, 'on':False})
+        if command and command[0] == "depthcal_abort":
+            depth_session.abort_requested = True
+            self.events.emit("depthcal_abort_requested")
         if command and command[0] in ("abort", "tooloffset_abort"):
             if accuracy_session and command[0] == "abort":
                 accuracy_session["commands"].append({"seq": reader(reader_ctx).last_seq, "command": "abort", "params": command[1]})
@@ -479,6 +485,9 @@ class CommitReply(Instant):
             elapsed_ms=round((time.monotonic() - bb.read("started")) * 1000, 3),
             **details,
         )
+        committed_depth = getattr(self.events, "depth_reply_committed", None)
+        if bb.read("depth_request", False) and committed_depth:
+            committed_depth(func, details)
         self.events.request_pending = False
         render_data = bb.read("fine_render_data")
         archive = getattr(self.events, "archive", None)
@@ -500,7 +509,7 @@ class CommitReply(Instant):
             except Exception as exc:
                 record_image_error(self.events, "精定位已提交应答叠加图", exc, bb.read("task_id"))
             bb.write("fine_render_data", None, self.name)
-        if func in (9, 10) or (func == 999 and cycle is None):
+        if func in (9, 10) or (func == 999 and cycle is None and not bb.read("depth_request", False)):
             from nest_clear.film_mode import end_tray
             try:
                 end_tray(self.events.directory)

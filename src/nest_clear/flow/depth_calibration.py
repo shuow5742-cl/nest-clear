@@ -5,11 +5,13 @@ import math
 
 from autoweaver.motion_policy.nodes.node import Status
 
+from nest_clear.depthcal.record import DepthRecord
 from nest_clear.depthcal.session import Session
 from nest_clear.guard import GuardError, diagnostic
 from .calibration import change_mode
 from .modes import Mode
 from .sampling import DeviceSampling
+from .tool_offset import reader
 
 RESERVED_CODES = frozenset((170, 171, 180, 181, 190, 191))
 DEPTH_CODES = RESERVED_CODES | {160}
@@ -26,23 +28,48 @@ class DepthCalibration(DeviceSampling):
         bb.write('reply_func', code, self.name)
         bb.write('reply_coordinates', coords or {}, self.name)
         bb.write('reply_tool', None, self.name)
-        session = bb.read('depth_session', None)
-        if session:
-            session.replies.append({'task_id': bb.read('task_id'), 'func': code,
-                                    'coordinates': coords or {}})
         return Status.SUCCESS
 
-    def finish(self):
+    def finish(self, outcome, details=None):
         bb = self._blackboard
+        session = bb.read('depth_session', None)
+        if session:
+            session.record.finish(session, outcome, details)
         if bb.read('mode') == Mode.DEPTH_CALIB:
             change_mode(bb, self.ctx, Mode.IDLE, self.name)
         bb.write('depth_session', None, self.name)
+        bb.write('depth_image', None, self.name)
+        self.frames = []
         self.ctx.events.abort_depthcal = None
+        self.ctx.events.depth_reply_committed = None
 
     def interrupt(self, reason):
-        self.publish('failed', what=reason, where='主程序停止',
-                     hint='恢复 PLC 正常状态后从 160 重新发起。')
-        self.finish()
+        details = diagnostic(reason, code='DEPTH-INTERRUPTED', where='主程序停止',
+                             hint='恢复 PLC 正常状态后从 160 重新发起。')
+        self.publish('failed', **details)
+        self.finish('aborted', details)
+
+    def committed(self, func, details):
+        bb = self._blackboard
+        session = bb.read('depth_session')
+        coordinates = bb.read('reply_coordinates') if func == 160 else {}
+        reply = {'task_id': bb.read('task_id'), 'func': func, 'coordinates': coordinates}
+        session.replies.append(reply)
+        session.record.interaction('reply', {**reply, 'diagnostic': details or None,
+                                            'time': self.ctx.events.clock().isoformat()})
+        if func == 161:
+            self.publish('done', message='完成')
+            self.finish('done')
+        elif func == 999:
+            self.publish('failed', **details)
+            self.finish('failed', details)
+
+    def record_request(self, session):
+        bb = self._blackboard
+        row = {'task_id': bb.read('task_id'), 'func': bb.read('request_func'),
+               'time': self.ctx.events.clock().isoformat()}
+        session.requests.append(row)
+        session.record.interaction('request', row)
 
     def publish(self, phase=None, **details):
         session = self._blackboard.read('depth_session', None)
@@ -52,7 +79,11 @@ class DepthCalibration(DeviceSampling):
                     'label': session.label, 'z': session.actual[2] if session.actual else None,
                     'point': min(session.point_index + 1, len(session.plan)), 'total': len(session.plan),
                     'plan': session.plan, 'plane': session.plane, 'initial_plane': session.initial_plane,
-                    'results': session.results, 'feasibility': session.feasibility}
+                    'results': session.results, 'feasibility': session.feasibility,
+                    'metric': session.cfg['metric'], 'method': session.cfg['peak_method'],
+                    'session': session.record.directory.name, 'sample': session.last_sample,
+                    'abort_requested': session.abort_requested}
+            session.last_sample = None
         if phase:
             data['phase'] = phase
         self.ctx.events.emit('depthcal_state', **(data | details))
@@ -62,10 +93,10 @@ class DepthCalibration(DeviceSampling):
         details = diagnostic(exc, code='DEPTH-FAILED', where='下针深度标定',
                              hint='检查菲林、相机和 PLC 实时坐标。')
         bb.write('reply_diagnostic', details, self.name)
-        self.publish('failed', **details)
-        status = self.reply(999)
-        self.finish()
-        return status
+        if bb.read('depth_session', None) is None:
+            self.publish('failed', **details)
+            self.finish('failed', details)
+        return self.reply(999)
 
     def on_start(self):
         bb = self._blackboard
@@ -73,7 +104,7 @@ class DepthCalibration(DeviceSampling):
         func, mode = bb.read('request_func'), bb.read('mode')
         session = bb.read('depth_session', None)
         if session:
-            session.requests.append({'task_id': bb.read('task_id'), 'func': func})
+            self.record_request(session)
         try:
             if func in RESERVED_CODES:
                 raise GuardError('DEPTH-UNIMPLEMENTED', '下针深度标定 170/180/190 尚未实现',
@@ -96,17 +127,25 @@ class DepthCalibration(DeviceSampling):
                                             not ctx.config.vision.allow_placeholder_calibration):
                 raise GuardError('DEPTH-CALIBRATION', '缺少有效的主相机标定',
                                  '160 会话启动', '请先完成主相机标定。')
-            session = Session(ctx.config, ctx.calibration)
-            session.requests.append({'task_id': bb.read('task_id'), 'func': 160})
+            session = Session(ctx.config, ctx.calibration, DepthRecord(ctx.events))
+            session.record.begin()
             bb.write('depth_session', session, self.name)
-            change_mode(bb, ctx, Mode.DEPTH_CALIB, self.name)
             ctx.events.abort_depthcal = self.interrupt
+            ctx.events.depth_reply_committed = self.committed
+            self.record_request(session)
+            change_mode(bb, ctx, Mode.DEPTH_CALIB, self.name)
+        if session.abort_requested:
+            return self.abort()
         self.call = None
         self.samples, self.round, self.next_read = [], 0, 0.
         self.frames = []
         self.capturing = False
         self.publish()
         return Status.RUNNING
+
+    def abort(self):
+        return self.fail(GuardError('DEPTH-ABORTED', '用户放弃料盘对焦测试', '下针深度标定',
+                                    '可从 160 重新发起。'))
 
     def capture(self):
         self.capturing = True
@@ -120,6 +159,8 @@ class DepthCalibration(DeviceSampling):
         if session is None:
             return self.fail('下针深度标定会话已中断')
         try:
+            if reader(self.ctx).poll({'depthcal_abort'}, defer_unallowed=True):
+                return self.abort()
             if not self.capturing:
                 actual = self.settle()
                 if actual is None:
@@ -153,10 +194,8 @@ class DepthCalibration(DeviceSampling):
             self.frames = []
             if coords is not None:
                 return self.move_reply(coords)
-            self.publish('done')
-            status = self.reply(161)
-            self.finish()
-            return status
+            session.record.results(session)
+            return self.reply(161)
         except GuardError as exc:
             return self.fail(exc)
         except Exception as exc:

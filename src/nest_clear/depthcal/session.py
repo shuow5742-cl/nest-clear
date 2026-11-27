@@ -22,14 +22,17 @@ def descending(top, bottom, step):
 
 
 class Session:
-    def __init__(self, config, calibration):
-        self.cfg = config.depth_calibration
+    def __init__(self, config, calibration, record):
+        self.record = record
+        self.cfg = dict(config.depth_calibration)
         self.travel = config.travel
         self.cal = film_calibration(calibration, config.tool_offset['card_thickness_mm'],
                                     config.camera_calibration['board_thickness_mm'])
         self.z_min = max(self.travel[2][0], self.cfg['camera_z_min_mm'])
         self.z_max = self.travel[2][1]
         self.requests, self.replies = [], []
+        self.abort_requested = False
+        self.last_sample = None
         self.samples, self.results = [], []
         self.layout, primary, extra = film_layout()
         self.plan = list(self.cfg['point_order'] or primary)
@@ -45,7 +48,6 @@ class Session:
         self.center_round = 1
         self.expected = None
         self.roi = None
-        self.latest_roi = None
         self.fits = []
         self.scan_rows = []
         self.repeat = 0
@@ -137,7 +139,8 @@ class Session:
             raise GuardError('DEPTH-ROI', f'固定 ROI {size} px 超出画面', self.where,
                              '减小 roi_mm，或检查居中和像素比例尺。')
         self.roi = np.s_[top:top + size, left:left + size]
-        self.centered(frame)
+        self.record.image(f'{self.label}_center', frame)
+        self.record.roi(frame[self.roi])
         self.camera_xy = (x, y)
         self.phase = 'coarse'
         radius = self.cfg['coarse_range_mm']
@@ -161,9 +164,6 @@ class Session:
         self.label = label
         return self.move((x, y, z))
 
-    def centered(self, frame):
-        self.latest_roi = frame[self.roi].copy()
-
     def next_step(self):
         return self.move((*self.camera_xy, self.steps.popleft()))
 
@@ -183,11 +183,15 @@ class Session:
 
     def after_overshoot(self):
         self.phase = 'fine'
+        self.overshoot_z = self.actual[2]
         return self.next_step()
 
     def scan(self, frames):
         z = self.actual[2]
-        if self.scan_rows and z >= self.scan_rows[-1]['z_actual']:
+        previous_z = self.scan_rows[-1]['z_actual'] if self.scan_rows else None
+        if previous_z is None and self.phase == 'fine':
+            previous_z = self.overshoot_z
+        if previous_z is not None and z >= previous_z:
             raise GuardError('DEPTH-DIRECTION', '实测 Z 没有继续下降', self.where,
                              '核对 PLC 到位精度和细扫步长。')
         crops = [frame[self.roi] for frame in frames]
@@ -199,8 +203,8 @@ class Session:
                **{key: statistics.median(item[key] for item in metrics) for key in METRICS}}
         self.scan_rows.append(row)
         self.samples.append(row)
-        self.latest_roi = crops[midpoint].copy()
-        self.scanned(row)
+        self.last_sample = row
+        self.record.sample(row, crops[midpoint], len(self.samples))
         values = [item[primary] for item in self.scan_rows]
         index = values.index(max(values))
         if self.phase == 'coarse':
@@ -233,11 +237,10 @@ class Session:
         self.phase = 'peak'
         return self.move((*self.camera_xy, self.result['z_peak']))
 
-    def scanned(self, row):
-        """扫描结束后由现场记录器接收单步数据。"""
-
     def point_finished(self, frame):
-        self.latest_roi = frame[self.roi].copy()
+        self.record.image(f'{self.label}_peak', frame)
+        self.record.roi(frame[self.roi])
+        self.result['peak_image_z'] = self.actual[2]
         self.point_index += 1
         if self.point_index == len(self.plan):
             self.plane = fit_plane(self.results)

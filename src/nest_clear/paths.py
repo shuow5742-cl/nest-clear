@@ -42,7 +42,7 @@ def live_image_file(root: str | Path, name: str = 'latest') -> Path:
         'latest', 'preview_latest', 'camcal_latest', 'tooloffset_latest', 'tooloffset_crop',
         'tooloffset_front_latest', 'tooloffset_side_latest',
         'tooloffset_tri_1', 'tooloffset_tri_2', 'tooloffset_tri_3', 'tooloffset_tri_4', 'tooloffset_tri_5',
-        'pickacc_latest', 'pickacc_crop', 'calib_front_latest', 'calib_side_latest', 'baseline_front', 'baseline_side',
+        'pickacc_latest', 'pickacc_crop', 'depthcal_roi', 'calib_front_latest', 'calib_side_latest', 'baseline_front', 'baseline_side',
     }
     if name not in allowed:
         raise ValueError('未知实时图片')
