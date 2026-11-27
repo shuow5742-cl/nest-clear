@@ -189,9 +189,17 @@ def _depth_config(value, z_travel):
         if not z_travel[0] <= lower < z_travel[1]:
             _fail(f"{path}.camera_z_min_mm", "须在 Z 行程内且低于行程上限")
         settings["camera_z_min_mm"] = lower
-    for key, options in (("metric", METRICS), ("peak_method", ("gauss", "half_height"))):
+    for key, options in (
+        ("fine_range_mode", ("auto", "fixed")),
+        ("metric", METRICS),
+        ("peak_method", ("gauss", "half_height")),
+    ):
         if settings[key] not in options:
             _fail(f"{path}.{key}", f"请选择 {options}")
+    if settings["fine_range_min_mm"] > settings["fine_range_max_mm"]:
+        _fail(f"{path}.fine_range_min_mm", "不能大于 fine_range_max_mm")
+    if settings["fine_step_min_mm"] > settings["fine_step_max_mm"]:
+        _fail(f"{path}.fine_step_min_mm", "不能大于 fine_step_max_mm")
     if not 0 < settings["defocus_ratio"] < 1:
         _fail(f"{path}.defocus_ratio", "须在 0 和 1 之间")
     if settings["settle_samples"] < 2:

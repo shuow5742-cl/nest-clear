@@ -493,6 +493,57 @@ def depthcal_stage_info(data):
     return f'阶段：{phase}', '#eef2f6', '#1d2939'
 
 
+def depthcal_fine_plan_text(data):
+    """格式化当前细扫半宽、步距文本与回退/Z截断提示。"""
+    plan = data.get('fine_plan')
+    results = data.get('results') or []
+    phase = data.get('phase') or 'idle'
+    if (not isinstance(plan, dict) or not plan) and phase == 'done':
+        for res in reversed(results):
+            if isinstance(res.get('fine_plan'), dict) and res['fine_plan']:
+                plan = res['fine_plan']
+                break
+    if isinstance(plan, dict) and plan:
+        half = plan.get('half_width_mm')
+        step = plan.get('fine_step_mm')
+        mode = plan.get('mode') or 'auto'
+        coarse_fwhm = plan.get('coarse_fwhm_mm')
+        half_txt = f'±{float(half):.3f} mm' if isinstance(half, (int, float)) else '—'
+        step_txt = f'{float(step):.3f} mm' if isinstance(step, (int, float)) else '—'
+        if mode == 'auto' and isinstance(coarse_fwhm, (int, float)):
+            tag = f'auto, 粗扫 FWHM {float(coarse_fwhm):.3f} mm'
+        elif mode == 'fixed_fallback':
+            tag = '回退 fixed'
+        else:
+            tag = str(mode)
+        summary = f'细扫：{half_txt} / 步距 {step_txt}（{tag}）'
+    else:
+        summary = '细扫：等待粗扫完成后确定'
+
+    notices = []
+    seen = set()
+    sources = []
+    label = data.get('label')
+    if isinstance(plan, dict) and plan:
+        sources.append((label or '当前点', plan))
+    for res in results:
+        rp = res.get('fine_plan')
+        if isinstance(rp, dict) and rp:
+            sources.append((res.get('label') or '测点', rp))
+    for lbl, fp in sources:
+        if fp.get('fallback'):
+            item = f"{lbl} 粗扫拟合失败或 FWHM 无效，已回退 fixed（{fp.get('fallback_reason') or '默认范围'}）"
+            if item not in seen:
+                seen.add(item)
+                notices.append(item)
+        if fp.get('truncated'):
+            item = f"{lbl} 细扫范围被 Z 约束截断（{fp.get('truncation_note') or '已贴合可用 Z 行程'}）"
+            if item not in seen:
+                seen.add(item)
+                notices.append(item)
+    return summary, '；'.join(notices)
+
+
 def depthcal_feasibility_text(data):
     """格式化对焦重复性可行性结论栏文本及颜色。"""
     feas = data.get('feasibility') or {}
@@ -501,6 +552,19 @@ def depthcal_feasibility_text(data):
         max_std = feas.get('max_std')
         std_text = f'{float(max_std):.4f}' if isinstance(max_std, (int, float)) else '—'
         threshold = float(feas.get('threshold', 0.02))
+        insufficient_fits = int(feas.get('insufficient_fits') or 0)
+        total_fits = int(feas.get('total_fits') or 0)
+        insufficient_items = feas.get('insufficient_items') or []
+        if insufficient_fits > 0:
+            items_text = '、'.join(insufficient_items[:6]) + ('…' if len(insufficient_items) > 6 else '')
+            scope = f'{insufficient_fits}/{total_fits}' if total_fits else str(insufficient_fits)
+            detail = f'（{items_text}）' if items_text else ''
+            text = (
+                f'可行性结论：拟合点不足 {scope} 次{detail}，不计入满足；'
+                f'当前最大极差 {max_range:.4f} mm / 最大标准差 {std_text} mm'
+                f'（门限 {threshold:.3f} mm）→ 不满足'
+            )
+            return text, '#fff1f0', '#b42318'
         met = bool(feas.get('met'))
         verdict = '满足' if met else '不满足'
         text = (
@@ -512,12 +576,17 @@ def depthcal_feasibility_text(data):
     if results:
         ranges = [float(r['range']) for r in results if isinstance(r.get('range'), (int, float))]
         stds = [float(r['std']) for r in results if isinstance(r.get('std'), (int, float))]
+        insufficient = sum(
+            1 for r in results for f in (r.get('fits') or []) if not f.get('quality_ok', True)
+        )
         if ranges:
             std_text = f'{max(stds):.4f}' if stds else '—'
+            extra = f'，拟合点不足 {insufficient} 次（不计入满足）' if insufficient else ''
             return (
-                f'可行性结论：已完成 {len(results)} 点，当前最大极差 {max(ranges):.4f} mm / 最大标准差 {std_text} mm'
+                f'可行性结论：已完成 {len(results)} 点，当前最大极差 {max(ranges):.4f} mm / 最大标准差 {std_text} mm{extra}'
                 '（待全部测点完成后判定，误差预算：总 0.05mm，对焦环节约 0.02mm）',
-                '#f8fafc', '#475467',
+                '#fff7ed' if insufficient else '#f8fafc',
+                '#b45309' if insufficient else '#475467',
             )
     return '可行性结论：等待测点完成后评估（总误差预算 0.05mm，对焦环节约 0.02mm）', '#f8fafc', '#667085'
 

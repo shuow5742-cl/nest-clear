@@ -49,5 +49,19 @@ def repeatability(results, threshold):
     max_range = max(result['range'] for result in results)
     std = [result['std'] for result in results if result['std'] is not None]
     max_std = max(std) if std else None
-    return {'max_range': max_range, 'max_std': max_std, 'threshold': threshold,
-            'met': max_std is not None and max(max_range, max_std) <= threshold}
+    insufficient_items = [
+        f"{result['label']}#{fit['repeat']}"
+        for result in results
+        for fit in (result.get('fits') or [])
+        if not fit.get('quality_ok', True)
+    ]
+    total_fits = sum(len(result.get('fits') or []) for result in results)
+    return {
+        'max_range': max_range,
+        'max_std': max_std,
+        'threshold': threshold,
+        'insufficient_fits': len(insufficient_items),
+        'insufficient_items': insufficient_items,
+        'total_fits': total_fits,
+        'met': len(insufficient_items) == 0 and max_std is not None and max(max_range, max_std) <= threshold,
+    }

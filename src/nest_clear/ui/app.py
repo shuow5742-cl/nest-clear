@@ -21,7 +21,7 @@ from .model import (EventTail, camcal_progress, decode_status, display_time, dur
                     pickacc_stage, pickacc_note, pickacc_infield,
                     tooltip_vector, tooltip_deviation, tooltip_pixels, tooltip_quality, tooltip_time, page_for_mode,
                     baseline_preview_display, extract_tooltip_preview,
-                    depthcal_stage_info, depthcal_feasibility_text, depthcal_subplot_layout)
+                    depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -413,12 +413,15 @@ class App:
                 widget.bind('<Button-1>', lambda event, item=name: self.show_status(item))
             self.lights[name] = (dot, value)
 
-    def table_widget(self, parent, columns, widths, stretch=(), height=1):
+    def table_widget(self, parent, columns, widths, stretch=(), height=1, anchor='w', heading_anchor=None):
         tree = ttk.Treeview(parent, columns=columns, show='headings', height=height)
         tree.grid(row=0, column=0, sticky='nsew')
         for column, width in zip(columns, widths):
-            tree.heading(column, text=column)
-            tree.column(column, width=width, minwidth=35, stretch=column in stretch, anchor='w')
+            if heading_anchor is not None:
+                tree.heading(column, text=column, anchor=heading_anchor)
+            else:
+                tree.heading(column, text=column)
+            tree.column(column, width=width, minwidth=35, stretch=column in stretch, anchor=anchor)
         return tree
 
     def build_home(self):
@@ -1738,7 +1741,7 @@ class App:
         head.columnconfigure(0, weight=1)
         bar = tk.Frame(head, bg=WHITE)
         bar.grid(row=0, column=0, sticky='ew')
-        bar.columnconfigure(4, weight=1)
+        bar.columnconfigure(3, weight=1)
         self.depth_stage = tk.Label(bar, text='阶段：空闲（等待 PLC 160）', bg='#eef2f6', fg=INK,
                                     font=(self.theme.title[0], 13, 'bold'), padx=12, pady=3)
         self.depth_stage.grid(row=0, column=0, sticky='w', padx=(0, 10))
@@ -1746,22 +1749,32 @@ class App:
         self.depth_target.grid(row=0, column=1, sticky='w', padx=(0, 10))
         self.depth_z = tk.Label(bar, text='PLC Z：— mm', bg='#eef2f6', fg=INK, font=self.theme.mono, padx=10, pady=3)
         self.depth_z.grid(row=0, column=2, sticky='w', padx=(0, 10))
-        self.depth_metric = tk.Label(bar, text='指标：tenengrad · gauss', bg=WHITE, fg=MUTED, font=self.theme.body)
-        self.depth_metric.grid(row=0, column=3, sticky='w')
         self.depth_abort = ttk.Button(bar, text='放弃本次标定', command=lambda: self.depth_command('depthcal_abort'))
-        self.depth_abort.grid(row=0, column=5, sticky='e', padx=4)
+        self.depth_abort.grid(row=0, column=4, sticky='e', padx=4)
+
+        subbar = tk.Frame(head, bg=WHITE)
+        subbar.grid(row=1, column=0, sticky='ew', pady=(4, 0))
+        self.depth_metric = tk.Label(subbar, text='指标：tenengrad · gauss', bg=WHITE, fg=MUTED, font=self.theme.body)
+        self.depth_metric.grid(row=0, column=0, sticky='w', padx=(0, 12))
+        self.depth_fine_info = tk.Label(subbar, text='细扫：等待粗扫完成后确定', bg='#eef2f6', fg=INK,
+                                        font=self.theme.mono, padx=8, pady=2)
+        self.depth_fine_info.grid(row=0, column=1, sticky='w')
 
         self.depth_message = tk.Label(head, text='等待 PLC 160 发起料盘多点对焦测试', bg=WHITE, fg=INK,
                                       font=(self.theme.title[0], 13), anchor='w', justify='left', wraplength=1360)
-        self.depth_message.grid(row=1, column=0, sticky='ew', pady=(4, 2))
+        self.depth_message.grid(row=2, column=0, sticky='ew', pady=(4, 2))
         self.depth_failure_detail = tk.Label(head, text='', bg='#fff1f0', fg=COLORS['red'],
                                              font=self.theme.body, anchor='w', justify='left', padx=8, pady=4, wraplength=1360)
-        self.depth_failure_detail.grid(row=2, column=0, sticky='ew', pady=(0, 2))
+        self.depth_failure_detail.grid(row=3, column=0, sticky='ew', pady=(0, 2))
         self.depth_failure_detail.grid_remove()
+        self.depth_notice = tk.Label(head, text='', bg='#fff7ed', fg=COLORS['yellow'],
+                                     font=self.theme.body, anchor='w', justify='left', padx=8, pady=3, wraplength=1360)
+        self.depth_notice.grid(row=4, column=0, sticky='ew', pady=(0, 2))
+        self.depth_notice.grid_remove()
         self.depth_feasibility = tk.Label(head, text='可行性结论：等待测点完成后评估（总误差预算 0.05mm，对焦环节约 0.02mm）',
                                           bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 11, 'bold'),
                                           anchor='w', justify='left', padx=8, pady=4, wraplength=1360)
-        self.depth_feasibility.grid(row=3, column=0, sticky='ew')
+        self.depth_feasibility.grid(row=5, column=0, sticky='ew')
 
         curves_body = self.card(self.depth, '清晰度曲线（粗扫灰线 · 细扫彩线 · 竖线=峰位）', 1, 0)
         curves_body.grid_propagate(False)
@@ -1791,8 +1804,11 @@ class App:
 
         table_body = self.card(self.depth, '各测点对焦重复性结果', 2, 0, columnspan=2)
         cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'R²')
-        widths = (65, 175, 115, 115, 115, 125, 100, 100, 100, 90)
-        self.depth_table = self.table_widget(table_body, cols, widths, stretch=('模组 XY (mm)', '均值 Z_peak'), height=5)
+        widths = (70, 175, 130, 130, 130, 145, 100, 100, 100, 95)
+        self.depth_table = self.table_widget(
+            table_body, cols, widths, stretch=cols, height=5,
+            anchor='center', heading_anchor='center',
+        )
         depth_scroll = ttk.Scrollbar(table_body, orient='vertical', command=self.depth_table.yview)
         depth_scroll.grid(row=0, column=1, sticky='ns')
         self.depth_table.configure(yscrollcommand=depth_scroll.set)
@@ -1821,6 +1837,8 @@ class App:
         metric = data.get('metric') or 'tenengrad'
         method = data.get('method') or 'gauss'
         self.depth_metric.config(text=f'指标：{metric} · {method}')
+        fine_text, fine_notice = depthcal_fine_plan_text(data)
+        self.depth_fine_info.config(text=fine_text)
 
         active = phase in ('center', 'coarse', 'overshoot', 'fine', 'peak', 'plane') and not self.depth_pending and not data.get('abort_requested')
         self.depth_abort.config(state='normal' if active else 'disabled')
@@ -1844,6 +1862,13 @@ class App:
         else:
             self.depth_failure_detail.config(text='')
             self.depth_failure_detail.grid_remove()
+
+        if fine_notice:
+            self.depth_notice.config(text='提示：' + fine_notice)
+            self.depth_notice.grid()
+        else:
+            self.depth_notice.config(text='')
+            self.depth_notice.grid_remove()
 
         feas_text, feas_bg, feas_fg = depthcal_feasibility_text(data)
         self.depth_feasibility.config(text=feas_text, bg=feas_bg, fg=feas_fg)
@@ -1877,7 +1902,13 @@ class App:
                 xy = item.get('xy') or []
                 xy_text = f'({xy[0]:.2f}, {xy[1]:.2f})' if len(xy) >= 2 else '—'
                 fits = item.get('fits') or []
-                p_vals = [f"{fits[i]['z_peak']:.4f}" if i < len(fits) and isinstance(fits[i].get('z_peak'), (int, float)) else '—' for i in range(3)]
+                p_vals = []
+                for i in range(3):
+                    if i < len(fits) and isinstance(fits[i].get('z_peak'), (int, float)):
+                        suffix = '(点不足)' if fits[i].get('quality_ok') is False else ''
+                        p_vals.append(f"{fits[i]['z_peak']:.4f}{suffix}")
+                    else:
+                        p_vals.append('—')
                 if len(fits) > 3:
                     p_vals[2] += f' (+{len(fits) - 3})'
                 fwhms = [f['fwhm'] for f in fits if isinstance(f.get('fwhm'), (int, float))]

@@ -82,6 +82,7 @@ class DepthCalibration(DeviceSampling):
                     'plan': session.plan, 'plane': session.plane, 'initial_plane': session.initial_plane,
                     'results': session.results, 'feasibility': session.feasibility,
                     'metric': session.cfg['metric'], 'method': session.cfg['peak_method'],
+                    'fine_plan': session.fine_plan,
                     'session': session.record.directory.name, 'sample': session.last_sample,
                     'abort_requested': session.abort_requested}
             session.last_sample = None

@@ -61,8 +61,9 @@ def _half_height(z, values, index):
 
 
 def fit_peak(rows, metric, method, where):
-    z = np.array([row['z_actual'] for row in reversed(rows)])
-    values = np.array([row[metric] for row in reversed(rows)])
+    ordered = sorted(rows, key=lambda row: row['z_actual'])
+    z = np.array([row['z_actual'] for row in ordered])
+    values = np.array([row[metric] for row in ordered])
     index = peak_index(z, values, where)
     half = _half_height(z, values, index)
     mask = values >= .5 * values[index]
@@ -84,4 +85,109 @@ def fit_peak(rows, metric, method, where):
     if selected is None:
         raise GuardError('DEPTH-FIT', f'{metric} 的 {method} 峰拟合失败', where,
                          '检查细扫曲线是否覆盖峰两侧；可调整细扫范围、步长、曝光或清晰度主指标。')
-    return {**selected, 'r2': gauss['r2'] if gauss else None, 'gauss': gauss, 'half_height': half}
+    left_points = int(np.sum(z[mask] < origin))
+    right_points = int(np.sum(z[mask] > origin))
+    min_ratio = float(np.min(values[mask]) / values[index]) if mask.any() and values[index] > 0 else None
+    issues = []
+    if left_points < 5:
+        issues.append(f'峰左侧拟合点 {left_points} < 5')
+    if right_points < 5:
+        issues.append(f'峰右侧拟合点 {right_points} < 5')
+    if min_ratio is None or min_ratio > 0.6:
+        ratio_text = f'{min_ratio:.2f}' if min_ratio is not None else '—'
+        issues.append(f'最低参与点 {ratio_text}×峰值 > 0.60×峰值')
+    quality_ok = not issues
+    return {
+        **selected,
+        'r2': gauss['r2'] if gauss else None,
+        'gauss': gauss,
+        'half_height': half,
+        'quality_ok': quality_ok,
+        'insufficient_points': not quality_ok,
+        'left_points': left_points,
+        'right_points': right_points,
+        'min_ratio': min_ratio,
+        'quality_issues': issues,
+        'quality_note': '拟合点不足（' + '；'.join(issues) + '）' if issues else '',
+    }
+
+
+def fit_coarse_fwhm(rows, metric, method, where):
+    """粗扫峰拟合；若窄峰导致半高以上点不足 3 个则回退半高宽法估计 FWHM。"""
+    try:
+        fit = fit_peak(rows, metric, method, where)
+    except GuardError as exc:
+        ordered = sorted(rows, key=lambda row: row['z_actual'])
+        z = np.array([row['z_actual'] for row in ordered])
+        values = np.array([row[metric] for row in ordered])
+        index = peak_index(z, values, where)
+        if method == 'gauss' and int(np.sum(values >= .5 * values[index])) < 3:
+            half = _half_height(z, values, index)
+            if half and isinstance(half.get('fwhm'), (int, float)) and math.isfinite(half['fwhm']) and half['fwhm'] > 0:
+                return {**half, 'r2': None, 'gauss': None, 'half_height': half, 'coarse_fallback': 'half_height'}, None
+        return None, exc.what
+    fwhm = fit.get('fwhm')
+    if not isinstance(fwhm, (int, float)) or not math.isfinite(fwhm) or fwhm <= 0:
+        return None, '粗扫 FWHM 无效'
+    return fit, None
+
+
+def plan_fine_scan(cfg, coarse_fwhm, coarse_peak, z_min, z_max, fallback_reason=None):
+    """根据粗扫 FWHM 与 Z 行程约束计算细扫半宽、步距及截断/回退提示。"""
+    configured_mode = cfg['fine_range_mode']
+    fwhm_valid = isinstance(coarse_fwhm, (int, float)) and math.isfinite(coarse_fwhm) and coarse_fwhm > 0
+    fallback = False
+    if configured_mode == 'auto':
+        if fwhm_valid:
+            raw_half = cfg['fine_range_factor'] * float(coarse_fwhm)
+            half_width = min(max(raw_half, cfg['fine_range_min_mm']), cfg['fine_range_max_mm'])
+            raw_step = (2.0 * half_width) / cfg['fine_steps_target']
+            fine_step = min(max(raw_step, cfg['fine_step_min_mm']), cfg['fine_step_max_mm'])
+            actual_mode = 'auto'
+            reason = None
+        else:
+            half_width = float(cfg['fine_range_mm'])
+            fine_step = float(cfg['fine_step_mm'])
+            actual_mode = 'fixed_fallback'
+            fallback = True
+            reason = fallback_reason or '粗扫 FWHM 无效'
+    else:
+        half_width = float(cfg['fine_range_mm'])
+        fine_step = float(cfg['fine_step_mm'])
+        actual_mode = 'fixed'
+        reason = None
+
+    nominal_high = coarse_peak + half_width
+    nominal_low = coarse_peak - half_width
+    low = max(nominal_low, z_min)
+    top = min(nominal_high + cfg['overshoot_mm'], z_max)
+    high = min(nominal_high, top - fine_step)
+    truncated_low = nominal_low < z_min - 1e-12
+    truncated_high = high < nominal_high - 1e-12
+    truncated = truncated_low or truncated_high
+    lower_half = max(0.0, coarse_peak - low)
+    upper_half = max(0.0, high - coarse_peak)
+    notes = []
+    if truncated_low:
+        notes.append(f'下限受 camera_z_min_mm={z_min:.3f}mm 截断（下半宽 {lower_half:.3f} < {half_width:.3f} mm）')
+    if truncated_high:
+        notes.append(f'上限受 Z 行程 {z_max:.3f}mm 截断（上半宽 {upper_half:.3f} < {half_width:.3f} mm）')
+    return {
+        'mode': actual_mode,
+        'configured_mode': configured_mode,
+        'fallback': fallback,
+        'fallback_reason': reason,
+        'coarse_fwhm_mm': float(coarse_fwhm) if fwhm_valid else None,
+        'half_width_mm': float(half_width),
+        'effective_half_width_mm': float((high - low) / 2.0),
+        'lower_half_mm': float(lower_half),
+        'upper_half_mm': float(upper_half),
+        'fine_step_mm': float(fine_step),
+        'high_mm': float(high),
+        'low_mm': float(low),
+        'top_mm': float(top),
+        'truncated': truncated,
+        'truncated_low': truncated_low,
+        'truncated_high': truncated_high,
+        'truncation_note': '；'.join(notes) if notes else None,
+    }

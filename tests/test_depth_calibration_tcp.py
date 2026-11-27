@@ -3,6 +3,7 @@
 import csv
 from dataclasses import replace
 import json
+import math
 from types import SimpleNamespace
 import time
 
@@ -62,7 +63,7 @@ class FilmCamera(AsyncRequestWorker):
         cv2.line(image, (u, v - 90), (u, v + 90), 18, 2, cv2.LINE_AA)
         if 0 <= u - 180 <= 340 and 0 <= v - 180 <= 340:
             image[v - 180:v - 100, u - 180:u - 100] = self.markers[label]
-        frame = cv2.GaussianBlur(image, (0, 0), max(.001, 12 * abs(z - self.focus(label))))
+        frame = cv2.GaussianBlur(image, (0, 0), math.hypot(.4, 1.5 * (z - self.focus(label))))
         self.cached = (self.actual, self.exposure_us, frame)
         return frame, {'exposure_us': self.exposure_us}
 
@@ -71,8 +72,8 @@ class FilmCamera(AsyncRequestWorker):
 def tcp_rig(tmp_path):
     camera = FilmCamera()
     cfg = load_config('config/nest_clear.yaml')
-    settings = {**cfg.depth_calibration, 'camera_z_min_mm': -6.3, 'coarse_range_mm': .4,
-                'coarse_step_mm': .10, 'fine_range_mm': .18, 'fine_step_mm': .03, 'overshoot_mm': .1,
+    settings = {**cfg.depth_calibration, 'camera_z_min_mm': -7.0, 'coarse_range_mm': 1.6,
+                'coarse_step_mm': .20, 'fine_steps_target': 24, 'overshoot_mm': .15,
                 'settle_window_s': .0001, 'frames_per_step': 1}
     cfg = replace(cfg, depth_calibration=settings, travel=((80, 220), (0, 230), (-15, 0)),
                   tool_offset={**cfg.tool_offset, 'card_thickness_mm': 0.},
@@ -124,7 +125,7 @@ def test_160_multisite(tcp_rig, anomaly):
     rig.camera.anomaly = anomaly
     coordinates = None
     session = None
-    for _ in range(600):
+    for _ in range(1200):
         code, coordinates = rig.exchange(coordinates)
         if code == 161:
             break
@@ -136,6 +137,7 @@ def test_160_multisite(tcp_rig, anomaly):
     assert rig.batch.blackboard.read('mode') == Mode.IDLE
     assert len(session.results) == (9 if anomaly else 5)
     assert session.feasibility['met']
+    assert session.results[0]['fine_plan']['mode'] == 'auto'
     assert len(session.requests) == len(session.replies) == len(rig.writes)
     assert session.replies[-1] == {'task_id': len(rig.writes), 'func': 161, 'coordinates': {}}
     for result in session.results:
@@ -197,7 +199,7 @@ def test_160_error(tcp_rig, case, reason):
         code, target = rig.exchange()
         assert code == 160
         if case == 'below_limit':
-            kwargs = {'xyz': (*target[:2], -6.5)}
+            kwargs = {'xyz': (*target[:2], rig.cfg.depth_calibration['camera_z_min_mm'] - 0.2)}
         elif case == 'wrong_request':
             kwargs = {'func': 100, 'xyz': target}
         elif case == 'arrival_mismatch':

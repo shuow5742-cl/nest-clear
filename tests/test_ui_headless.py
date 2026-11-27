@@ -969,13 +969,30 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
             assert len(ui.depth_table.rows) == 5
             assert '满足下针深度标定误差预算' in ui.depth_feasibility.options['text']
             assert '0.0502 mm/100mm' in ui.depth_plane_grid.values_data['最大 |残差| / 倾斜']
+            assert '±1.500 mm' in ui.depth_fine_info.options['text']
+            assert '0.075 mm' in ui.depth_fine_info.options['text']
+            assert not ui.depth_notice.visible
             assert ui.depth_abort.options['state'] == 'disabled'
         elif state == 'fine':
             assert ui.depth_abort.options['state'] == 'normal'
             assert len(ui.depth_table.rows) == 2
+            assert '±1.500 mm' in ui.depth_fine_info.options['text']
         elif state == 'failed':
             assert ui.depth_failure_detail.visible
             assert 'DEPTH-PEAK-BOUNDARY' in ui.depth_failure_detail.options['text']
+
+    # 验证拟合点不足 + 回退/截断提示在界面正确呈现
+    warn_data, _, _ = depthcal_demo('done')
+    warn_data['fine_plan'] = {'mode': 'fixed_fallback', 'half_width_mm': 0.6, 'fine_step_mm': 0.02,
+                              'fallback': True, 'fallback_reason': '粗扫 FWHM 无效',
+                              'truncated': True, 'truncation_note': '下限截断'}
+    warn_data['results'][0]['fits'][0]['quality_ok'] = False
+    warn_data['feasibility'] = {'max_range': 0.003, 'max_std': 0.0016, 'threshold': 0.02,
+                                'insufficient_fits': 1, 'insufficient_items': ['T02#1'], 'total_fits': 15, 'met': False}
+    ui.update_depthcal({'mode': '空闲', 'depthcal': warn_data})
+    assert ui.depth_notice.visible and '回退 fixed' in ui.depth_notice.options['text']
+    assert '拟合点不足 1/15 次' in ui.depth_feasibility.options['text']
+    assert '(点不足)' in ui.depth_table.rows['0']['values'][2]
 
     # 点击放弃按钮写入 depthcal_abort 命令
     sent = []

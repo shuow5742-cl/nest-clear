@@ -331,7 +331,8 @@ def test_main_preview_controls_use_mode_and_hosted_focus_state():
 
 
 def test_depthcal_model_helpers_and_status(tmp_path):
-    from nest_clear.ui.model import depthcal_stage_info, depthcal_feasibility_text, depthcal_subplot_layout
+    from nest_clear.ui.demo import depthcal_demo
+    from nest_clear.ui.model import depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout
     from nest_clear.ui.status import MainStatus
     assert depthcal_stage_info({'phase': 'idle'})[0] == '阶段：空闲（等待 PLC 160）'
     assert depthcal_stage_info({'phase': 'done'})[0] == '阶段：完成（已回 161）'
@@ -342,6 +343,28 @@ def test_depthcal_model_helpers_and_status(tmp_path):
     assert '满足下针深度标定误差预算' in ok_text and ok_bg == '#ecfdf3'
     bad_text, bad_bg, _ = depthcal_feasibility_text({'feasibility': {'max_range': 0.035, 'max_std': 0.018, 'threshold': 0.02, 'met': False}})
     assert '不满足下针深度标定误差预算' in bad_text and bad_bg == '#fff1f0'
+    insuf_text, insuf_bg, _ = depthcal_feasibility_text({
+        'feasibility': {'max_range': 0.003, 'max_std': 0.001, 'threshold': 0.02,
+                        'insufficient_fits': 2, 'insufficient_items': ['T02#1', 'T02#2'], 'total_fits': 15, 'met': False}
+    })
+    assert '拟合点不足 2/15 次' in insuf_text and '不计入满足' in insuf_text and insuf_bg == '#fff1f0'
+
+    summary_auto, notice_auto = depthcal_fine_plan_text({
+        'label': 'T02',
+        'fine_plan': {'mode': 'auto', 'half_width_mm': 1.5, 'fine_step_mm': 0.075, 'coarse_fwhm_mm': 2.0,
+                      'fallback': False, 'truncated': False},
+    })
+    assert '±1.500 mm' in summary_auto and '0.075 mm' in summary_auto and notice_auto == ''
+    summary_fb, notice_fb = depthcal_fine_plan_text({
+        'label': 'T05',
+        'fine_plan': {'mode': 'fixed_fallback', 'half_width_mm': 0.6, 'fine_step_mm': 0.02,
+                      'fallback': True, 'fallback_reason': '高斯拟合失败',
+                      'truncated': True, 'truncation_note': '下限受 camera_z_min_mm 截断'},
+    })
+    assert '回退 fixed' in summary_fb and '回退 fixed' in notice_fb and 'Z 约束截断' in notice_fb
+
+    demo_done, _, _ = depthcal_demo('done')
+    assert 1.8 <= demo_done['results'][0]['fits'][0]['fwhm'] <= 2.2
 
     boxes = depthcal_subplot_layout(['T02', 'T05', 'T29', 'T26', 'T12'], 900, 400)
     assert len(boxes) == 5

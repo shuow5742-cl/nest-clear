@@ -222,22 +222,30 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         'T12': -5.013,
     }
 
-    def curve_val(z: float, z0: float, amp: float = 0.85, sigma: float = 0.24) -> float:
+    def curve_val(z: float, z0: float, amp: float = 0.85, sigma: float = 0.85) -> float:
         return round(0.04 + amp * math.exp(-0.5 * ((z - z0) / sigma) ** 2), 4)
 
     def make_coarse(lbl: str, limit: int | None = None):
         z0 = true_peaks[lbl]
-        zs = [-2.0 - 0.2 * i for i in range(24)]
+        zs = [-2.0 - 0.2 * i for i in range(26)]
         if limit is not None:
             zs = zs[:limit]
-        return [[round(z, 3), curve_val(z, z0, amp=0.82, sigma=0.35)] for z in zs]
+        return [[round(z, 3), curve_val(z, z0, amp=0.84, sigma=0.85)] for z in zs]
 
     def make_fine(lbl: str, offset: float, limit: int | None = None):
         z0 = true_peaks[lbl] + offset
-        zs = [round(true_peaks[lbl] + 0.50 - 0.02 * i, 3) for i in range(51)]
+        zs = [round(true_peaks[lbl] + 1.50 - 0.075 * i, 4) for i in range(41)]
         if limit is not None:
             zs = zs[:limit]
-        return [[z, curve_val(z, z0, amp=0.92, sigma=0.20)] for z in zs]
+        return [[z, curve_val(z, z0, amp=0.92, sigma=0.85)] for z in zs]
+
+    def make_fine_plan():
+        return {
+            'mode': 'auto', 'configured_mode': 'auto', 'fallback': False, 'fallback_reason': None,
+            'coarse_fwhm_mm': 2.002, 'half_width_mm': 1.500, 'effective_half_width_mm': 1.500,
+            'lower_half_mm': 1.500, 'upper_half_mm': 1.500, 'fine_step_mm': 0.075,
+            'truncated': False, 'truncation_note': None,
+        }
 
     def make_result(lbl: str):
         offsets = (-0.0018, 0.0012, 0.0005)
@@ -245,10 +253,11 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         mean_pk = sum(peaks) / len(peaks)
         rng = max(peaks) - min(peaks)
         var = sum((p - mean_pk) ** 2 for p in peaks) / (len(peaks) - 1)
-        fits = [{'repeat': i + 1, 'z_peak': p, 'fwhm': 0.472 + i * 0.002, 'r2': 0.9968 - i * 0.0004}
+        fits = [{'repeat': i + 1, 'z_peak': p, 'fwhm': 1.985 + i * 0.008, 'r2': 0.9974 - i * 0.0003,
+                 'quality_ok': True, 'insufficient_points': False}
                 for i, p in enumerate(peaks)]
-        return {'label': lbl, 'xy': coords[lbl], 'fits': fits, 'z_peak': mean_pk,
-                'range': rng, 'std': math.sqrt(var)}
+        return {'label': lbl, 'xy': coords[lbl], 'fits': fits, 'fine_plan': make_fine_plan(),
+                'insufficient_repeats': [], 'z_peak': mean_pk, 'range': rng, 'std': math.sqrt(var)}
 
     curves = {}
     results = []
@@ -258,13 +267,13 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
 
     if state == 'coarse':
         lbl = 'T02'
-        curves[lbl] = {'coarse': make_coarse(lbl, limit=14)}
+        curves[lbl] = {'coarse': make_coarse(lbl, limit=18)}
         z_cur = curves[lbl]['coarse'][-1][0]
         return ({
             'phase': 'coarse', 'message': 'T02 粗扫中（Z 向下步进 0.20 mm）',
             'label': lbl, 'z': z_cur, 'point': 1, 'total': 5, 'plan': plan,
             'plane': None, 'initial_plane': None, 'results': [], 'feasibility': None,
-            'metric': 'tenengrad', 'method': 'gauss', 'session': 'demo_depthcal',
+            'metric': 'tenengrad', 'method': 'gauss', 'fine_plan': None, 'session': 'demo_depthcal',
             'curves': curves, 'abort_requested': False,
         }, z_cur, lbl)
 
@@ -281,14 +290,14 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         curves[lbl] = {
             'coarse': make_coarse(lbl),
             '1': make_fine(lbl, -0.0014),
-            '2': make_fine(lbl, 0.0011, limit=31),
+            '2': make_fine(lbl, 0.0011, limit=25),
         }
         z_cur = curves[lbl]['2'][-1][0]
         return ({
-            'phase': 'fine', 'message': 'T29 细扫 第 2/3 次（单向向下 0.02 mm）',
+            'phase': 'fine', 'message': 'T29 细扫 第 2/3 次（单向向下 0.075 mm）',
             'label': lbl, 'z': z_cur, 'point': 3, 'total': 5, 'plan': plan,
             'plane': None, 'initial_plane': None, 'results': results, 'feasibility': None,
-            'metric': 'tenengrad', 'method': 'gauss', 'session': 'demo_depthcal',
+            'metric': 'tenengrad', 'method': 'gauss', 'fine_plan': make_fine_plan(), 'session': 'demo_depthcal',
             'curves': curves, 'abort_requested': False,
         }, z_cur, lbl)
 
@@ -305,13 +314,14 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         plane = {'a': 0.00050, 'b': 0.00004, 'c': -5.0808, 'residuals': residuals,
                  'max_residual': 0.0015, 'tilt_mm_per_100mm': 0.0502}
         initial_plane = plane
-        feasibility = {'max_range': 0.0030, 'max_std': 0.0016, 'threshold': 0.02, 'met': True}
+        feasibility = {'max_range': 0.0030, 'max_std': 0.0016, 'threshold': 0.02,
+                       'insufficient_fits': 0, 'insufficient_items': [], 'total_fits': 15, 'met': True}
         z_cur = results[-1]['z_peak']
         return ({
             'phase': 'done', 'message': '料盘多点对焦测试完成（已回 161）',
             'label': 'T12', 'z': z_cur, 'point': 5, 'total': 5, 'plan': plan,
             'plane': plane, 'initial_plane': initial_plane, 'results': results, 'feasibility': feasibility,
-            'metric': 'tenengrad', 'method': 'gauss', 'session': 'demo_depthcal',
+            'metric': 'tenengrad', 'method': 'gauss', 'fine_plan': make_fine_plan(), 'session': 'demo_depthcal',
             'curves': curves, 'abort_requested': False,
         }, z_cur, 'T12')
 
@@ -334,7 +344,7 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         'hint': '核查工具间隙及安全 Z 下限，再评估是否扩大向下的可用扫描范围。',
         'label': 'T05', 'z': z_cur, 'point': 2, 'total': 5, 'plan': plan,
         'plane': None, 'initial_plane': None, 'results': results, 'feasibility': None,
-        'metric': 'tenengrad', 'method': 'gauss', 'session': 'demo_depthcal',
+        'metric': 'tenengrad', 'method': 'gauss', 'fine_plan': None, 'session': 'demo_depthcal',
         'curves': curves, 'abort_requested': False,
     }, z_cur, 'T05')
 

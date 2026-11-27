@@ -12,7 +12,7 @@ from nest_clear.plan.scan_path import guard_position
 from nest_clear.tooloffset.detection import detect
 from nest_clear.tooloffset.session import film_calibration
 from nest_clear.vision.geometry import pixel_to_module
-from .focus import fit_peak, peak_index, scores
+from .focus import fit_coarse_fwhm, fit_peak, peak_index, plan_fine_scan, scores
 from .layout import film_layout, fit_plane, repeatability
 
 
@@ -51,6 +51,8 @@ class Session:
         self.fits = []
         self.scan_rows = []
         self.repeat = 0
+        self.coarse_fit = None
+        self.fine_plan = None
 
     @property
     def frame_count(self):
@@ -171,14 +173,14 @@ class Session:
         self.repeat += 1
         self.phase = 'overshoot'
         self.scan_rows = []
-        high = self.coarse_peak + self.cfg['fine_range_mm']
-        low = max(self.coarse_peak - self.cfg['fine_range_mm'], self.z_min)
-        top = min(high + self.cfg['overshoot_mm'], self.z_max)
-        high = min(high, top - self.cfg['fine_step_mm'])
+        plan = self.fine_plan
+        high = plan['high_mm']
+        low = plan['low_mm']
+        top = plan['top_mm']
         if high <= low:
             raise GuardError('DEPTH-FINE-RANGE', 'Z 行程不足以完成细扫换向与向下采样',
                              self.where, '检查粗扫峰位、细扫范围及可用 Z 行程。')
-        self.steps = descending(high, low, self.cfg['fine_step_mm'])
+        self.steps = descending(high, low, plan['fine_step_mm'])
         return self.move((*self.camera_xy, top))
 
     def after_overshoot(self):
@@ -214,7 +216,11 @@ class Session:
                 return self.next_step()
             z_values = [item['z_actual'] for item in self.scan_rows]
             peak_index(z_values, values, self.where)
-            self.coarse_peak = z_values[index]
+            coarse_fit, coarse_error = fit_coarse_fwhm(self.scan_rows, primary, self.cfg['peak_method'], self.where)
+            self.coarse_fit = coarse_fit
+            self.coarse_peak = coarse_fit['z_peak'] if coarse_fit else z_values[index]
+            coarse_fwhm = coarse_fit['fwhm'] if coarse_fit else None
+            self.fine_plan = plan_fine_scan(self.cfg, coarse_fwhm, self.coarse_peak, self.z_min, self.z_max, coarse_error)
             return self.begin_fine()
         if self.steps:
             return self.next_step()
@@ -230,7 +236,10 @@ class Session:
         if self.repeat < self.cfg['repeats_per_point']:
             return self.begin_fine()
         peaks = [item['z_peak'] for item in self.fits]
+        insufficient = [item['repeat'] for item in self.fits if not item.get('quality_ok', True)]
         self.result = {'label': self.label, 'xy': [float(v) for v in self.point_xy], 'fits': self.fits,
+                       'coarse_fit': self.coarse_fit, 'fine_plan': self.fine_plan,
+                       'insufficient_repeats': insufficient,
                        'z_peak': statistics.mean(peaks), 'range': max(peaks) - min(peaks),
                        'std': statistics.stdev(peaks) if len(peaks) > 1 else None}
         self.results.append(self.result)

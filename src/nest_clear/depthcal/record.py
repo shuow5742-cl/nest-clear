@@ -71,10 +71,14 @@ class DepthRecord:
         try:
             if outcome != 'done':
                 self.results(session)
+            fine_plans = {r['label']: r['fine_plan'] for r in session.results if r.get('fine_plan')}
+            if session.label and getattr(session, 'fine_plan', None) and session.label not in fine_plans:
+                fine_plans[session.label] = session.fine_plan
             self.write('session_record.json', {
                 'start_time': self.started.isoformat(), 'end_time': self.events.clock().isoformat(),
                 'outcome': outcome, 'diagnostic': details, 'configuration': session.cfg,
                 'exposure_us': getattr(session, 'exposure_us', None), 'plan': session.plan,
+                'fine_plans': fine_plans,
                 'requests': session.requests, 'replies': session.replies, 'samples': len(session.samples),
             })
         except (OSError, ValueError) as exc:

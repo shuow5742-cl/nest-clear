@@ -12,6 +12,13 @@ from test_tooloffset_flow import rig  # noqa: F401
 def test_default_config_z_min_is_minus_12():
     cfg = load_config('config/nest_clear.yaml')
     assert cfg.depth_calibration['camera_z_min_mm'] == -12.0
+    assert cfg.depth_calibration['fine_range_mode'] == 'auto'
+    assert cfg.depth_calibration['fine_range_factor'] == 0.75
+    assert cfg.depth_calibration['fine_range_min_mm'] == 0.3
+    assert cfg.depth_calibration['fine_range_max_mm'] == 3.0
+    assert cfg.depth_calibration['fine_steps_target'] == 40
+    assert cfg.depth_calibration['fine_step_min_mm'] == 0.02
+    assert cfg.depth_calibration['fine_step_max_mm'] == 0.1
 
 
 def test_depth_protocol_missing_z_min_and_reserved_codes(rig):
