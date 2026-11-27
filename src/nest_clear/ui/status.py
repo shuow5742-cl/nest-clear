@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 class MainStatus:
     def __init__(self, root):
         self.path = main_status_file(root); self.lock = threading.Lock(); self.last = 0; self.timer = None
-        self.data = {'pid':os.getpid(), 'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'recent_replies':[], 'picking':{}, 'camcal':{}, 'tooltip':{}, 'tooloffset':{}, 'pickacc':{}, 'baseline':{}, 'command_seq':0}
+        self.data = {'pid':os.getpid(), 'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'recent_replies':[], 'picking':{}, 'camcal':{}, 'tooltip':{}, 'tooloffset':{}, 'pickacc':{}, 'depthcal':{}, 'baseline':{}, 'command_seq':0}
         self.write()
     def write(self):
         try:
@@ -58,6 +58,7 @@ class MainStatus:
                         d['tooloffset'].pop(key, None)
                 d['tooloffset'].update(row)
             if e == 'pickacc_state': d['pickacc'].update(row)
+            if e == 'depthcal_state': d['depthcal'] = row
             if e == 'baseline_state': d['baseline'].update(row)
             if e == 'tooltip_start': d['tooltip'] = {}
             if e.startswith('tooltip_') and not e.startswith(('tooltip_preview_', 'tooltip_exposure_', 'tooltip_camera_', 'tooltip_preparation_', 'tooltip_focus_', 'tooltip_runout_')):

@@ -49,10 +49,13 @@ class DepthCalibration(DeviceSampling):
         data = {}
         if session:
             data = {'phase': session.phase, 'message': session.message,
-                    'label': session.label, 'z': session.actual[2] if session.actual else None}
+                    'label': session.label, 'z': session.actual[2] if session.actual else None,
+                    'point': min(session.point_index + 1, len(session.plan)), 'total': len(session.plan),
+                    'plan': session.plan, 'plane': session.plane, 'initial_plane': session.initial_plane,
+                    'results': session.results, 'feasibility': session.feasibility}
         if phase:
             data['phase'] = phase
-        self.ctx.events.emit('depthcal_state', **data, **details)
+        self.ctx.events.emit('depthcal_state', **(data | details))
 
     def fail(self, exc):
         bb = self._blackboard
@@ -144,6 +147,8 @@ class DepthCalibration(DeviceSampling):
             self.frames.append(image)
             if len(self.frames) < session.frame_count:
                 return self.capture()
+            if session.phase == 'peak' and session.point_index + 1 == len(session.plan):
+                self.publish('plane', message='平面判定')
             coords = session.advance(self.frames)
             self.frames = []
             if coords is not None:

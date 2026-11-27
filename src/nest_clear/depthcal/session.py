@@ -1,4 +1,4 @@
-"""一趟只降不升的扫描，以及测点居中和细扫调度。"""
+"""测点居中、单向对焦扫描和多点平面判定。"""
 
 from collections import deque
 import math
@@ -13,6 +13,7 @@ from nest_clear.tooloffset.detection import detect
 from nest_clear.tooloffset.session import film_calibration
 from nest_clear.vision.geometry import pixel_to_module
 from .focus import fit_peak, peak_index, scores
+from .layout import film_layout, fit_plane, repeatability
 
 
 def descending(top, bottom, step):
@@ -30,6 +31,12 @@ class Session:
         self.z_max = self.travel[2][1]
         self.requests, self.replies = [], []
         self.samples, self.results = [], []
+        self.layout, primary, extra = film_layout()
+        self.plan = list(self.cfg['point_order'] or primary)
+        self.extra = [label for label in (self.cfg['extra_points'] or extra) if label not in self.plan]
+        self.point_index = 0
+        self.plane = self.initial_plane = self.feasibility = None
+        self.actual = None
         self.reset_point()
 
     def reset_point(self):
@@ -37,7 +44,6 @@ class Session:
         self.label = None
         self.center_round = 1
         self.expected = None
-        self.actual = None
         self.roi = None
         self.latest_roi = None
         self.fits = []
@@ -113,6 +119,9 @@ class Session:
         self.point_xy = pixel_to_module(*target.ring_uv, self.actual, self.cal)[:2]
         center_xy = pixel_to_module(*uv, self.actual, self.cal)[:2]
         x, y, z = self.actual
+        self.center_offset = np.array(center_xy) - (x, y)
+        if self.label != self.plan[self.point_index]:
+            return self.locate(self.plan[self.point_index], z)
         if math.dist(target.ring_uv, uv) > self.cfg['center_tol_px']:
             if self.center_round >= self.cfg['center_max_iter']:
                 raise GuardError('DEPTH-CENTER', '达到居中轮数上限，圆环仍偏离画面中心',
@@ -137,9 +146,20 @@ class Session:
         return self.next_step()
 
     def identify(self, target):
+        if self.label is None and target.label in self.plan:
+            self.plan.remove(target.label)
+            self.plan.insert(0, target.label)
         if self.label is not None and target.label != self.label:
             raise GuardError('DEPTH-TARGET', f'靶点从 {self.label} 变为 {target.label}',
                              self.where, '检查初始靶点和 PLC XY 到位坐标。')
+
+    def locate(self, label, z):
+        delta = self.layout[label] - self.layout[self.label]
+        center_xy = self.center_offset
+        x, y = (float(v) for v in (np.array(self.point_xy) + delta - center_xy))
+        self.reset_point()
+        self.label = label
+        return self.move((x, y, z))
 
     def centered(self, frame):
         self.latest_roi = frame[self.roi].copy()
@@ -218,4 +238,19 @@ class Session:
 
     def point_finished(self, frame):
         self.latest_roi = frame[self.roi].copy()
-        return None
+        self.point_index += 1
+        if self.point_index == len(self.plan):
+            self.plane = fit_plane(self.results)
+            if self.initial_plane is None:
+                self.initial_plane = self.plane
+                if self.plane['max_residual'] > self.cfg['plane_tol_mm']:
+                    slots = self.cfg['max_points'] - len(self.plan)
+                    self.plan.extend(self.extra[:slots])
+            else:
+                delta = self.plane['max_residual'] - self.initial_plane['max_residual']
+                self.plane['after_extra'] = ('加测后残差下降' if delta < -1e-6 else
+                                             '加测后残差增大' if delta > 1e-6 else '加测后残差不变')
+        if self.point_index == len(self.plan):
+            self.feasibility = repeatability(self.results, self.cfg['repeat_range_tol_mm'])
+            return None
+        return self.locate(self.plan[self.point_index], self.result['z_peak'])
