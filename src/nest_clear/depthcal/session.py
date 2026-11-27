@@ -16,7 +16,22 @@ from .focus import (
     EXPOSURE_MAX_SATURATED_FRACTION, analyze_coarse_scan, find_side_blur, fit_coarse_fwhm, fit_peak,
     measure_dof, next_auto_exposure, plan_fine_scan, roi_brightness, scores,
 )
-from .layout import dof_summary, film_layout, fit_plane, repeatability
+from .layout import corner_labels_for_plan, dof_summary, film_layout, fit_plane, repeatability
+
+# 首两点连续失败提前终止规则开关（规则 a）：前两个计划点（含其补测）均失败时立即回 999。
+ENABLE_FIRST_TWO_FAIL_ABORT = True
+
+# 允许触发单点失败跳过/补测的业务错误码（通信、行程/Z下限、曝光改动、放弃等仍立即 999）。
+SKIPPABLE_POINT_CODES = frozenset({
+    'DEPTH-CONTRAST',
+    'DEPTH-PEAK-BOUNDARY',
+    'DEPTH-FIT',
+    'DEPTH-TARGET',
+    'DEPTH-CENTER',
+    'DEPTH-ROI',
+    'DEPTH-DARK',
+    'DEPTH-FINE-RANGE',
+})
 
 
 def ascending(bottom, top, step):
@@ -49,6 +64,17 @@ class Session:
         self.layout, primary, extra = film_layout()
         self.plan = list(self.cfg['point_order'] or primary)
         self.extra = [label for label in (self.cfg['extra_points'] or extra) if label not in self.plan]
+        self.corner_labels = corner_labels_for_plan(self.layout, self.plan)
+        self.plan_slots = {label: idx for idx, label in enumerate(self.plan)}
+        self.slot_outcomes = {}
+        self.retest_parent = {}
+        self.attempted_labels = set()
+        self.failed_points = []
+        self.skip_summary = self._build_skip_summary()
+        self.ref_label = None
+        self.ref_xy = None
+        self.initial_z = None
+        self.current_retest_of = None
         self.point_index = 0
         self.plane = self.initial_plane = self.feasibility = self.dof_summary = None
         self.actual = None
@@ -101,6 +127,7 @@ class Session:
         self.fine_plan = None
         self.result = None
         self.point_arrivals = []
+        self.current_retest_of = None
 
     @property
     def frame_count(self):
@@ -308,13 +335,109 @@ class Session:
         self.actual = actual_t
         return entry
 
+    def _target_module_xy(self, label):
+        if label not in self.layout:
+            return None
+        if self.ref_xy is not None and self.ref_label is not None:
+            return np.array(self.ref_xy, dtype=float) + (self.layout[label] - self.layout[self.ref_label])
+        return None
+
+    def _target_camera_xy(self, label):
+        module_xy = self._target_module_xy(label)
+        if module_xy is None or getattr(self, 'center_offset', None) is None:
+            return None
+        xy = module_xy - self.center_offset
+        return (float(xy[0]), float(xy[1]))
+
+    def _in_xy_travel(self, xy):
+        if xy is None:
+            return False
+        x, y = xy
+        (x_lo, x_hi), (y_lo, y_hi) = self.travel[:2]
+        return math.isfinite(x) and math.isfinite(y) and x_lo <= x <= x_hi and y_lo <= y <= y_hi
+
+    def _select_backup_target(self, failed_label):
+        """选择离失败点最近、未测过/未计划且在 depth_calibration.travel 内的备用菲林靶点。"""
+        if failed_label not in self.layout:
+            return None
+        queued = set(self.plan[self.point_index + 1:])
+        candidates = [
+            cand for cand in self.layout
+            if cand != failed_label
+            and cand not in self.attempted_labels
+            and cand not in queued
+            and self._in_xy_travel(self._target_camera_xy(cand))
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda cand: (round(float(np.linalg.norm(self.layout[cand] - self.layout[failed_label])), 6), cand),
+        )
+
+    def _next_z(self):
+        if self.results:
+            return self.results[-1]['z_peak']
+        if self.initial_z is not None:
+            return self.initial_z
+        return self.actual[2]
+
+    def _build_skip_summary(self):
+        primary_failures = [fp for fp in self.failed_points if fp.get('retest_of') is None]
+        items = []
+        skipped_points = []
+        retested_points = []
+        for fp in primary_failures:
+            retest_lbl = fp.get('retest_label')
+            retest_status = fp.get('retest_status')
+            skipped = retest_status in ('failed', 'unavailable', None)
+            entry = {
+                'label': fp['label'],
+                'error_code': fp.get('error_code'),
+                'reason': fp.get('reason'),
+                'retest_label': retest_lbl,
+                'retest_status': retest_status,
+                'retest_reason': fp.get('retest_reason'),
+                'skipped': skipped,
+            }
+            items.append(entry)
+            if retest_lbl and retest_status == 'success':
+                retested_points.append(f"{fp['label']}({fp.get('reason') or fp.get('error_code')})→补测{retest_lbl}成功")
+            elif retest_lbl and retest_status == 'failed':
+                skipped_points.append(f"{fp['label']}({fp.get('reason') or fp.get('error_code')})→补测{retest_lbl}失败")
+            elif retest_status == 'pending':
+                retested_points.append(f"{fp['label']}→补测{retest_lbl}中")
+            else:
+                skipped_points.append(f"{fp['label']}({fp.get('reason') or fp.get('error_code')})→无可用补测点")
+        parts = []
+        if retested_points:
+            parts.append('补测：' + '；'.join(retested_points))
+        if skipped_points:
+            parts.append('跳过：' + '；'.join(skipped_points))
+        text = ' | '.join(parts) if parts else '跳过/补测：无失败点'
+        return {
+            'failed_count': len(self.failed_points),
+            'primary_failed_count': len(primary_failures),
+            'retested_ok_count': sum(1 for item in items if item['retest_status'] == 'success'),
+            'skipped_count': sum(1 for item in items if item['skipped']),
+            'items': items,
+            'text': text,
+        }
+
     def advance(self, frames, metadata=None):
-        if self.phase == 'center':
-            exposure_us = metadata.get('exposure_us') if isinstance(metadata, dict) else None
-            return self.center(np.median(np.stack(frames), axis=0).astype(np.uint8), exposure_us=exposure_us)
-        if self.phase == 'peak':
-            return self.point_finished(frames[len(frames) // 2])
-        return self.scan(frames)
+        try:
+            if self.phase == 'center':
+                exposure_us = metadata.get('exposure_us') if isinstance(metadata, dict) else None
+                return self.center(np.median(np.stack(frames), axis=0).astype(np.uint8), exposure_us=exposure_us)
+            if self.phase == 'peak':
+                return self.point_finished(frames[len(frames) // 2])
+            return self.scan(frames)
+        except GuardError as exc:
+            if exc.code in SKIPPABLE_POINT_CODES:
+                if exc.code == 'DEPTH-TARGET' and self.ref_xy is None:
+                    raise
+                return self._handle_point_failure(exc)
+            raise
 
     def center(self, frame, exposure_us=None):
         h, w = frame.shape[:2]
@@ -334,8 +457,13 @@ class Session:
         center_xy = pixel_to_module(*uv, self.actual, self.cal)[:2]
         x, y, z = self.actual
         self.center_offset = np.array(center_xy) - (x, y)
+        self.ref_label = target.label
+        self.ref_xy = np.array(self.point_xy, dtype=float)
+        if self.initial_z is None:
+            self.initial_z = z
         if self.label != self.plan[self.point_index]:
             return self.locate(self.plan[self.point_index], z)
+        self.attempted_labels.add(self.label)
         if math.dist(target.ring_uv, uv) > self.cfg['center_tol_px']:
             if self.center_round >= self.cfg['center_max_iter']:
                 raise GuardError('DEPTH-CENTER', '达到居中轮数上限，圆环仍偏离画面中心',
@@ -437,33 +565,38 @@ class Session:
 
     def step_exposure(self, frame, exposure_us):
         """处理自动/手动曝光后的一帧采样；返回 ('set_exposure', us) 或 ('done', coords)。"""
-        crop = frame[self.roi]
-        self.record.roi(crop)
-        stats = roi_brightness(crop)
-        self.live_roi_mean = stats['roi_mean']
-        self.live_roi_p99 = stats['roi_p99']
-        ae = self._ae
-        cur_exp = float(exposure_us) if exposure_us is not None else float(ae['target_us'])
-        if ae['mode'] == 'manual':
-            warn = None
-            if stats['saturated_fraction'] > EXPOSURE_MAX_SATURATED_FRACTION:
-                warn = f"手动曝光 {cur_exp:.0f} µs 下 ROI 饱和像素比例 {stats['saturated_fraction']*100:.2f}% > 0.1%"
-            return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=warn)
-        if ae.get('finalizing'):
-            return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=ae.get('warning'))
+        try:
+            crop = frame[self.roi]
+            self.record.roi(crop)
+            stats = roi_brightness(crop)
+            self.live_roi_mean = stats['roi_mean']
+            self.live_roi_p99 = stats['roi_p99']
+            ae = self._ae
+            cur_exp = float(exposure_us) if exposure_us is not None else float(ae['target_us'])
+            if ae['mode'] == 'manual':
+                warn = None
+                if stats['saturated_fraction'] > EXPOSURE_MAX_SATURATED_FRACTION:
+                    warn = f"手动曝光 {cur_exp:.0f} µs 下 ROI 饱和像素比例 {stats['saturated_fraction']*100:.2f}% > 0.1%"
+                return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=warn)
+            if ae.get('finalizing'):
+                return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=ae.get('warning'))
 
-        ae['candidates'].append({'exposure_us': cur_exp, **stats})
-        next_us, warn = next_auto_exposure(cur_exp, stats, self.cfg)
-        if next_us is None:
-            if warn is None:
-                return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=None)
-            return self._finalize_best_auto(ae, cur_exp, crop, stats, warn)
-        if ae['iter'] >= self.cfg['exposure_max_iter']:
-            base_warn = f"自动曝光在 {self.cfg['exposure_max_iter']} 次调整后未完全达标"
-            return self._finalize_best_auto(ae, cur_exp, crop, stats, base_warn)
-        ae['iter'] += 1
-        ae['target_us'] = next_us
-        return 'set_exposure', next_us
+            ae['candidates'].append({'exposure_us': cur_exp, **stats})
+            next_us, warn = next_auto_exposure(cur_exp, stats, self.cfg)
+            if next_us is None:
+                if warn is None:
+                    return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=None)
+                return self._finalize_best_auto(ae, cur_exp, crop, stats, warn)
+            if ae['iter'] >= self.cfg['exposure_max_iter']:
+                base_warn = f"自动曝光在 {self.cfg['exposure_max_iter']} 次调整后未完全达标"
+                return self._finalize_best_auto(ae, cur_exp, crop, stats, base_warn)
+            ae['iter'] += 1
+            ae['target_us'] = next_us
+            return 'set_exposure', next_us
+        except GuardError as exc:
+            if exc.code in SKIPPABLE_POINT_CODES and self.ref_xy is not None:
+                return 'done', self._handle_point_failure(exc)
+            raise
 
     def _begin_coarse_up(self, crop, z, *, stats=None):
         self._last_up_crop = crop
@@ -521,16 +654,17 @@ class Session:
         if self.label is None and target.label in self.plan:
             self.plan.remove(target.label)
             self.plan.insert(0, target.label)
+            self.plan_slots = {label: idx for idx, label in enumerate(self.plan)}
         if self.label is not None and target.label != self.label:
             raise GuardError('DEPTH-TARGET', f'靶点从 {self.label} 变为 {target.label}',
                              self.where, '检查初始靶点和 PLC XY 到位坐标。')
 
     def locate(self, label, z):
-        delta = self.layout[label] - self.layout[self.label]
-        center_xy = self.center_offset
-        x, y = (float(v) for v in (np.array(self.point_xy) + delta - center_xy))
+        x, y = self._target_camera_xy(label)
         self.reset_point()
         self.label = label
+        self.current_retest_of = self.retest_parent.get(label)
+        self.attempted_labels.add(label)
         return self.move((x, y, z))
 
     def next_step(self):
@@ -670,27 +804,70 @@ class Session:
         if self.steps:
             return self.next_step()
         dof_ratio = self.cfg['dof_ratio']
-        fit = fit_peak(self.scan_rows, primary, self.cfg['peak_method'], self.where, dof_ratio=dof_ratio)
-        comparisons = {primary: fit}
+        fit = None
+        fit_error = None
+        try:
+            fit = fit_peak(self.scan_rows, primary, self.cfg['peak_method'], self.where, dof_ratio=dof_ratio)
+        except GuardError as exc:
+            if exc.code not in ('DEPTH-FIT', 'DEPTH-PEAK-BOUNDARY'):
+                raise
+            fit_error = exc
+        comparisons = {primary: fit if fit is not None else {'failure': fit_error.what, 'error_code': fit_error.code}}
         for metric in METRICS:
             if metric != primary:
                 try:
                     comparisons[metric] = fit_peak(self.scan_rows, metric, self.cfg['peak_method'], self.where, dof_ratio=dof_ratio)
                 except GuardError as exc:
                     comparisons[metric] = {'failure': exc.what}
-        self.fits.append({'repeat': self.repeat, **fit, 'metrics': comparisons})
-        if self.repeat < self.cfg['repeats_per_point']:
+        if fit is not None:
+            self.fits.append({'repeat': self.repeat, **fit, 'metrics': comparisons})
+        else:
+            self.fits.append({
+                'repeat': self.repeat,
+                'failed': True,
+                'error_code': fit_error.code,
+                'failure': fit_error.what,
+                'metrics': comparisons,
+            })
+        failed_fits = [item for item in self.fits if item.get('failed')]
+        ok_fits = [item for item in self.fits if not item.get('failed')]
+        repeats_target = self.cfg['repeats_per_point']
+        if repeats_target == 1 and failed_fits:
+            raise fit_error
+        if len(failed_fits) >= 2 or (self.repeat >= repeats_target and len(ok_fits) < 2 and repeats_target >= 2):
+            code = failed_fits[0]['error_code'] if all(f.get('error_code') == failed_fits[0]['error_code'] for f in failed_fits) else 'DEPTH-FIT'
+            reasons = '；'.join(f"#{f['repeat']}:{f['failure']}" for f in failed_fits)
+            raise GuardError(code, f'{self.label} {repeats_target} 次重复中 {len(failed_fits)} 次失败（{reasons}）',
+                             self.where, '检查该靶点清晰度曲线、曝光与扫描范围。')
+        if self.repeat < repeats_target:
             return self.begin_fine()
-        peaks = [item['z_peak'] for item in self.fits]
-        insufficient = [item['repeat'] for item in self.fits if not item.get('quality_ok', True)]
-        covered_dofs = [item['dof_mm'] for item in self.fits if item.get('dof_covered') and item.get('dof_mm') is not None]
-        uncovered_dofs = [item['repeat'] for item in self.fits if not item.get('dof_covered')]
+        peaks = [item['z_peak'] for item in ok_fits]
+        peak_range = max(peaks) - min(peaks)
+        if len(failed_fits) == 1:
+            if len(ok_fits) < 2 or peak_range > self.cfg['repeat_range_tol_mm']:
+                raise GuardError(
+                    'DEPTH-FIT',
+                    f"{self.label} 第 {failed_fits[0]['repeat']} 次拟合失败，其余 {len(ok_fits)} 次峰位极差 "
+                    f"{peak_range:.4f} mm > {self.cfg['repeat_range_tol_mm']:.3f} mm",
+                    self.where,
+                    '检查该靶点对焦重复性与异常曲线。',
+                )
+        insufficient = [item['repeat'] for item in ok_fits if not item.get('quality_ok', True)]
+        covered_dofs = [item['dof_mm'] for item in ok_fits if item.get('dof_covered') and item.get('dof_mm') is not None]
+        uncovered_dofs = [item['repeat'] for item in ok_fits if not item.get('dof_covered')]
+        failed_repeat_details = [
+            {'repeat': item['repeat'], 'code': item.get('error_code'), 'reason': item.get('failure')}
+            for item in failed_fits
+        ]
         self.result = {
             'label': self.label, 'xy': [float(v) for v in self.point_xy], 'fits': self.fits,
             'coarse_fit': self.coarse_fit, 'coarse_dof': self.coarse_dof,
             'coarse_bounds': self.coarse_bounds, 'fine_plan': self.fine_plan,
             'insufficient_repeats': insufficient,
-            'z_peak': statistics.mean(peaks), 'range': max(peaks) - min(peaks),
+            'failed_repeats': [item['repeat'] for item in failed_fits],
+            'failed_repeat_details': failed_repeat_details,
+            'retest_of': self.current_retest_of,
+            'z_peak': statistics.mean(peaks), 'range': peak_range,
             'std': statistics.stdev(peaks) if len(peaks) > 1 else None,
             'dof_mm': statistics.mean(covered_dofs) if covered_dofs else None,
             'dof_range_mm': (max(covered_dofs) - min(covered_dofs)) if len(covered_dofs) >= 2 else None,
@@ -709,6 +886,154 @@ class Session:
         self.phase = 'peak'
         return self.move((*self.camera_xy, self.result['z_peak']))
 
+    def _check_early_fatal_rules(self, *, final=False):
+        if ENABLE_FIRST_TWO_FAIL_ABORT and self.slot_outcomes.get(0) == 'failed' and self.slot_outcomes.get(1) == 'failed':
+            first_two = [
+                f"{fp['label']}（{fp.get('reason') or fp.get('error_code')}）"
+                for fp in self.failed_points
+                if fp.get('retest_of') is None and self.plan_slots.get(fp['label']) in (0, 1)
+            ]
+            detail = '；'.join(first_two) if first_two else '前两个计划点及其补测均失败'
+            raise GuardError(
+                'DEPTH-FIRST-TWO-FAILED',
+                f'最先两个计划点都失败（触发致命条件 a，提前终止）：{detail}',
+                '测点失败跳过规则（规则 a）',
+                '请检查初始 Z0、曝光设置、照明及菲林固定位置后重试。',
+            )
+        if final or (0 in self.slot_outcomes and 1 in self.slot_outcomes):
+            failed_corners = [
+                lbl for lbl in sorted(self.corner_labels)
+                if self.slot_outcomes.get(self.plan_slots.get(lbl)) == 'failed'
+            ]
+            if failed_corners:
+                raise GuardError(
+                    'DEPTH-CORNER-COVERAGE',
+                    f"角点覆盖不足（触发致命条件 c）：角点 {'、'.join(failed_corners)} 及其补测点均失败",
+                    '测点失败跳过规则（规则 c）',
+                    '角点缺失将导致平面拟合只能外推，请检查该角点区域照明、菲林及行程范围。',
+                )
+
+    def _handle_point_failure(self, exc):
+        failed_label = self.label or self.plan[self.point_index]
+        self.attempted_labels.add(failed_label)
+        retest_of = self.current_retest_of
+        slot = self.plan_slots.get(failed_label)
+        xy = self._target_module_xy(failed_label)
+        fail_entry = {
+            'label': failed_label,
+            'xy': [float(v) for v in xy] if xy is not None else None,
+            'status': 'failed',
+            'error_code': exc.code,
+            'reason': exc.what,
+            'where': exc.where,
+            'phase': self.phase,
+            'is_corner': failed_label in self.corner_labels,
+            'retest_of': retest_of,
+            'retest_label': None,
+            'retest_status': None,
+            'exposure_us': self.point_exposure_us,
+            'exposure_mode': self.point_exposure_mode,
+            'roi_mean': self.point_roi_mean,
+            'roi_p99': self.point_roi_p99,
+            'fits': list(self.fits),
+            'coarse_fit': self.coarse_fit,
+            'coarse_bounds': self.coarse_bounds,
+            'fine_plan': self.fine_plan,
+            'arrival': self._build_point_arrival(self.point_arrivals),
+        }
+        self.failed_points.append(fail_entry)
+
+        if retest_of is None:
+            backup = self._select_backup_target(failed_label)
+            if backup is not None:
+                if backup in self.extra:
+                    self.extra.remove(backup)
+                fail_entry['retest_label'] = backup
+                fail_entry['retest_status'] = 'pending'
+                self.retest_parent[backup] = failed_label
+                if slot is not None:
+                    self.plan_slots[backup] = slot
+                self.plan.insert(self.point_index + 1, backup)
+                self.skip_summary = self._build_skip_summary()
+                self.point_index += 1
+                return self.locate(backup, self._next_z())
+            fail_entry['retest_status'] = 'unavailable'
+            if slot is not None:
+                self.slot_outcomes[slot] = 'failed'
+        else:
+            orig = next(
+                (fp for fp in reversed(self.failed_points) if fp['label'] == retest_of and fp.get('retest_of') is None),
+                None,
+            )
+            if orig is not None:
+                orig['retest_status'] = 'failed'
+                orig['retest_reason'] = exc.what
+                orig['retest_error_code'] = exc.code
+            if slot is not None:
+                self.slot_outcomes[slot] = 'failed'
+
+        self.skip_summary = self._build_skip_summary()
+        self._check_early_fatal_rules()
+        self.point_index += 1
+        return self._advance_after_point(self._next_z())
+
+    def _advance_after_point(self, z_next):
+        if self.point_index < len(self.plan):
+            return self.locate(self.plan[self.point_index], z_next)
+        self._check_early_fatal_rules(final=True)
+        min_valid = self.cfg['min_valid_points']
+        if len(self.results) < min_valid:
+            raise GuardError(
+                'DEPTH-INSUFFICIENT-POINTS',
+                f'最终有效测点数 {len(self.results)} < min_valid_points({min_valid})（触发致命条件 b）',
+                '测点失败跳过规则（规则 b）',
+                '有效测点不足，请检查失败测点原因并调整参数后重试。',
+            )
+        self.plane = fit_plane(self.results)
+        tol = self.cfg['plane_tol_mm']
+        avail_extra = [
+            lbl for lbl in self.extra
+            if lbl not in self.attempted_labels and self._in_xy_travel(self._target_camera_xy(lbl))
+        ]
+        slots = max(0, self.cfg['max_points'] - len(self.results))
+        if self.initial_plane is None:
+            self.initial_plane = self.plane
+            if self.plane['max_residual'] > tol:
+                added = avail_extra[:slots]
+                if not added:
+                    raise GuardError(
+                        'DEPTH-PLANE-RESIDUAL',
+                        f"有效点平面最大残差 {self.plane['max_residual']:.4f} mm > plane_tol_mm({tol:.4f} mm)，且无可加测点（触发致命条件 d）",
+                        '平面判定（规则 d）',
+                        '料盘不平且已无可用加测靶点，请检查料盘平整度或行程配置。',
+                    )
+                for lbl in added:
+                    self.extra.remove(lbl)
+                self.plan.extend(added)
+        else:
+            delta = self.plane['max_residual'] - self.initial_plane['max_residual']
+            self.plane['after_extra'] = ('加测后残差下降' if delta < -1e-6 else
+                                         '加测后残差增大' if delta > 1e-6 else '加测后残差不变')
+            if self.plane['max_residual'] > tol:
+                added = avail_extra[:slots]
+                if added:
+                    for lbl in added:
+                        self.extra.remove(lbl)
+                    self.plan.extend(added)
+                else:
+                    raise GuardError(
+                        'DEPTH-PLANE-RESIDUAL',
+                        f"有效点平面最大残差 {self.plane['max_residual']:.4f} mm > plane_tol_mm({tol:.4f} mm)，且已无可加测点（max_points={self.cfg['max_points']}，触发致命条件 d）",
+                        '平面判定（规则 d）',
+                        '料盘平整度超差且已达到最大点数或无剩余可加测点，请检查料盘与各点曲线。',
+                    )
+        if self.point_index < len(self.plan):
+            return self.locate(self.plan[self.point_index], z_next)
+        self.feasibility = repeatability(self.results, self.cfg['repeat_range_tol_mm'])
+        self.dof_summary = dof_summary(self.results, self.cfg['dof_ratio'])
+        self.skip_summary = self._build_skip_summary()
+        return None
+
     def point_finished(self, frame):
         self.record.image(f'{self.label}_peak', frame)
         crop = frame[self.roi]
@@ -717,20 +1042,19 @@ class Session:
         self.live_roi_mean = bright['roi_mean']
         self.live_roi_p99 = bright['roi_p99']
         self.result['peak_image_z'] = self.actual[2]
+        if self.current_retest_of:
+            orig = next(
+                (fp for fp in reversed(self.failed_points)
+                 if fp['label'] == self.current_retest_of and fp.get('retest_of') is None),
+                None,
+            )
+            if orig is not None:
+                orig['retest_status'] = 'success'
+                orig['resolved'] = True
+        slot = self.plan_slots.get(self.label)
+        if slot is not None:
+            self.slot_outcomes[slot] = 'retested_ok' if self.current_retest_of else 'ok'
+        self.skip_summary = self._build_skip_summary()
+        self._check_early_fatal_rules()
         self.point_index += 1
-        if self.point_index == len(self.plan):
-            self.plane = fit_plane(self.results)
-            if self.initial_plane is None:
-                self.initial_plane = self.plane
-                if self.plane['max_residual'] > self.cfg['plane_tol_mm']:
-                    slots = self.cfg['max_points'] - len(self.plan)
-                    self.plan.extend(self.extra[:slots])
-            else:
-                delta = self.plane['max_residual'] - self.initial_plane['max_residual']
-                self.plane['after_extra'] = ('加测后残差下降' if delta < -1e-6 else
-                                             '加测后残差增大' if delta > 1e-6 else '加测后残差不变')
-        if self.point_index == len(self.plan):
-            self.feasibility = repeatability(self.results, self.cfg['repeat_range_tol_mm'])
-            self.dof_summary = dof_summary(self.results, self.cfg['dof_ratio'])
-            return None
-        return self.locate(self.plan[self.point_index], self.result['z_peak'])
+        return self._advance_after_point(self.result['z_peak'])

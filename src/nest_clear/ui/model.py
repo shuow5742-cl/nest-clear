@@ -775,11 +775,45 @@ def depthcal_curve_dof(points, ratio=0.8):
     }
 
 
+def depthcal_skip_summary_text(data):
+    """格式化下针深度标定失败点跳过/补测汇总文本与配色。"""
+    summary = data.get('skip_summary')
+    failed_points = data.get('failed_points') or []
+    results = data.get('results') or []
+    if isinstance(summary, dict) and summary.get('text') and (summary.get('failed_count') or summary.get('items')):
+        skipped_cnt = int(summary.get('skipped_count') or 0)
+        if skipped_cnt > 0:
+            return f"跳过/补测：{summary['text'].replace('跳过：', '')}" if summary['text'].startswith('跳过：') else summary['text'], '#fee2e2', '#b91c1c'
+        return summary['text'], '#fff7ed', '#b45309'
+    if failed_points:
+        retest_map = {r.get('retest_of'): r.get('label') for r in results if r.get('retest_of')}
+        parts = []
+        has_skipped = False
+        for fp in failed_points:
+            if fp.get('retest_of'):
+                continue
+            lbl = fp.get('label') or '—'
+            reason = fp.get('reason') or fp.get('error_code') or '失败'
+            retest_lbl = fp.get('retest_label') or retest_map.get(lbl)
+            retest_status = fp.get('retest_status')
+            if retest_lbl and (retest_status == 'success' or lbl in retest_map):
+                parts.append(f'{lbl}({reason})→补测{retest_lbl}成功')
+            elif retest_lbl and retest_status == 'failed':
+                has_skipped = True
+                parts.append(f'{lbl}({reason})→补测{retest_lbl}失败→跳过')
+            else:
+                has_skipped = True
+                parts.append(f'{lbl}({reason})→跳过')
+        text = '跳过/补测：' + '；'.join(parts)
+        return (text, '#fee2e2', '#b91c1c') if has_skipped else (text, '#fff7ed', '#b45309')
+    return '跳过/补测：无失败点', '#f8fafc', '#475467'
+
+
 def depthcal_latest_dof_text(data):
     """格式化阶段栏旁的当前测点最新景深 DOF（及 FWHM）显示文本。"""
     label = data.get('label')
     results = data.get('results') or []
-    current_fits = data.get('current_fits') or []
+    current_fits = [f for f in (data.get('current_fits') or []) if not f.get('failed')]
     matched = next((r for r in results if r.get('label') == label), None) if label else None
 
     src = None
@@ -790,9 +824,11 @@ def depthcal_latest_dof_text(data):
         tag = f"细扫{src.get('repeat', len(current_fits))}"
         fwhm = src.get('fwhm')
     elif matched and matched.get('fits'):
-        src = matched['fits'][-1]
-        tag = f"细扫{src.get('repeat', len(matched['fits']))}"
-        fwhm = src.get('fwhm')
+        ok_fits = [f for f in matched['fits'] if not f.get('failed')]
+        if ok_fits:
+            src = ok_fits[-1]
+            tag = f"细扫{src.get('repeat', len(ok_fits))}"
+            fwhm = src.get('fwhm')
     else:
         coarse_fit = data.get('coarse_fit') or (matched.get('coarse_fit') if matched else None)
         coarse_dof = data.get('coarse_dof') or (matched.get('coarse_dof') if matched else None)

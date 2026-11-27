@@ -25,7 +25,8 @@ from .model import (EventTail, camcal_progress, command_timeout_message, decode_
                     baseline_preview_display, extract_tooltip_preview,
                     depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout,
                     depthcal_curve_dof, depthcal_latest_dof_text, depthcal_dof_summary_text,
-                    depthcal_point_arrival_text, depthcal_arrival_summary_text, depthcal_exposure_display)
+                    depthcal_point_arrival_text, depthcal_arrival_summary_text, depthcal_exposure_display,
+                    depthcal_skip_summary_text)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -1876,16 +1877,25 @@ class App:
             anchor='w', justify='left', padx=8, pady=3, wraplength=1360,
         )
         self.depth_arrival_summary.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 4))
+        self.depth_skip_summary = tk.Label(
+            table_body, text='跳过/补测：无失败点',
+            bg='#f8fafc', fg='#475467', font=(self.theme.title[0], 10, 'bold'),
+            anchor='w', justify='left', padx=8, pady=2, wraplength=1360,
+        )
+        self.depth_skip_summary.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, 4))
+        table_body.rowconfigure(1, weight=0)
+        table_body.rowconfigure(2, weight=1)
         cols = ('靶点', '模组 XY (mm)', '细扫1 Z', '细扫2 Z', '细扫3 Z', '均值 Z_peak', '极差', '标准差', 'FWHM', 'DOF 均值', 'DOF 极差', 'R²', '到位超差')
         widths = (50, 128, 92, 92, 92, 96, 68, 68, 66, 88, 76, 64, 215)
         self.depth_table = self.table_widget(
             table_body, cols, widths, stretch=cols, height=5,
             anchor='center', heading_anchor='center',
         )
-        self.depth_table.grid(row=1, column=0, sticky='nsew')
+        self.depth_table.grid(row=2, column=0, sticky='nsew')
         self.depth_table.tag_configure('arrival_warn', background='#fef3c7', foreground='#916300')
+        self.depth_table.tag_configure('point_failed', background='#fee2e2', foreground='#b42318')
         depth_scroll = ttk.Scrollbar(table_body, orient='vertical', command=self.depth_table.yview)
-        depth_scroll.grid(row=1, column=1, sticky='ns')
+        depth_scroll.grid(row=2, column=1, sticky='ns')
         self.depth_table.configure(yscrollcommand=depth_scroll.set)
 
     def depth_command(self, name, params=None):
@@ -2006,6 +2016,8 @@ class App:
         self.depth_dof_summary.config(text=dof_sum_text, bg=dof_sum_bg, fg=dof_sum_fg)
         arr_text, arr_bg, arr_fg = depthcal_arrival_summary_text(data)
         self.depth_arrival_summary.config(text=arr_text, bg=arr_bg, fg=arr_fg)
+        skip_text, skip_bg, skip_fg = depthcal_skip_summary_text(data)
+        self.depth_skip_summary.config(text=skip_text, bg=skip_bg, fg=skip_fg)
 
         plane = data.get('plane') or {}
         initial_plane = data.get('initial_plane') or {}
@@ -2028,7 +2040,8 @@ class App:
         })
 
         results = data.get('results') or []
-        table_key = json.dumps(results, ensure_ascii=False, default=str)
+        failed_points = data.get('failed_points') or []
+        table_key = json.dumps([results, failed_points], ensure_ascii=False, default=str)
         if table_key != self.cache.get('depth_table'):
             self.cache['depth_table'] = table_key
             self.depth_table.delete(*self.depth_table.get_children())
@@ -2038,15 +2051,20 @@ class App:
                 fits = item.get('fits') or []
                 p_vals = []
                 for i in range(3):
-                    if i < len(fits) and isinstance(fits[i].get('z_peak'), (int, float)):
-                        suffix = '(点不足)' if fits[i].get('quality_ok') is False else ''
-                        p_vals.append(f"{fits[i]['z_peak']:.4f}{suffix}")
+                    if i < len(fits):
+                        if fits[i].get('failed'):
+                            p_vals.append('失败')
+                        elif isinstance(fits[i].get('z_peak'), (int, float)):
+                            suffix = '(点不足)' if fits[i].get('quality_ok') is False else ''
+                            p_vals.append(f"{fits[i]['z_peak']:.4f}{suffix}")
+                        else:
+                            p_vals.append('—')
                     else:
                         p_vals.append('—')
                 if len(fits) > 3:
                     p_vals[2] += f' (+{len(fits) - 3})'
-                fwhms = [f['fwhm'] for f in fits if isinstance(f.get('fwhm'), (int, float))]
-                r2s = [f['r2'] for f in fits if isinstance(f.get('r2'), (int, float))]
+                fwhms = [f['fwhm'] for f in fits if not f.get('failed') and isinstance(f.get('fwhm'), (int, float))]
+                r2s = [f['r2'] for f in fits if not f.get('failed') and isinstance(f.get('r2'), (int, float))]
                 z_mean = item.get('z_peak')
                 z_rng = item.get('range')
                 z_std = item.get('std')
@@ -2055,14 +2073,17 @@ class App:
                 dof_uncov = int(item.get('dof_uncovered') or 0)
                 if isinstance(dof_mean, (int, float)):
                     dof_mean_txt = f'{dof_mean:.3f}' + (f' ({dof_uncov}未覆盖)' if dof_uncov else '')
-                elif dof_uncov > 0 or fits:
+                elif dof_uncov > 0 or [f for f in fits if not f.get('failed')]:
                     dof_mean_txt = '未覆盖'
                 else:
                     dof_mean_txt = '—'
                 dof_rng_txt = f'{dof_rng:.4f}' if isinstance(dof_rng, (int, float)) else '—'
                 arr_cell, arr_warn = depthcal_point_arrival_text(item)
+                lbl_text = item.get('label') or '—'
+                if item.get('retest_of'):
+                    lbl_text = f"{lbl_text}(补测 {item['retest_of']})"
                 self.depth_table.insert('', 'end', values=(
-                    item.get('label') or '—',
+                    lbl_text,
                     xy_text,
                     *p_vals,
                     f'{z_mean:.4f}' if isinstance(z_mean, (int, float)) else '—',
@@ -2074,6 +2095,25 @@ class App:
                     f'{sum(r2s)/len(r2s):.4f}' if r2s else '—',
                     arr_cell,
                 ), tags=('arrival_warn',) if arr_warn else ())
+            for fp in failed_points:
+                xy = fp.get('xy') or []
+                xy_text = f'({xy[0]:.2f}, {xy[1]:.2f})' if len(xy) >= 2 else '—'
+                lbl_text = f"{fp.get('label') or '—'}(失败)"
+                if fp.get('retest_of'):
+                    lbl_text = f"{fp.get('label') or '—'}(补测 {fp['retest_of']} 失败)"
+                retest_lbl = fp.get('retest_label')
+                if retest_lbl and fp.get('retest_status') == 'success':
+                    action_txt = f'由{retest_lbl}补测'
+                elif retest_lbl and fp.get('retest_status') == 'failed':
+                    action_txt = f'补测{retest_lbl}失败'
+                else:
+                    action_txt = '已跳过'
+                arr_cell, _ = depthcal_point_arrival_text(fp)
+                reason_short = str(fp.get('error_code') or 'FAILED')
+                self.depth_table.insert('', 'end', values=(
+                    lbl_text, xy_text, reason_short, action_txt, '—',
+                    '失败', '—', '—', '—', '—', '—', '—', arr_cell,
+                ), tags=('point_failed',))
 
         self.draw_depthcal_curves(data)
 
@@ -2087,10 +2127,11 @@ class App:
             if lbl not in plan:
                 plan.append(lbl)
         results_by_label = {r.get('label'): r for r in (data.get('results') or []) if r.get('label')}
+        failed_by_label = {fp.get('label'): fp for fp in (data.get('failed_points') or []) if fp.get('label')}
         current_label = data.get('label')
         dof_ratio = float(data.get('dof_ratio') or 0.8)
         current_fits = data.get('current_fits') or []
-        key = (json.dumps([curves, plan, current_label, data.get('results'), current_fits, dof_ratio],
+        key = (json.dumps([curves, plan, current_label, data.get('results'), data.get('failed_points'), current_fits, dof_ratio],
                           ensure_ascii=False, default=str), w, h)
         if self.cache.get('depth_curves') == key:
             return
@@ -2115,18 +2156,25 @@ class App:
         pass_colors = {'1': '#2563eb', '2': '#168448', '3': '#d97706', '4': '#7c3aed', '5': '#0891b2'}
         for label, (x0, y0, x1, y1) in depthcal_subplot_layout(plan, w, h):
             is_current = (label == current_label) and data.get('phase') not in ('idle', 'done', 'failed')
-            border = '#2563eb' if is_current else BORDER
-            c.create_rectangle(x0, y0, x1, y1, outline=border, width=2 if is_current else 1, fill='#fcfcfd')
+            fp = failed_by_label.get(label)
             res = results_by_label.get(label)
+            border = '#b42318' if fp and not res else '#2563eb' if is_current else BORDER
+            c.create_rectangle(x0, y0, x1, y1, outline=border, width=2 if (is_current or (fp and not res)) else 1,
+                               fill='#fff5f5' if (fp and not res) else '#fcfcfd')
             title = f'{label}'
-            if res and isinstance(res.get('z_peak'), (int, float)):
+            if res and res.get('retest_of'):
+                title += f"(补测 {res['retest_of']})"
+            if fp and not res:
+                title += f" 失败({fp.get('error_code') or ''})"
+            elif res and isinstance(res.get('z_peak'), (int, float)):
                 dof_part = (f" DOF={res['dof_mm']:.2f}" if isinstance(res.get('dof_mm'), (int, float))
                             else ' DOF=未覆盖')
                 title += f" 峰={res['z_peak']:.4f} Δ={res.get('range', 0):.4f}{dof_part}"
             elif is_current:
                 title += '  (扫描中)'
+            title_color = '#b42318' if (fp and not res) else '#1d4ed8' if is_current else INK
             c.create_text(x0 + 8, y0 + 5, text=title, anchor='nw',
-                          fill='#1d4ed8' if is_current else INK, font=(self.theme.body[0], 9, 'bold'))
+                          fill=title_color, font=(self.theme.body[0], 9, 'bold'))
 
             series = curves.get(label) or {}
             all_pts = [pt for pts in series.values() for pt in pts if len(pt) >= 2]

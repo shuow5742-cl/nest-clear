@@ -511,3 +511,33 @@ def test_depthcal_auto_page_switch_model():
         '空闲', last_session,
     )
     assert page == '主页'
+
+
+def test_depthcal_skip_summary_and_failed_repeat_dof():
+    from nest_clear.ui.model import depthcal_latest_dof_text, depthcal_skip_summary_text
+
+    ok_txt, ok_bg, _ = depthcal_skip_summary_text({})
+    assert ok_txt == '跳过/补测：无失败点' and ok_bg == '#f8fafc'
+
+    retest_txt, retest_bg, _ = depthcal_skip_summary_text({
+        'failed_points': [{'label': 'T02', 'error_code': 'DEPTH-CONTRAST', 'reason': '对比度不足',
+                           'retest_label': 'T03', 'retest_status': 'success'}],
+        'results': [{'label': 'T03', 'retest_of': 'T02'}],
+    })
+    assert 'T02' in retest_txt and '补测T03成功' in retest_txt and retest_bg == '#fff7ed'
+
+    skip_txt, skip_bg, _ = depthcal_skip_summary_text({
+        'failed_points': [{'label': 'T12', 'error_code': 'DEPTH-FIT', 'reason': '拟合失败',
+                           'retest_label': 'T11', 'retest_status': 'failed'}],
+    })
+    assert 'T12' in skip_txt and '补测T11失败' in skip_txt and '跳过' in skip_txt and skip_bg == '#fee2e2'
+
+    # 某次重复拟合失败时，latest_dof_text 忽略失败重复并展示最近一次有效细扫
+    dof_txt = depthcal_latest_dof_text({
+        'label': 'T02',
+        'current_fits': [
+            {'repeat': 1, 'dof_mm': 1.12, 'fwhm': 2.0, 'dof_covered': True},
+            {'repeat': 2, 'failed': True, 'error_code': 'DEPTH-FIT', 'failure': '拟合失败'},
+        ],
+    })
+    assert '细扫1' in dof_txt and '1.120 mm' in dof_txt

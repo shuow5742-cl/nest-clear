@@ -1074,6 +1074,26 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
     assert len(sent) == 2
     assert ui.depth_exp_status.options['fg'] == app.COLORS['red']
 
+    # C: 失败点标红、补测 Txx 标注、单次重复失败展示、跳过/补测汇总行
+    skip_data, _, _ = depthcal_demo('done')
+    skip_data['results'][0]['fits'][1] = {'repeat': 2, 'failed': True, 'error_code': 'DEPTH-FIT', 'failure': '拟合失败'}
+    skip_data['results'][1]['label'] = 'T04'
+    skip_data['results'][1]['retest_of'] = 'T05'
+    skip_data['failed_points'] = [
+        {'label': 'T05', 'xy': [96.0, 115.0], 'error_code': 'DEPTH-CONTRAST', 'reason': '清晰度变化太小',
+         'retest_label': 'T04', 'retest_status': 'success', 'arrival': {'total': 10, 'anomalies': 0}},
+    ]
+    skip_data['skip_summary'] = {
+        'failed_count': 1, 'primary_failed_count': 1, 'retested_ok_count': 1, 'skipped_count': 0,
+        'text': '补测：T05(清晰度变化太小)→补测T04成功',
+    }
+    ui.update_depthcal({'mode': '空闲', 'depthcal': skip_data})
+    assert ui.depth_table.rows['0']['values'][3] == '失败'
+    assert ui.depth_table.rows['1']['values'][0] == 'T04(补测 T05)'
+    assert ui.depth_table.rows['5']['values'][0] == 'T05(失败)'
+    assert ui.depth_table.rows['5']['tags'] == ('point_failed',)
+    assert 'T05' in ui.depth_skip_summary.options['text'] and 'T04' in ui.depth_skip_summary.options['text']
+
     ui.root.destroy()
 
 

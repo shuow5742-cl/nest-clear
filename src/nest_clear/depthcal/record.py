@@ -110,7 +110,10 @@ class DepthRecord:
     def results(self, session):
         self.write('fits.json', {'metric': session.cfg['metric'], 'method': session.cfg['peak_method'],
                                  'dof_ratio': session.cfg['dof_ratio'],
-                                 'points': session.results, 'feasibility': session.feasibility,
+                                 'points': session.results,
+                                 'failed_points': getattr(session, 'failed_points', []),
+                                 'skip_summary': getattr(session, 'skip_summary', None),
+                                 'feasibility': session.feasibility,
                                  'dof_summary': getattr(session, 'dof_summary', None),
                                  'arrival_summary': getattr(session, 'arrival_summary', None)})
         self.write('plane.json', {'initial': session.initial_plane, 'final': session.plane,
@@ -142,6 +145,8 @@ class DepthRecord:
                 'exposure_restore_error': getattr(session, 'exposure_restore_error', None),
                 'exposure_us': getattr(session, 'exposure_us', None), 'point_exposures': point_exposures,
                 'plan': session.plan,
+                'failed_points': getattr(session, 'failed_points', []),
+                'skip_summary': getattr(session, 'skip_summary', None),
                 'fine_plans': fine_plans,
                 'dof_summary': getattr(session, 'dof_summary', None),
                 'arrival_summary': getattr(session, 'arrival_summary', None),

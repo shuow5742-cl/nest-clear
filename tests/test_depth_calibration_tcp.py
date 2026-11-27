@@ -37,6 +37,9 @@ class FilmCamera(AsyncRequestWorker):
         self.origin = np.array([150., 115.])
         self.actual = (*tuple(self.origin + self.layout[self.primary[0]] + [1., -1.]), -5.)
         self.blank = False
+        self.blank_labels = set()
+        self.flat_labels = set()
+        self.per_label_focus = {}
         self.anomaly = False
         self.offcenter = False
         self.exposure_us = 6000.
@@ -53,6 +56,8 @@ class FilmCamera(AsyncRequestWorker):
                                          cv2.ROTATE_90_COUNTERCLOCKWISE) for label in self.layout}
 
     def focus(self, label):
+        if label in self.per_label_focus:
+            return self.per_label_focus[label]
         return -5.037 + .0005 * self.layout[label][0] + (.05 if self.anomaly and label == self.primary[-1] else 0.)
 
     def execute(self, payload):
@@ -79,6 +84,8 @@ class FilmCamera(AsyncRequestWorker):
             return self.cached[2], {'exposure_us': self.exposure_us}
         x, y, z = self.actual
         label = min(self.layout, key=lambda key: np.linalg.norm(self.origin + self.layout[key] - (x, y)))
+        if label in self.blank_labels:
+            return np.full((420, 420), 220, np.uint8), {'exposure_us': self.exposure_us}
         dx, dy = self.origin + self.layout[label] - (x, y)
         u, v = (260, 210) if self.offcenter else (int(round(210 + 20 * dx)), int(round(210 - 20 * dy)))
         bg = float(self.per_label_background.get(label, self.background_level))
@@ -92,7 +99,8 @@ class FilmCamera(AsyncRequestWorker):
         if 0 <= u - 180 <= 340 and 0 <= v - 180 <= 340:
             marker = np.where(self.markers[label] < 128, fg_val, bg_val).astype(np.uint8)
             image[v - 180:v - 100, u - 180:u - 100] = marker
-        frame = cv2.GaussianBlur(image, (0, 0), math.hypot(.4, 1.5 * (z - self.focus(label))))
+        sigma = 0.6 if label in self.flat_labels else math.hypot(.4, 1.5 * (z - self.focus(label)))
+        frame = cv2.GaussianBlur(image, (0, 0), sigma)
         self.cached = (self.actual, self.exposure_us, frame)
         return frame, {'exposure_us': self.exposure_us}
 
@@ -347,7 +355,7 @@ def test_160_multisite(tcp_rig, anomaly):
     session = None
     for _ in range(1800):
         code, coordinates = rig.exchange(coordinates)
-        if code == 161:
+        if code in (161, 999):
             break
         assert code == 160, rig.events.status.data['depthcal']
         assert coordinates[2] >= rig.cfg.depth_calibration['camera_z_min_mm']
@@ -356,18 +364,24 @@ def test_160_multisite(tcp_rig, anomaly):
         pytest.fail('未完成多点会话')
     assert rig.batch.blackboard.read('mode') == Mode.IDLE
     assert len(session.results) == (9 if anomaly else 5)
-    assert session.feasibility['met']
     assert session.results[0]['fine_plan']['mode'] == 'auto'
     assert len(session.requests) == len(session.replies) == len(rig.writes)
-    assert session.replies[-1] == {'task_id': len(rig.writes), 'func': 161, 'coordinates': {}}
     for result in session.results:
         assert len(result['fits']) == 3
         assert abs(result['z_peak'] - rig.camera.focus(result['label'])) < .01
     if anomaly:
+        # 规则 d：加测至 9 点后平面最大残差仍 > plane_tol_mm 且已无可加测点 -> 回 999
+        assert code == 999
+        assert rig.events.status.data['depthcal']['reason_code'] == 'DEPTH-PLANE-RESIDUAL'
+        assert '规则 d' in rig.events.status.data['depthcal']['where']
         assert session.initial_plane['max_residual'] > .02
         assert session.plane['after_extra'].startswith('加测后残差')
-    else:
-        assert session.plane['tilt_mm_per_100mm'] == pytest.approx(.05, abs=.004)
+        assert session.replies[-1] == {'task_id': len(rig.writes), 'func': 999, 'coordinates': {}}
+        return
+    assert code == 161
+    assert session.feasibility['met']
+    assert session.replies[-1] == {'task_id': len(rig.writes), 'func': 161, 'coordinates': {}}
+    assert session.plane['tilt_mm_per_100mm'] == pytest.approx(.05, abs=.004)
     # 核对 runs/<日期>/depthcal/<会话>/ 全部记录文件与曲线状态
     session_dir = session.record.directory
     assert session_dir.is_dir() and session_dir.parent.name == 'depthcal'
@@ -417,9 +431,9 @@ def test_160_multisite(tcp_rig, anomaly):
 
 
 @pytest.mark.parametrize(('case', 'reason'), [
-    ('missing_limit', 'DEPTH-Z-MIN'), ('blank', 'DEPTH-TARGET'), ('boundary', 'DEPTH-PEAK-BOUNDARY'),
+    ('missing_limit', 'DEPTH-Z-MIN'), ('blank', 'DEPTH-TARGET'), ('boundary', 'DEPTH-FIRST-TWO-FAILED'),
     ('below_limit', 'DEPTH-Z-LIMIT'), ('wrong_request', 'DEPTH-MODE'),
-    ('center_limit', 'DEPTH-CENTER'), ('exposure_change', 'DEPTH-EXPOSURE'),
+    ('center_limit', 'DEPTH-FIRST-TWO-FAILED'), ('exposure_change', 'DEPTH-EXPOSURE'),
     ('abort', 'DEPTH-ABORTED'),
     (170, 'DEPTH-UNIMPLEMENTED'), (171, 'DEPTH-UNIMPLEMENTED'),
     (180, 'DEPTH-UNIMPLEMENTED'), (181, 'DEPTH-UNIMPLEMENTED'),
@@ -459,7 +473,7 @@ def test_160_error(tcp_rig, case, reason):
         rig.camera.actual = (*rig.camera.actual[:2], -4.2)
     elif isinstance(case, int):
         kwargs = {'func': case}
-    for _ in range(30):
+    for _ in range(150):
         code, target = rig.exchange(**kwargs)
         if code == 999:
             break
@@ -824,3 +838,364 @@ def test_160_restore_failure_not_swallowed_and_still_replies_999(tcp_rig):
     err_rows = [e for e in event_rows if e.get('event') == 'error' and e.get('operation') == 'depthcal_restore_exposure']
     assert len(err_rows) == 1
     assert '主相机曝光恢复失败，请重启程序' in err_rows[0]['reason']
+
+
+def test_160_single_repeat_failure_tolerance_and_reject(tmp_path):
+    """单点 3 次重复：1 次失败且余下极差 <= tol -> 有效并记录；极差超限或 >=2 次失败 -> 该点失败触发补测。"""
+    from nest_clear.depthcal.layout import dof_summary, repeatability
+    from nest_clear.depthcal.record import DepthRecord
+    from nest_clear.depthcal.session import Session
+
+    cfg = load_config('config/nest_clear.yaml')
+    cfg = replace(
+        cfg,
+        depth_calibration={**cfg.depth_calibration, 'camera_z_min_mm': -12.0, 'repeats_per_point': 3},
+    )
+    cal = Calibration(
+        np.array([[2000., 0., 210], [0., 2000., 210], [0., 0., 1.]]),
+        np.zeros(5), np.diag([1., -1., -1.]), np.zeros(3), -105,
+    )
+
+    def make_sess(name):
+        from collections import deque
+        ev = EventRecorder(tmp_path / name, run=True)
+        sess = Session(cfg, cal, DepthRecord(ev))
+        sess.record.begin()
+        sess.steps = deque()
+        sess.label = 'T00'
+        sess.ref_label = 'T00'
+        sess.ref_xy = np.array([45.0, 105.0])
+        sess.point_xy = np.array([45.0, 105.0])
+        sess.center_offset = np.array([0.0, 0.0])
+        sess.camera_xy = (45.0, 105.0)
+        sess.initial_z = -5.0
+        sess.actual = (45.0, 105.0, -5.0)
+        sess.roi = np.s_[0:40, 0:40]
+        sess.fine_plan = {
+            'mode': 'auto', 'high_mm': -3.5, 'low_mm': -6.5, 'top_mm': -3.2,
+            'fine_step_mm': 0.1,
+        }
+        sess.overshoot_z = -3.2
+        return sess
+
+    def gauss_rows(peak, *, flat=False):
+        zs = [round(-3.5 - 0.1 * i, 4) for i in range(31)]
+        return [
+            {
+                'label': 'T00', 'pass': 1, 'direction': 'down', 'z_cmd': z, 'z_actual': z,
+                'tenengrad': 0.2 if flat else (0.1 + math.exp(-0.5 * ((z - peak) / 0.5) ** 2)),
+                'laplacian': 0.2 if flat else (0.1 + math.exp(-0.5 * ((z - peak) / 0.5) ** 2)),
+                'brenner': 0.2 if flat else (0.1 + math.exp(-0.5 * ((z - peak) / 0.5) ** 2)),
+            }
+            for z in zs
+        ]
+
+    # 1) 1 次失败（第2次），其余 2 次极差 0.008 <= 0.02 -> 有效并记录 failed_repeats=[2]
+    s1 = make_sess('ok_one_fail')
+    s1.repeat = 1
+    s1.scan_rows = gauss_rows(-5.000)
+    s1.fits.append({'repeat': 1, 'z_peak': -5.000, 'fwhm': 1.2, 'r2': 0.99, 'dof_mm': 0.6, 'dof_covered': True, 'quality_ok': True})
+    s1.repeat = 2
+    s1.phase = 'fine'
+    s1.steps.clear()
+    # 用 _handle_point_failure 触发之前，只跑单步 fit 失败分支
+    import nest_clear.depthcal.session as sess_mod
+    s1.fits.append({'repeat': 2, 'failed': True, 'error_code': 'DEPTH-FIT', 'failure': '模拟拟合失败'})
+    s1.repeat = 3
+    s1.scan_rows = gauss_rows(-5.008)
+    s1.phase = 'fine'
+    s1.steps.clear()
+    # 模拟第 3 次最后一步到达并触发拟合（用高模糊度帧确保边界点清晰度落在尾段）
+    raw_frame = np.full((80, 80), 200, np.uint8)
+    cv2.circle(raw_frame, (20, 20), 10, 20, 3)
+    frame = cv2.GaussianBlur(raw_frame, (0, 0), 8.0)
+    s1.actual = (45.0, 105.0, -6.55)
+    s1.expected = (45.0, 105.0, -6.55)
+    s1.scan_rows = gauss_rows(-5.008)[:-1]
+    coords = s1.advance([frame])
+    assert coords is not None and s1.phase == 'peak'
+    assert s1.result['failed_repeats'] == [2]
+    assert s1.result['z_peak'] == pytest.approx((-5.000 + s1.result['fits'][2]['z_peak']) / 2, abs=1e-6)
+    assert s1.result['range'] <= 0.02
+    feas = repeatability([s1.result], 0.02)
+    assert feas['met'] is True and feas['total_fits'] == 2
+    ds = dof_summary([s1.result], 0.8)
+    assert ds['total_fits'] == 2
+
+    # 2) 1 次失败，但其余 2 次极差 0.035 > 0.02 -> 该点失败并换备用点
+    s2 = make_sess('bad_range')
+    s2.fits = [
+        {'repeat': 1, 'z_peak': -5.000, 'fwhm': 1.2, 'r2': 0.99, 'dof_mm': 0.6, 'dof_covered': True, 'quality_ok': True},
+        {'repeat': 2, 'failed': True, 'error_code': 'DEPTH-FIT', 'failure': '模拟拟合失败'},
+    ]
+    s2.repeat = 3
+    s2.phase = 'fine'
+    s2.steps.clear()
+    s2.actual = (45.0, 105.0, -6.55)
+    s2.expected = (45.0, 105.0, -6.55)
+    s2.scan_rows = gauss_rows(-5.035)[:-1]
+    coords2 = s2.advance([frame])
+    assert coords2 is not None and s2.phase == 'center'
+    assert len(s2.failed_points) == 1 and s2.failed_points[0]['label'] == 'T00'
+    assert s2.label == s2.failed_points[0]['retest_label']
+    assert '极差' in s2.failed_points[0]['reason']
+
+    # 3) >=2 次失败 -> 该点立即失败并换备用点（不跑第 3 次）
+    s3 = make_sess('two_fails')
+    s3.fits = [{'repeat': 1, 'failed': True, 'error_code': 'DEPTH-FIT', 'failure': '第1次失败'}]
+    s3.repeat = 2
+    s3.phase = 'fine'
+    s3.steps.clear()
+    s3.actual = (45.0, 105.0, -6.55)
+    s3.expected = (45.0, 105.0, -6.55)
+    s3.scan_rows = gauss_rows(-5.0, flat=True)[:-1]
+    coords3 = s3.advance([frame])
+    assert coords3 is not None and s3.phase == 'center'
+    assert len(s3.failed_points) == 1 and s3.failed_points[0]['label'] == 'T00'
+    assert s3.label is not None and s3.label != 'T00'
+
+
+def test_160_backup_selection_respects_nearest_unmeasured_and_travel(tmp_path):
+    """补测点选择必须满足：离失败点最近、未测过/未计划、在 depth_calibration.travel 内。"""
+    from nest_clear.depthcal.record import DepthRecord
+    from nest_clear.depthcal.session import Session
+
+    cfg = load_config('config/nest_clear.yaml')
+    cfg = replace(
+        cfg,
+        depth_calibration={
+            **cfg.depth_calibration,
+            'camera_z_min_mm': -12.0,
+            'point_order': ['T00', 'T07', 'T31', 'T24', 'T11'],
+            # 限制 travel 使 T01 (y=105+45=150) 超出 y 上限 140，迫使 T00 选下一最近在行程内的 T08 (x=45+60=105? y=105-45=60? 按V2投影验证)
+            'travel': ((30.0, 200.0), (-15.0, 201.0), (-12.0, 0.0)),
+        },
+    )
+    cal = Calibration(
+        np.array([[2000., 0., 210], [0., 2000., 210], [0., 0., 1.]]),
+        np.zeros(5), np.diag([1., -1., -1.]), np.zeros(3), -105,
+    )
+    sess = Session(cfg, cal, DepthRecord(EventRecorder(tmp_path, run=False)))
+    # 设 ref_label='T11' 位于 (135, 115) 使 T00/T01/T08/T09 均在 travel 内
+    sess.ref_label = 'T11'
+    sess.ref_xy = np.array([135.0, 115.0])
+    sess.center_offset = np.array([0.0, 0.0])
+    sess.attempted_labels = {'T00'}
+    # T00 附近最近的是 T01 和 T08（距离均为 30mm）；先把 T01 标记为已测，应选 T08
+    sess.attempted_labels.add('T01')
+    assert sess._select_backup_target('T00') == 'T08'
+
+    # 若把 T08 的相机 Y 坐标移出 travel.y 下限，则应跳过 T08 选次近在行程内的 T09
+    t08_y = sess._target_camera_xy('T08')[1]
+    sess.travel = ((30.0, 200.0), (t08_y + 1.0, 201.0), (-12.0, 0.0))
+    sess.attempted_labels = {'T00', 'T01'}
+    chosen = sess._select_backup_target('T00')
+    assert chosen == 'T09'
+    assert sess._in_xy_travel(sess._target_camera_xy(chosen))
+
+
+def test_160_skip_retest_161_with_auto_exposure_and_center_skip(tcp_rig):
+    """非致命跳过/补测回 161：单角点失败换最近备用点并自动曝光；中心点及其补测都失败则跳过仍回 161。"""
+    rig = tcp_rig
+    rig.camera.simulate_exposure = True
+    rig.camera.background_level = 180.0
+    rig.cfg.depth_calibration['point_order'] = ['T00', 'T07', 'T31', 'T24', 'T11']
+    # T00 对比度不足 -> 补测 T01（暗，需自动曝光提亮）；T11 与其最近补测 T10/T03/T12 等做对比：让 T00 失败由 T01 补测成功
+    rig.camera.flat_labels = {'T00'}
+    rig.camera.per_label_background = {'T01': 70.0}
+    rig.camera.actual = (*tuple(rig.camera.origin + rig.camera.layout['T00'] + [1., -1.]), -5.)
+
+    coordinates = None
+    session = None
+    for _ in range(2200):
+        code, coordinates = rig.exchange(coordinates)
+        if code == 161:
+            break
+        assert code == 160, rig.events.status.data['depthcal']
+        session = rig.batch.blackboard.read('depth_session')
+    else:
+        pytest.fail('未完成补测 161 会话')
+
+    assert len(session.results) == 5
+    retested = next(r for r in session.results if r['label'] == 'T01')
+    assert retested['retest_of'] == 'T00'
+    assert retested['exposure_us'] > 10000.0  # 补测点也执行了自动曝光
+    assert len(session.failed_points) == 1
+    assert session.failed_points[0]['label'] == 'T00'
+    assert session.failed_points[0]['error_code'] == 'DEPTH-CONTRAST'
+    assert session.failed_points[0]['retest_label'] == 'T01'
+    assert session.failed_points[0]['retest_status'] == 'success'
+
+    session_dir = session.record.directory
+    fits_doc = json.loads((session_dir / 'fits.json').read_text(encoding='utf-8'))
+    rec_doc = json.loads((session_dir / 'session_record.json').read_text(encoding='utf-8'))
+    for doc in (fits_doc, rec_doc, rig.events.status.data['depthcal']):
+        assert doc['failed_points'][0]['label'] == 'T00'
+        assert doc['failed_points'][0]['retest_label'] == 'T01'
+        assert 'T00' in doc['skip_summary']['text'] and 'T01' in doc['skip_summary']['text']
+    # 失败点曲线保留在 curves 与 curves.csv
+    assert 'T00' in rig.events.status.data['depthcal']['curves']
+    assert rig.camera.exposure_us == pytest.approx(6000.0)
+
+
+def test_160_center_and_backup_fail_skips_and_completes_161(tcp_rig):
+    """非致命跳过：中心点 T11 及其补测点都失败时跳过该处，4 个角点有效 (>=4) 仍回 161。"""
+    rig = tcp_rig
+    rig.cfg.depth_calibration['repeats_per_point'] = 1
+    rig.cfg.depth_calibration['point_order'] = ['T00', 'T07', 'T31', 'T24', 'T11']
+    # T11 最近邻居为 T03/T10/T12/T19（均 30mm，按编号选 T03）；令 T11 与 T03 均对比度不足
+    rig.camera.flat_labels = {'T11', 'T03'}
+    rig.camera.actual = (*tuple(rig.camera.origin + rig.camera.layout['T00'] + [1., -1.]), -5.)
+
+    coordinates = None
+    session = None
+    for _ in range(2000):
+        code, coordinates = rig.exchange(coordinates)
+        if code == 161:
+            break
+        assert code == 160, rig.events.status.data['depthcal']
+        session = rig.batch.blackboard.read('depth_session')
+    else:
+        pytest.fail('未完成中心点跳过 161 会话')
+
+    assert len(session.results) == 4
+    assert {r['label'] for r in session.results} == {'T00', 'T07', 'T31', 'T24'}
+    assert session.skip_summary['skipped_count'] == 1
+    assert 'T11' in session.skip_summary['text'] and 'T03' in session.skip_summary['text'] and '跳过' in session.skip_summary['text']
+    session_dir = session.record.directory
+    fits_doc = json.loads((session_dir / 'fits.json').read_text(encoding='utf-8'))
+    rec_doc = json.loads((session_dir / 'session_record.json').read_text(encoding='utf-8'))
+    assert fits_doc['skip_summary']['skipped_count'] == 1
+    assert rec_doc['skip_summary']['skipped_count'] == 1
+
+
+@pytest.mark.parametrize('rule', ['a_first_two', 'b_min_valid', 'c_corner', 'd_plane'])
+def test_160_fatal_rules_999_and_restore_exposure(tmp_path, rule):
+    """致命规则 a/b/c/d 均回 999、诊断写明对应规则，且所有 999 出口均已恢复主相机曝光。"""
+    from autoweaver.sensor.camera.base import CameraConfig
+    from autoweaver.sensor.camera.mock import MockCamera
+    from nest_clear.workers.camera import CameraWorker
+
+    film = FilmCamera()
+    film.simulate_exposure = True
+    film.background_level = 60.0  # 自动曝光调高至 ~19000 µs
+
+    point_order = ['T00', 'T07', 'T31', 'T24', 'T11']
+    min_valid = 4
+    if rule == 'a_first_two':
+        # 前两计划点 T00(补测T01)、T07(补测T06) 均失败
+        film.flat_labels = {'T00', 'T01', 'T07', 'T06'}
+        expected_code = 'DEPTH-FIRST-TWO-FAILED'
+        expected_marker = '规则 a'
+    elif rule == 'b_min_valid':
+        # 4 个角点成功，中心 T11 及其补测 T03 失败，且 min_valid_points=5 -> 有效点 4 < 5
+        min_valid = 5
+        film.flat_labels = {'T11', 'T03'}
+        expected_code = 'DEPTH-INSUFFICIENT-POINTS'
+        expected_marker = '规则 b'
+    elif rule == 'c_corner':
+        # 第 3 个角点 T31 及其补测 T23/T30 失败 -> 角点覆盖不足
+        film.flat_labels = {'T31', 'T23', 'T30'}
+        expected_code = 'DEPTH-CORNER-COVERAGE'
+        expected_marker = '规则 c'
+    else:
+        # d_plane: T11 有 0.05mm 高度异常，加测至 9 点后残差仍 > plane_tol_mm
+        film.per_label_focus = {'T11': -4.95}
+        expected_code = 'DEPTH-PLANE-RESIDUAL'
+        expected_marker = '规则 d'
+
+    class SyntheticMockCamera(MockCamera):
+        def __init__(self):
+            super().__init__(CameraConfig(device_sn='MOCK_FATAL'), width=420, height=420)
+            self.exposure_us = 6000.0
+            self.auto_mode = 2
+            self._cam = SimpleNamespace(
+                ExposureAuto=SimpleNamespace(get=lambda: self.auto_mode, set=lambda v: setattr(self, 'auto_mode', v)),
+                ExposureTime=SimpleNamespace(get=lambda: self.exposure_us, set=lambda v: setattr(self, 'exposure_us', float(v))),
+            )
+            self._gx = SimpleNamespace(GxAutoEntry=SimpleNamespace(OFF=0))
+
+        def snapshot(self):
+            film.actual = self.actual
+            film.exposure_us = self.exposure_us
+            img, _ = film.execute({'stage': 'depthcal'})
+            return np.repeat(img[:, :, None], 3, axis=2)
+
+    mock_cam = SyntheticMockCamera()
+    mock_cam.actual = (*tuple(film.origin + film.layout['T00'] + [1., -1.]), -5.)
+    worker = CameraWorker('mock', 'MOCK_FATAL', mock_cam, exposure_us=6000.0)
+    worker.open()
+    mock_cam.exposure_us = 6000.0
+    mock_cam.auto_mode = 2
+    worker.readback['exposure_us'] = 6000.0
+
+    cfg = load_config('config/nest_clear.yaml')
+    settings = {
+        **cfg.depth_calibration,
+        'camera_z_min_mm': -7.0,
+        'coarse_step_mm': .50,
+        'overshoot_mm': .15,
+        'settle_window_s': .0001,
+        'arrival_timeout_s': .05,
+        'frames_per_step': 1,
+        'repeats_per_point': 1,
+        'min_valid_points': min_valid,
+        'point_order': point_order,
+        'travel': ((80, 220), (0, 230), (-15, 0)),
+    }
+    cfg = replace(
+        cfg,
+        depth_calibration=settings,
+        travel=((80, 220), (0, 230), (-15, 0)),
+        tool_offset={**cfg.tool_offset, 'card_thickness_mm': 0.},
+        camera_calibration={**cfg.camera_calibration, 'board_thickness_mm': 0.},
+    )
+    cal = Calibration(
+        np.array([[2000., 0., 210], [0., 2000., 210], [0., 0., 1.]]),
+        np.zeros(5), np.diag([1., -1., -1.]), np.zeros(3), -105,
+    )
+    events = EventRecorder(tmp_path, run=True)
+    events.main_camera = worker
+
+    with FakePLC() as plc:
+        io = PLCClient('127.0.0.1', plc.port, 1, plc.contract)
+        board = WorldBoard()
+        clock = BTClock(board)
+        for w in (PlcWorker(Handshake(io, plc.contract, events=events)), worker):
+            clock.attach_worker(w)
+        batch = build_batch(board, cfg, [], RequestTracker(0), events, calibration=cal)
+        clock.submit(batch)
+
+        def exchange(xyz=None):
+            if xyz is not None:
+                mock_cam.actual = tuple(xyz)
+            plc.set_actual_xyz(mock_cam.actual)
+            task = plc.request(160, tool_id=65535)
+            deadline = time.monotonic() + 6
+            while batch.blackboard.read('committed_func') is None or events.request_pending or plc.io.read('result_id') != task:
+                clock.tick_once()
+                if time.monotonic() > deadline:
+                    pytest.fail(f'未收到 Task_ID={task} 回应')
+                time.sleep(.00015)
+            code = plc.io.read('reply_func')
+            return code, plc.io.read_real32_block(40942, 3) if code == 160 else None
+
+        try:
+            target = None
+            for _ in range(1800):
+                code, target = exchange(target)
+                if code == 999:
+                    break
+                assert code == 160
+            else:
+                pytest.fail(f'规则 {rule} 未触发 999')
+            assert batch.blackboard.read('mode') == Mode.IDLE
+            diag = events.status.data['depthcal']
+            assert diag['reason_code'] == expected_code
+            assert expected_marker in diag['where'] or expected_marker in diag['what']
+            # 主相机曝光与 ExposureAuto 必须在 999 出口恢复
+            assert mock_cam.exposure_us == pytest.approx(6000.0)
+            assert mock_cam.auto_mode == 2
+        finally:
+            clock.shutdown()
+            io.close()

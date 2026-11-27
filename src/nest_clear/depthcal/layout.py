@@ -32,6 +32,17 @@ def film_layout():
     return {label: np.array([-y, x]) for label, (x, y) in card.items()}, primary, extra
 
 
+def corner_labels_for_plan(layout, plan):
+    """从初始计划点中识别四个角点（若不足 5 点则全部视为角点，5 点时排除最靠近中心者）。"""
+    valid = [lbl for lbl in (plan or ()) if lbl in layout]
+    if len(valid) < 5:
+        return set(valid)
+    pts = np.array([layout[lbl] for lbl in valid], dtype=float)
+    center = pts.mean(axis=0)
+    center_lbl = min(valid, key=lambda lbl: (float(np.linalg.norm(layout[lbl] - center)), lbl))
+    return {lbl for lbl in valid if lbl != center_lbl}
+
+
 def fit_plane(results):
     xy = np.array([result['xy'] for result in results])
     z = np.array([result['z_peak'] for result in results])
@@ -56,9 +67,11 @@ def repeatability(results, threshold):
         f"{result['label']}#{fit['repeat']}"
         for result in results
         for fit in (result.get('fits') or [])
-        if not fit.get('quality_ok', True)
+        if not fit.get('failed') and not fit.get('quality_ok', True)
     ]
-    total_fits = sum(len(result.get('fits') or []) for result in results)
+    total_fits = sum(
+        1 for result in results for fit in (result.get('fits') or []) if not fit.get('failed')
+    )
     return {
         'max_range': max_range,
         'max_std': max_std,
@@ -80,11 +93,14 @@ def dof_summary(results, dof_ratio):
         f"{r['label']}#{fit['repeat']}"
         for r in results
         for fit in (r.get('fits') or [])
-        if fit.get('dof_covered') is False
+        if not fit.get('failed') and fit.get('dof_covered') is False
     ]
-    total_fits = sum(len(r.get('fits') or []) for r in results)
+    total_fits = sum(
+        1 for r in results for fit in (r.get('fits') or []) if not fit.get('failed')
+    )
     covered_fits = sum(
-        1 for r in results for fit in (r.get('fits') or []) if fit.get('dof_covered') is True
+        1 for r in results for fit in (r.get('fits') or [])
+        if not fit.get('failed') and fit.get('dof_covered') is True
     )
     return {
         'dof_ratio': float(dof_ratio),
