@@ -4,13 +4,15 @@ import logging
 import os
 import threading
 import time
+from nest_clear.depthcal.exposure import load_depthcal_exposure
 from nest_clear.paths import main_status_file
 
 log = logging.getLogger(__name__)
 class MainStatus:
     def __init__(self, root):
         self.path = main_status_file(root); self.lock = threading.Lock(); self.last = 0; self.timer = None
-        self.data = {'pid':os.getpid(), 'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'recent_replies':[], 'picking':{}, 'camcal':{}, 'tooltip':{}, 'tooloffset':{}, 'pickacc':{}, 'depthcal':{}, 'baseline':{}, 'command_seq':0}
+        exp_state = load_depthcal_exposure(root)
+        self.data = {'pid':os.getpid(), 'mode':'空闲', 'task_id':None, 'request_func':None, 'last_reply_func':None, 'last_reply_time':None, 'recent_replies':[], 'picking':{}, 'camcal':{}, 'tooltip':{}, 'tooloffset':{}, 'pickacc':{}, 'depthcal':{'exposure_mode': exp_state['mode'], 'manual_exposure_us': exp_state['manual_exposure_us']}, 'baseline':{}, 'command_seq':0}
         self.write()
     def write(self):
         try:
@@ -58,6 +60,16 @@ class MainStatus:
                         d['tooloffset'].pop(key, None)
                 d['tooloffset'].update(row)
             if e == 'pickacc_state': d['pickacc'].update(row)
+            if e == 'depthcal_exposure_state':
+                depth = dict(d.get('depthcal') or {})
+                for key in ('exposure_mode', 'manual_exposure_us', 'exposure_error',
+                            'exposure_command_message', 'exposure_pending_next_point',
+                            'exposure_command_seq', 'exposure_min_us', 'exposure_max_us'):
+                    if key in row:
+                        depth[key] = row[key]
+                d['depthcal'] = depth
+            if e == 'depthcal_exposure_warning':
+                d.setdefault('depthcal', {})['exposure_warning'] = row.get('what')
             if e == 'depthcal_state':
                 depth = d['depthcal']
                 curves = depth.get('curves', {}) if row.get('session') == depth.get('session') else {}
@@ -65,7 +77,11 @@ class MainStatus:
                 if sample:
                     points = curves.setdefault(sample['label'], {}).setdefault(str(sample['pass']), [])
                     points.append([sample['z_actual'], sample[row['metric']]])
-                d['depthcal'] = {**row, 'curves': curves}
+                merged = {**row, 'curves': curves}
+                for key in ('exposure_command_message', 'exposure_error', 'exposure_command_seq', 'exposure_pending_next_point'):
+                    if key not in merged and key in depth:
+                        merged[key] = depth[key]
+                d['depthcal'] = merged
             if e == 'depthcal_abort_requested':
                 d['depthcal'].update(abort_requested=True, message='已放弃，下一个 PLC 请求将回 999')
             if e == 'baseline_state': d['baseline'].update(row)

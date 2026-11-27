@@ -334,9 +334,9 @@ def test_depthcal_model_helpers_and_status(tmp_path):
     from nest_clear.ui.demo import depthcal_demo
     from nest_clear.ui.model import (
         classify_event, depthcal_arrival_summary_text, depthcal_curve_dof,
-        depthcal_dof_summary_text, depthcal_feasibility_text, depthcal_fine_plan_text,
-        depthcal_latest_dof_text, depthcal_point_arrival_text, depthcal_stage_info,
-        depthcal_subplot_layout,
+        depthcal_dof_summary_text, depthcal_exposure_display, depthcal_feasibility_text,
+        depthcal_fine_plan_text, depthcal_latest_dof_text, depthcal_point_arrival_text,
+        depthcal_stage_info, depthcal_subplot_layout,
     )
     from nest_clear.ui.status import MainStatus
     assert depthcal_stage_info({'phase': 'idle'})[0] == '阶段：空闲（等待 PLC 160）'
@@ -433,6 +433,13 @@ def test_depthcal_model_helpers_and_status(tmp_path):
         assert 0 <= x0 < x1 <= 900 and 24 <= y0 < y1 <= 400
 
     st = MainStatus(tmp_path)
+    st.observe({'event': 'depthcal_exposure_state', 'exposure_mode': 'manual', 'manual_exposure_us': 12000.0,
+                'exposure_command_message': '已保存曝光设置'})
+    assert st.data['depthcal']['exposure_mode'] == 'manual'
+    assert st.data['depthcal']['manual_exposure_us'] == 12000.0
+    assert '12000 µs' in depthcal_exposure_display({
+        'current_exposure_us': 12000.0, 'point_exposure_mode': 'manual', 'roi_mean': 102.5, 'roi_p99': 188.0,
+    })
     st.observe({'event': 'depthcal_state', 'session': 's1', 'phase': 'coarse', 'metric': 'tenengrad',
                 'sample': {'label': 'T02', 'pass': 'coarse', 'z_actual': -5.0, 'tenengrad': 0.5}})
     st.observe({'event': 'depthcal_state', 'session': 's1', 'phase': 'fine', 'metric': 'tenengrad',

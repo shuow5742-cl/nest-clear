@@ -95,16 +95,18 @@ class CallWorker(FrameworkCallWorker):
 class WaitRequest(CallWorker):
     """持续读取请求，断线时记录并重试。"""
 
-    def __init__(self, board: Any, tracker: Any, events: EventRecorder, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, board: Any, tracker: Any, events: EventRecorder, clock: Callable[[], float] = time.monotonic, config: Config | None = None) -> None:
         super().__init__(board, "plc", lambda bb: {"operation": "request"}, result_key="poll_result", name="等待新请求")
         self.tracker = tracker
         self.events = events
         self.clock = clock
+        self.config = config
         self.failure_since = None
         self.failures = 0
 
     def on_running(self) -> Status:
         from .tool_offset import reader
+        from .depth_calibration import handle_depthcal_exposure_command
         # 没有挂起的标定请求时，也消费并记录不合时宜的界面命令。
         reader_ctx = type("CommandContext", (), {"events": self.events})()
         accuracy_session = self._blackboard.read("pickaccuracy_session", None)
@@ -113,6 +115,7 @@ class WaitRequest(CallWorker):
         baseline_commands = {'baseline_start', 'baseline_select', 'baseline_measure', 'baseline_manual',
                              'baseline_aux', 'baseline_save', 'baseline_confirm', 'baseline_end'}
         preview_commands = PREVIEW_COMMANDS
+        depth_commands = {'depthcal_exposure'}
         abort_commands = set()
         if accuracy_session:
             abort_commands.add("abort")
@@ -120,7 +123,7 @@ class WaitRequest(CallWorker):
             abort_commands.update(("tooloffset_abort", "abort"))
         if depth_session:
             abort_commands.add("depthcal_abort")
-        command = reader(reader_ctx).poll(baseline_commands | preview_commands | abort_commands)
+        command = reader(reader_ctx).poll(baseline_commands | preview_commands | depth_commands | abort_commands)
         preparation = getattr(self.events, 'tooltip_preparation', None)
         baseline = getattr(self.events, 'baseline_session', None)
         if baseline and baseline.closed:
@@ -150,6 +153,8 @@ class WaitRequest(CallWorker):
             elif name == 'baseline_end' and preparation and preparation.active:
                 for camera in ('front', 'side'):
                     if preparation.enabled[camera]: preparation.command('tooltip_preview', {'camera':camera, 'on':False})
+        if command and command[0] == "depthcal_exposure":
+            handle_depthcal_exposure_command(self.events, self.config, command[1], session=depth_session)
         if command and command[0] == "depthcal_abort":
             depth_session.abort_requested = True
             self.events.emit("depthcal_abort_requested")

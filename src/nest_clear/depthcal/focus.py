@@ -9,6 +9,50 @@ from nest_clear.depth_config import DEFAULTS as DEPTH_DEFAULTS, METRICS
 from nest_clear.guard import GuardError
 
 
+EXPOSURE_TOLERANCE_P99 = 15.0
+EXPOSURE_SATURATION_LEVEL = 250
+EXPOSURE_MAX_SATURATED_FRACTION = 0.001
+
+
+def roi_brightness(image):
+    """计算 ROI 灰度均值、第 99 百分位灰度及饱和像素（>=250）比例。"""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    roi_mean = float(np.mean(gray))
+    roi_p99 = float(np.percentile(gray, 99))
+    maximum = np.max(image, axis=2) if image.ndim == 3 else gray
+    sat_frac = float(np.mean(maximum >= EXPOSURE_SATURATION_LEVEL))
+    return {'roi_mean': roi_mean, 'roi_p99': roi_p99, 'saturated_fraction': sat_frac}
+
+
+def next_auto_exposure(current_us, stats, cfg):
+    """按 ROI p99 线性比例计算下一档曝光；达标返回 (None, None)，触及上下限返回 (None, warning)。"""
+    target = float(cfg['exposure_target_p99'])
+    exp_min = float(cfg['exposure_min_us'])
+    exp_max = float(cfg['exposure_max_us'])
+    cur = float(current_us)
+    p99 = float(stats['roi_p99'])
+    sat = float(stats['saturated_fraction'])
+
+    if abs(p99 - target) <= EXPOSURE_TOLERANCE_P99 and sat <= EXPOSURE_MAX_SATURATED_FRACTION:
+        return None, None
+
+    if sat > EXPOSURE_MAX_SATURATED_FRACTION:
+        if p99 >= EXPOSURE_SATURATION_LEVEL:
+            raw_next = min(cur * 0.6, cur * (target / max(p99, 1.0)))
+        else:
+            raw_next = cur * 0.75
+    elif p99 <= 1.0:
+        raw_next = cur * 4.0
+    else:
+        raw_next = cur * (target / p99)
+
+    clamped = min(max(raw_next, exp_min), exp_max)
+    if abs(clamped - cur) < max(0.5, cur * 1e-3):
+        bound = '上限' if clamped >= exp_max - 1.0 else '下限'
+        return None, f'自动曝光达到{bound} {cur:.0f} µs（ROI p99={p99:.1f}，饱和={sat * 100:.2f}%）'
+    return float(clamped), None
+
+
 def scores(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
     gray = gray.astype(np.float64)

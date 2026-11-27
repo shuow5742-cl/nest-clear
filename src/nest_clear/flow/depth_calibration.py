@@ -6,6 +6,9 @@ import time
 
 from autoweaver.motion_policy.nodes.node import Status
 
+from nest_clear.depthcal.exposure import (
+    load_depthcal_exposure, save_depthcal_exposure, validate_depthcal_exposure,
+)
 from nest_clear.depthcal.record import DepthRecord
 from nest_clear.depthcal.session import Session
 from nest_clear.guard import GuardError, diagnostic
@@ -17,6 +20,43 @@ from .tool_offset import reader
 
 RESERVED_CODES = frozenset((170, 171, 180, 181, 190, 191))
 DEPTH_CODES = RESERVED_CODES | {160}
+
+
+def handle_depthcal_exposure_command(events, config, params, session=None):
+    """处理界面发来的下针深度标定曝光模式/手动值设置命令并持久化到 runs/state。"""
+    cfg = config.depth_calibration if config is not None else None
+    seq = params.get('_seq') if isinstance(params, dict) else None
+    try:
+        mode, manual_val = validate_depthcal_exposure(
+            params.get('mode') if isinstance(params, dict) else None,
+            params.get('manual_exposure_us') if isinstance(params, dict) else None,
+            cfg,
+        )
+    except ValueError as exc:
+        events.emit(
+            'depthcal_exposure_state',
+            exposure_error=str(exc),
+            exposure_command_message=str(exc),
+            exposure_command_seq=seq,
+        )
+        return False
+    save_depthcal_exposure(events.directory, mode, manual_val, seq=seq, clock=events.clock)
+    pending_next = False
+    if session is not None:
+        session.set_desired_exposure(mode, manual_val)
+        pending_next = bool(session.exposure_locked)
+    mode_label = '自动' if mode == 'auto' else f'手动 {manual_val:.0f} µs'
+    msg = f'已保存曝光设置（{mode_label}，下一测点生效）' if pending_next else f'已保存曝光设置（{mode_label}）'
+    events.emit(
+        'depthcal_exposure_state',
+        exposure_mode=mode,
+        manual_exposure_us=manual_val,
+        exposure_error='',
+        exposure_command_message=msg,
+        exposure_pending_next_point=pending_next,
+        exposure_command_seq=seq,
+    )
+    return True
 
 
 class DepthCalibration(DeviceSampling):
@@ -42,6 +82,8 @@ class DepthCalibration(DeviceSampling):
         bb.write('depth_session', None, self.name)
         bb.write('depth_image', None, self.name)
         self.frames = []
+        self.ae_stage = None
+        self.last_capture_meta = None
         self.ctx.events.abort_depthcal = None
         self.ctx.events.depth_reply_committed = None
 
@@ -91,6 +133,15 @@ class DepthCalibration(DeviceSampling):
                     'current_fits': list(session.fits),
                     'dof_summary': getattr(session, 'dof_summary', None),
                     'arrival_summary': getattr(session, 'arrival_summary', None),
+                    'exposure_mode': getattr(session, 'desired_exposure_mode', 'auto'),
+                    'manual_exposure_us': getattr(session, 'desired_manual_exposure_us', None),
+                    'current_exposure_us': getattr(session, 'point_exposure_us', None),
+                    'point_exposure_mode': getattr(session, 'point_exposure_mode', None),
+                    'roi_mean': getattr(session, 'live_roi_mean', None),
+                    'roi_p99': getattr(session, 'live_roi_p99', None),
+                    'exposure_warning': getattr(session, 'point_exposure_warning', None),
+                    'exposure_min_us': session.cfg.get('exposure_min_us'),
+                    'exposure_max_us': session.cfg.get('exposure_max_us'),
                     'session': session.record.directory.name, 'sample': session.last_sample,
                     'abort_requested': session.abort_requested}
             session.last_sample = None
@@ -154,6 +205,8 @@ class DepthCalibration(DeviceSampling):
         self.arrival_started = None
         self.frames = []
         self.capturing = False
+        self.ae_stage = None
+        self.last_capture_meta = None
         self.publish()
         return Status.RUNNING
 
@@ -208,14 +261,57 @@ class DepthCalibration(DeviceSampling):
                         'depth_image')
         return Status.RUNNING
 
+    def _start_set_exposure(self, target_us):
+        self.ae_stage = 'setting'
+        self.capturing = True
+        self.start_call(
+            'camera',
+            {'stage': 'depthcal', 'operation': 'set_exposure', 'exposure_us': float(target_us),
+             'task_id': self._blackboard.read('task_id')},
+            'depth_exposure_res',
+        )
+        return Status.RUNNING
+
+    def _start_ae_capture(self):
+        self.ae_stage = 'capturing'
+        self.capturing = True
+        self.start_call('camera', {'stage': 'depthcal', 'task_id': self._blackboard.read('task_id')},
+                        'depth_image')
+        return Status.RUNNING
+
     def on_running(self):
         bb = self._blackboard
         session = bb.read('depth_session', None)
         if session is None:
             return self.fail('下针深度标定会话已中断')
         try:
-            if reader(self.ctx).poll({'depthcal_abort'}, defer_unallowed=True):
+            cmd = reader(self.ctx).poll({'depthcal_abort', 'depthcal_exposure'}, defer_unallowed=True)
+            if cmd and cmd[0] == 'depthcal_abort':
                 return self.abort()
+            if cmd and cmd[0] == 'depthcal_exposure':
+                handle_depthcal_exposure_command(self.ctx.events, self.ctx.config, cmd[1], session=session)
+                self.publish()
+            if self.ae_stage is not None:
+                status = self.tick_call()
+                if status == Status.RUNNING:
+                    return status
+                if status == Status.FAILURE:
+                    return self.fail(bb.read('error'))
+                if self.ae_stage == 'setting':
+                    return self._start_ae_capture()
+                image, metadata = bb.read('depth_image')
+                exp_val = metadata.get('exposure_us') if isinstance(metadata, dict) else None
+                op, val = session.step_exposure(image, exp_val)
+                if op == 'set_exposure':
+                    self.publish()
+                    return self._start_set_exposure(val)
+                self.ae_stage = None
+                self.capturing = False
+                self.frames = []
+                if val is not None:
+                    return self.move_reply(val)
+                session.record.results(session)
+                return self.reply(161)
             if not self.capturing:
                 settled = self.settle(session.expected)
                 if settled is None:
@@ -233,20 +329,23 @@ class DepthCalibration(DeviceSampling):
             if status == Status.FAILURE:
                 return self.fail(bb.read('error'))
             image, metadata = bb.read('depth_image')
-            exposure = metadata.get('exposure_us')
-            if exposure is not None:
-                previous = getattr(session, 'exposure_us', exposure)
-                if not math.isclose(exposure, previous, rel_tol=1e-6):
-                    raise GuardError('DEPTH-EXPOSURE', f'扫描曝光从 {previous} 变为 {exposure} µs',
+            self.last_capture_meta = metadata if isinstance(metadata, dict) else {}
+            exposure = self.last_capture_meta.get('exposure_us')
+            if session.exposure_locked and exposure is not None and session.point_exposure_us is not None:
+                if not math.isclose(exposure, session.point_exposure_us, rel_tol=1e-6):
+                    raise GuardError('DEPTH-EXPOSURE',
+                                     f'扫描曝光从 {session.point_exposure_us} 变为 {exposure} µs',
                                      session.where, '检查相机固定曝光及光照后重试。')
-                session.exposure_us = exposure
             self.frames.append(image)
             if len(self.frames) < session.frame_count:
                 return self.capture()
             if session.phase == 'peak' and session.point_index + 1 == len(session.plan):
                 self.publish('plane', message='平面判定')
-            coords = session.advance(self.frames)
+            coords = session.advance(self.frames, metadata=self.last_capture_meta)
             self.frames = []
+            if session.phase == 'exposure':
+                self.publish()
+                return self._start_set_exposure(coords)
             if coords is not None:
                 return self.move_reply(coords)
             session.record.results(session)

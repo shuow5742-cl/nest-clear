@@ -39,6 +39,37 @@ def test_default_config_z_min_is_minus_12():
     assert cfg.depth_calibration['coarse_max_span_mm'] is None
     assert cfg.depth_calibration['dof_ratio'] == 0.8
     assert cfg.depth_calibration['arrival_timeout_s'] == 2.0
+    assert cfg.depth_calibration['exposure_mode'] == 'auto'
+    assert cfg.depth_calibration['manual_exposure_us'] is None
+    assert cfg.depth_calibration['exposure_target_p99'] == 190.0
+    assert cfg.depth_calibration['exposure_max_iter'] == 5
+    assert cfg.depth_calibration['exposure_min_us'] == 100.0
+    assert cfg.depth_calibration['exposure_max_us'] == 200000.0
+
+
+def test_depth_exposure_config_and_persistence(tmp_path):
+    from nest_clear.depthcal.exposure import load_depthcal_exposure, save_depthcal_exposure, validate_depthcal_exposure
+
+    raw = yaml.safe_load(Path('config/nest_clear.yaml').read_text(encoding='utf-8'))
+    for bad_fields in (
+        {'exposure_mode': 'invalid'},
+        {'manual_exposure_us': 50.0},
+        {'exposure_target_p99': 252.0},
+        {'exposure_min_us': 10000.0, 'exposure_max_us': 5000.0},
+    ):
+        bad = {**raw, 'depth_calibration': {**raw['depth_calibration'], **bad_fields}}
+        p_bad = tmp_path / 'bad_exp.yaml'
+        p_bad.write_text(yaml.safe_dump(bad), encoding='utf-8')
+        with pytest.raises(GuardError, match='depth_calibration'):
+            load_config(p_bad, require_tools=False)
+
+    assert load_depthcal_exposure(tmp_path) == {'mode': 'auto', 'manual_exposure_us': None}
+    mode, val = validate_depthcal_exposure('manual', '12500')
+    assert mode == 'manual' and val == 12500.0
+    save_depthcal_exposure(tmp_path, mode, val, seq=7)
+    assert load_depthcal_exposure(tmp_path) == {'mode': 'manual', 'manual_exposure_us': 12500.0}
+    with pytest.raises(ValueError, match='手动模式下'):
+        validate_depthcal_exposure('manual', None)
 
 
 def test_arrival_timeout_config_validation(tmp_path):

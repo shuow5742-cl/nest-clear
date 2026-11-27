@@ -37,6 +37,11 @@ def tooltip_preview_file(root: str | Path) -> Path:
     return Path(root) / 'state' / 'tooltip_preview.json'
 
 
+def depthcal_exposure_file(root: str | Path) -> Path:
+    """返回下针深度标定曝光模式与手动曝光值持久化文件路径。"""
+    return Path(root) / 'state' / 'depthcal_exposure.json'
+
+
 def live_image_file(root: str | Path, name: str = 'latest') -> Path:
     allowed = {
         'latest', 'preview_latest', 'camcal_latest', 'tooloffset_latest', 'tooloffset_crop',

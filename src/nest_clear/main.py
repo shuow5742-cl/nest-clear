@@ -296,6 +296,15 @@ class Application:
             from nest_clear.flow.pick_accuracy import existing as accuracy_existing
             accuracy = accuracy_existing(SimpleNamespace(config=config), Path(config.tool_calibration.directory) / 'pick_compensation.yaml', metadata['calibration_sha256'])
             self.events.emit('pickacc_state', phase='idle', message='等待 PLC 请求', existing=accuracy)
+            from nest_clear.depthcal.exposure import load_depthcal_exposure
+            depth_exp = load_depthcal_exposure(self.events.directory, config.depth_calibration)
+            self.events.emit(
+                'depthcal_exposure_state',
+                exposure_mode=depth_exp['mode'],
+                manual_exposure_us=depth_exp['manual_exposure_us'],
+                exposure_min_us=config.depth_calibration.get('exposure_min_us'),
+                exposure_max_us=config.depth_calibration.get('exposure_max_us'),
+            )
             from nest_clear.baseline.session import BaselineSession, publish_existing_baselines, settings as baseline_settings
             baseline_config = baseline_settings(ROOT / 'config/tooltip_baseline.yaml')
             def start_baseline():
@@ -384,6 +393,15 @@ class Application:
             if gate.paused():
                 # 用户裁决：PC 对每个 PLC 请求都必须应答。已接收的请求暂停期间照常完成并应答；暂停期间不接收下一请求。
                 events = getattr(self, "events", None)
+                if events is not None:
+                    from nest_clear.flow.depth_calibration import handle_depthcal_exposure_command
+                    from nest_clear.flow.tool_offset import reader
+                    depth_cmd = reader(type('CommandContext', (), {'events': events})()).poll(
+                        {'depthcal_exposure'}, defer_unallowed=True
+                    )
+                    if depth_cmd:
+                        session = self.handle.batch.blackboard.read('depth_session', None) if self.handle is not None else None
+                        handle_depthcal_exposure_command(events, self.config, depth_cmd[1], session=session)
                 if not (events and events.request_pending):
                     return
         if self.handle is None or self.handle.result is not None:

@@ -51,7 +51,7 @@ def build_tree(ctx: FlowContext, branches: Mapping[int, Branch] | None = None) -
     )
     iteration = Sequence(
         [
-            WaitRequest(ctx.board, ctx.tracker, ctx.events),
+            WaitRequest(ctx.board, ctx.tracker, ctx.events, config=ctx.config),
             build_dispatch(ctx, branches),
             Sequence([reply, CommitReply(ctx.events, ctx)], name="统一应答出口"),
         ],

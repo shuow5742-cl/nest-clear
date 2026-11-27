@@ -14,6 +14,7 @@ from tkinter import font as tkfont, ttk, messagebox
 
 from PIL import Image, ImageGrab, ImageTk
 
+from nest_clear.depthcal.exposure import validate_depthcal_exposure
 from nest_clear.paths import live_image_file, main_status_file, supervisor_state_file, ui_command_file, tooltip_preview_file
 from .model import (EventTail, camcal_progress, decode_status, display_time, duration,
                     read_json, status_indicators, parent_process_row, child_process_row, tooltip_progress, preview_controls, edge_corner_label,
@@ -24,7 +25,7 @@ from .model import (EventTail, camcal_progress, decode_status, display_time, dur
                     baseline_preview_display, extract_tooltip_preview,
                     depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout,
                     depthcal_curve_dof, depthcal_latest_dof_text, depthcal_dof_summary_text,
-                    depthcal_point_arrival_text, depthcal_arrival_summary_text)
+                    depthcal_point_arrival_text, depthcal_arrival_summary_text, depthcal_exposure_display)
 
 COLORS = {'green': '#168448', 'yellow': '#916300', 'red': '#b42318',
           'gray': '#85909f', 'blue': '#2563eb'}
@@ -1767,25 +1768,54 @@ class App:
                                         font=self.theme.mono, padx=8, pady=2)
         self.depth_fine_info.grid(row=0, column=1, sticky='w')
 
+        expbar = tk.Frame(head, bg=WHITE)
+        expbar.grid(row=2, column=0, sticky='ew', pady=(4, 0))
+        tk.Label(expbar, text='曝光：', bg=WHITE, fg=MUTED, font=self.theme.body).grid(row=0, column=0, sticky='w')
+        self.depth_exp_mode = 'auto'
+        self.depth_exp_user_dirty = False
+        self._depth_exp_synced = None
+        self.depth_exp_auto_btn = tk.Button(
+            expbar, text='◉ 自动', command=lambda: self.select_depth_exposure_mode('auto'),
+            bg='#dbeafe', fg='#1d4ed8', font=self.theme.body, bd=1, relief='sunken', padx=8, pady=1,
+        )
+        self.depth_exp_auto_btn.grid(row=0, column=1, sticky='w', padx=(2, 4))
+        self.depth_exp_manual_btn = tk.Button(
+            expbar, text='○ 手动', command=lambda: self.select_depth_exposure_mode('manual'),
+            bg='#f8fafc', fg=INK, font=self.theme.body, bd=1, relief='raised', padx=8, pady=1,
+        )
+        self.depth_exp_manual_btn.grid(row=0, column=2, sticky='w', padx=(0, 8))
+        tk.Label(expbar, text='手动(µs):', bg=WHITE, fg=MUTED, font=self.theme.body).grid(row=0, column=3, sticky='w')
+        self.depth_exp_entry = ttk.Entry(expbar, width=9, font=self.theme.mono)
+        self.depth_exp_entry.grid(row=0, column=4, sticky='w', padx=(4, 4))
+        self.depth_exp_apply = ttk.Button(expbar, text='应用', command=self.apply_depth_exposure)
+        self.depth_exp_apply.grid(row=0, column=5, sticky='w', padx=(0, 10))
+        self.depth_exp_live = tk.Label(
+            expbar, text='当前曝光：— µs  |  ROI 均值 — / p99 —',
+            bg='#eef2f6', fg=INK, font=self.theme.mono, padx=8, pady=2,
+        )
+        self.depth_exp_live.grid(row=0, column=6, sticky='w', padx=(0, 10))
+        self.depth_exp_status = tk.Label(expbar, text='', bg=WHITE, fg=MUTED, font=self.theme.body)
+        self.depth_exp_status.grid(row=0, column=7, sticky='w')
+
         self.depth_message = tk.Label(head, text='等待 PLC 160 发起料盘多点对焦测试', bg=WHITE, fg=INK,
                                       font=(self.theme.title[0], 13), anchor='w', justify='left', wraplength=1360)
-        self.depth_message.grid(row=2, column=0, sticky='ew', pady=(4, 2))
+        self.depth_message.grid(row=3, column=0, sticky='ew', pady=(4, 2))
         self.depth_failure_detail = tk.Label(head, text='', bg='#fff1f0', fg=COLORS['red'],
                                              font=self.theme.body, anchor='w', justify='left', padx=8, pady=4, wraplength=1360)
-        self.depth_failure_detail.grid(row=3, column=0, sticky='ew', pady=(0, 2))
+        self.depth_failure_detail.grid(row=4, column=0, sticky='ew', pady=(0, 2))
         self.depth_failure_detail.grid_remove()
         self.depth_notice = tk.Label(head, text='', bg='#fff7ed', fg=COLORS['yellow'],
                                      font=self.theme.body, anchor='w', justify='left', padx=8, pady=3, wraplength=1360)
-        self.depth_notice.grid(row=4, column=0, sticky='ew', pady=(0, 2))
+        self.depth_notice.grid(row=5, column=0, sticky='ew', pady=(0, 2))
         self.depth_notice.grid_remove()
         self.depth_feasibility = tk.Label(head, text='可行性结论：等待测点完成后评估（总误差预算 0.05mm，对焦环节约 0.02mm）',
                                           bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 11, 'bold'),
                                           anchor='w', justify='left', padx=8, pady=4, wraplength=1360)
-        self.depth_feasibility.grid(row=5, column=0, sticky='ew')
+        self.depth_feasibility.grid(row=6, column=0, sticky='ew')
         self.depth_dof_summary = tk.Label(head, text='全盘景深（dof_ratio=0.80）：等待测点完成后汇总',
                                           bg='#f8fafc', fg=MUTED, font=(self.theme.title[0], 10, 'bold'),
                                           anchor='w', justify='left', padx=8, pady=3, wraplength=1360)
-        self.depth_dof_summary.grid(row=6, column=0, sticky='ew', pady=(2, 0))
+        self.depth_dof_summary.grid(row=7, column=0, sticky='ew', pady=(2, 0))
 
         curves_body = self.card(self.depth, '清晰度曲线（粗扫灰线 · 细扫彩线 · 竖线=峰位 · 浅蓝=DOF 区间）', 1, 0)
         curves_body.grid_propagate(False)
@@ -1835,7 +1865,38 @@ class App:
         self.depth_table.configure(yscrollcommand=depth_scroll.set)
 
     def depth_command(self, name, params=None):
-        self._send_page_command('depth', name, params)
+        return self._send_page_command('depth', name, params)
+
+    def select_depth_exposure_mode(self, mode, *, user=True):
+        if mode not in ('auto', 'manual'):
+            return
+        self.depth_exp_mode = mode
+        if user:
+            self.depth_exp_user_dirty = True
+        auto_on = mode == 'auto'
+        self.depth_exp_auto_btn.config(
+            text='◉ 自动' if auto_on else '○ 自动',
+            bg='#dbeafe' if auto_on else '#f8fafc',
+            fg='#1d4ed8' if auto_on else INK,
+            relief='sunken' if auto_on else 'raised',
+        )
+        self.depth_exp_manual_btn.config(
+            text='○ 手动' if auto_on else '◉ 手动',
+            bg='#f8fafc' if auto_on else '#dbeafe',
+            fg=INK if auto_on else '#1d4ed8',
+            relief='raised' if auto_on else 'sunken',
+        )
+
+    def apply_depth_exposure(self):
+        raw = self.depth_exp_entry.get().strip() if hasattr(self.depth_exp_entry, 'get') else ''
+        try:
+            mode, manual_val = validate_depthcal_exposure(self.depth_exp_mode, raw or None)
+        except ValueError as exc:
+            self.depth_exp_status.config(text=str(exc), fg=COLORS['red'])
+            return None
+        self.depth_exp_user_dirty = False
+        self.depth_exp_status.config(text='正在应用曝光设置…', fg=INK)
+        return self.depth_command('depthcal_exposure', {'mode': mode, 'manual_exposure_us': manual_val})
 
     def update_depthcal(self, main):
         data = main.get('depthcal') or {}
@@ -1863,8 +1924,29 @@ class App:
         fine_text, fine_notice = depthcal_fine_plan_text(data)
         self.depth_fine_info.config(text=fine_text)
 
-        active = phase in ('center', 'coarse_up', 'coarse_overshoot', 'coarse', 'overshoot', 'fine', 'peak', 'plane') and not self.depth_pending and not data.get('abort_requested')
+        active = phase in ('center', 'exposure', 'coarse_up', 'coarse_overshoot', 'coarse', 'overshoot', 'fine', 'peak', 'plane') and not self.depth_pending and not data.get('abort_requested')
         self.depth_abort.config(state='normal' if active else 'disabled')
+
+        exp_mode = data.get('exposure_mode') or 'auto'
+        manual_us = data.get('manual_exposure_us')
+        if not self.depth_exp_user_dirty and (exp_mode, manual_us) != self._depth_exp_synced:
+            self._depth_exp_synced = (exp_mode, manual_us)
+            self.select_depth_exposure_mode(exp_mode, user=False)
+            if isinstance(manual_us, (int, float)):
+                self.depth_exp_entry.delete(0, 'end')
+                self.depth_exp_entry.insert(0, f'{float(manual_us):g}')
+        self.depth_exp_live.config(text=depthcal_exposure_display(data))
+        exp_err = data.get('exposure_error') or ''
+        exp_warn = data.get('exposure_warning') or ''
+        exp_msg = data.get('exposure_command_message') or ''
+        if exp_err:
+            self.depth_exp_status.config(text=exp_err, fg=COLORS['red'])
+        elif exp_warn:
+            self.depth_exp_status.config(text=exp_warn, fg=COLORS['yellow'])
+        elif exp_msg:
+            self.depth_exp_status.config(text=exp_msg, fg=COLORS['green'])
+        elif not self.depth_pending:
+            self.depth_exp_status.config(text='', fg=MUTED)
 
         default_msg = {
             'idle': '等待 PLC 160 发起料盘多点对焦测试',
@@ -1886,8 +1968,9 @@ class App:
             self.depth_failure_detail.config(text='')
             self.depth_failure_detail.grid_remove()
 
-        if fine_notice:
-            self.depth_notice.config(text='提示：' + fine_notice)
+        notices = [n for n in (fine_notice, exp_warn) if n]
+        if notices:
+            self.depth_notice.config(text='提示：' + '；'.join(notices))
             self.depth_notice.grid()
         else:
             self.depth_notice.config(text='')

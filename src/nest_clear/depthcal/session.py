@@ -11,8 +11,10 @@ from nest_clear.guard import GuardError, format_pose
 from nest_clear.tooloffset.detection import detect
 from nest_clear.tooloffset.session import film_calibration
 from nest_clear.vision.geometry import pixel_to_module
+from .exposure import load_depthcal_exposure
 from .focus import (
-    analyze_coarse_scan, find_side_blur, fit_coarse_fwhm, fit_peak, measure_dof, plan_fine_scan, scores,
+    EXPOSURE_MAX_SATURATED_FRACTION, analyze_coarse_scan, find_side_blur, fit_coarse_fwhm, fit_peak,
+    measure_dof, next_auto_exposure, plan_fine_scan, roi_brightness, scores,
 )
 from .layout import dof_summary, film_layout, fit_plane, repeatability
 
@@ -52,7 +54,16 @@ class Session:
         self.actual = None
         self.all_arrivals = []
         self.arrival_summary = self._build_arrival_summary()
+        exp_state = load_depthcal_exposure(record.events.directory, self.cfg)
+        self.desired_exposure_mode = exp_state['mode']
+        self.desired_manual_exposure_us = exp_state['manual_exposure_us']
+        self.exposure_us = None
         self.reset_point()
+
+    def set_desired_exposure(self, mode, manual_exposure_us):
+        """更新期望曝光设置；若当前点已进入扫描则保持本点锁定，下一测点生效。"""
+        self.desired_exposure_mode = mode
+        self.desired_manual_exposure_us = manual_exposure_us
 
     def reset_point(self):
         self.phase = 'center'
@@ -70,6 +81,16 @@ class Session:
         self.coarse_lower_limited_by = None
         self.coarse_bounds = None
         self._last_up_crop = None
+        self._ae = None
+        self.point_exposure_us = None
+        self.point_exposure_mode = getattr(self, 'desired_exposure_mode', 'auto')
+        self.point_roi_mean = None
+        self.point_roi_p99 = None
+        self.point_roi_sat_frac = None
+        self.point_exposure_warning = None
+        self.live_roi_mean = None
+        self.live_roi_p99 = None
+        self.exposure_locked = False
         self.repeat = 0
         self.coarse_fit = None
         self.coarse_dof = None
@@ -89,6 +110,7 @@ class Session:
     def message(self):
         return {
             'center': f'居中 第 {self.center_round} 轮',
+            'exposure': '测点自动曝光' if self.point_exposure_mode == 'auto' else '应用手动曝光',
             'coarse_up': '粗找 · 上行',
             'coarse_overshoot': '粗扫 · 抬升',
             'coarse': '粗扫 · 下行',
@@ -282,14 +304,15 @@ class Session:
         self.actual = actual_t
         return entry
 
-    def advance(self, frames):
+    def advance(self, frames, metadata=None):
         if self.phase == 'center':
-            return self.center(np.median(np.stack(frames), axis=0).astype(np.uint8))
+            exposure_us = metadata.get('exposure_us') if isinstance(metadata, dict) else None
+            return self.center(np.median(np.stack(frames), axis=0).astype(np.uint8), exposure_us=exposure_us)
         if self.phase == 'peak':
             return self.point_finished(frames[len(frames) // 2])
         return self.scan(frames)
 
-    def center(self, frame):
+    def center(self, frame, exposure_us=None):
         h, w = frame.shape[:2]
         uv = ((w - 1) / 2, (h - 1) / 2)
         targets = detect(frame)
@@ -328,11 +351,125 @@ class Session:
         crop = frame[self.roi]
         self.record.roi(crop)
         self.camera_xy = (x, y)
-        return self._begin_coarse_up(crop, z)
+        return self._prepare_exposure(crop, z, exposure_us)
 
-    def _begin_coarse_up(self, crop, z):
+    def _finish_exposure(self, crop, exposure_us, stats, z, warning=None):
+        self.point_exposure_us = float(exposure_us) if exposure_us is not None else None
+        self.exposure_us = self.point_exposure_us
+        self.point_roi_mean = float(stats['roi_mean'])
+        self.point_roi_p99 = float(stats['roi_p99'])
+        self.point_roi_sat_frac = float(stats['saturated_fraction'])
+        self.point_exposure_warning = warning
+        self.live_roi_mean = self.point_roi_mean
+        self.live_roi_p99 = self.point_roi_p99
+        self.exposure_locked = True
+        self._ae = None
+        if warning:
+            self.record.events.emit(
+                'depthcal_exposure_warning',
+                label=self.label,
+                what=warning,
+                where=self.where,
+                hint='可切换手动曝光或检查光源与光圈。',
+                exposure_us=self.point_exposure_us,
+                roi_mean=self.point_roi_mean,
+                roi_p99=self.point_roi_p99,
+                saturated_fraction=self.point_roi_sat_frac,
+            )
+        return self._begin_coarse_up(crop, z, stats=stats)
+
+    def _prepare_exposure(self, crop, z, exposure_us):
+        mode = self.desired_exposure_mode
+        manual_us = self.desired_manual_exposure_us
+        self.point_exposure_mode = mode
+        stats = roi_brightness(crop)
+        self.live_roi_mean = stats['roi_mean']
+        self.live_roi_p99 = stats['roi_p99']
+
+        if mode == 'manual':
+            if manual_us is not None:
+                target_us = min(max(float(manual_us), float(self.cfg['exposure_min_us'])),
+                                float(self.cfg['exposure_max_us']))
+                self.phase = 'exposure'
+                self._ae = {'mode': 'manual', 'target_us': target_us, 'iter': 0, 'candidates': [], 'z': z}
+                return target_us
+            return self._finish_exposure(
+                crop, exposure_us, stats, z,
+                warning='手动曝光模式未指定数值，沿用当前相机曝光' if exposure_us is not None else None,
+            )
+
+        if exposure_us is None or not math.isfinite(exposure_us) or exposure_us <= 0:
+            return self._finish_exposure(crop, None, stats, z)
+
+        cur_exp = float(exposure_us)
+        next_us, warn = next_auto_exposure(cur_exp, stats, self.cfg)
+        if next_us is None:
+            return self._finish_exposure(crop, cur_exp, stats, z, warning=warn)
+        self.phase = 'exposure'
+        self._ae = {
+            'mode': 'auto',
+            'target_us': next_us,
+            'iter': 1,
+            'z': z,
+            'candidates': [{'exposure_us': cur_exp, **stats}],
+            'finalizing': False,
+        }
+        return next_us
+
+    def _finalize_best_auto(self, ae, cur_exp, crop, stats, base_warn):
+        target = float(self.cfg['exposure_target_p99'])
+        best = min(
+            ae['candidates'],
+            key=lambda c: (c['saturated_fraction'] > EXPOSURE_MAX_SATURATED_FRACTION, abs(c['roi_p99'] - target), c['exposure_us']),
+        )
+        best_exp = float(best['exposure_us'])
+        if abs(best_exp - cur_exp) > max(0.5, cur_exp * 1e-3):
+            ae['finalizing'] = True
+            ae['warning'] = f"{base_warn}，改用最接近值 {best_exp:.0f} µs（ROI p99={best['roi_p99']:.1f}）"
+            ae['target_us'] = best_exp
+            return 'set_exposure', best_exp
+        warn = f"{base_warn}（曝光 {cur_exp:.0f} µs，ROI p99={stats['roi_p99']:.1f}，饱和={stats['saturated_fraction']*100:.2f}%）"
+        return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=warn)
+
+    def step_exposure(self, frame, exposure_us):
+        """处理自动/手动曝光后的一帧采样；返回 ('set_exposure', us) 或 ('done', coords)。"""
+        crop = frame[self.roi]
+        self.record.roi(crop)
+        stats = roi_brightness(crop)
+        self.live_roi_mean = stats['roi_mean']
+        self.live_roi_p99 = stats['roi_p99']
+        ae = self._ae
+        cur_exp = float(exposure_us) if exposure_us is not None else float(ae['target_us'])
+        if ae['mode'] == 'manual':
+            warn = None
+            if stats['saturated_fraction'] > EXPOSURE_MAX_SATURATED_FRACTION:
+                warn = f"手动曝光 {cur_exp:.0f} µs 下 ROI 饱和像素比例 {stats['saturated_fraction']*100:.2f}% > 0.1%"
+            return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=warn)
+        if ae.get('finalizing'):
+            return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=ae.get('warning'))
+
+        ae['candidates'].append({'exposure_us': cur_exp, **stats})
+        next_us, warn = next_auto_exposure(cur_exp, stats, self.cfg)
+        if next_us is None:
+            if warn is None:
+                return 'done', self._finish_exposure(crop, cur_exp, stats, ae['z'], warning=None)
+            return self._finalize_best_auto(ae, cur_exp, crop, stats, warn)
+        if ae['iter'] >= self.cfg['exposure_max_iter']:
+            base_warn = f"自动曝光在 {self.cfg['exposure_max_iter']} 次调整后未完全达标"
+            return self._finalize_best_auto(ae, cur_exp, crop, stats, base_warn)
+        ae['iter'] += 1
+        ae['target_us'] = next_us
+        return 'set_exposure', next_us
+
+    def _begin_coarse_up(self, crop, z, *, stats=None):
         self._last_up_crop = crop
-        self.coarse_up_rows = [{'z_actual': z, **scores(crop)}]
+        bright = stats or roi_brightness(crop)
+        self.coarse_up_rows = [{
+            'z_actual': z, **scores(crop),
+            'exposure_us': self.point_exposure_us,
+            'roi_mean': bright['roi_mean'],
+            'roi_p99': bright['roi_p99'],
+        }]
         self.coarse_upper_blurred = False
         self.coarse_upper_limited_by = None
         self.coarse_lower_limited_by = None
@@ -362,6 +499,9 @@ class Session:
                 'label': self.label, 'pass': 'coarse', 'direction': 'down',
                 'z_cmd': float(seed_row['z_actual']), 'z_actual': float(seed_row['z_actual']),
                 **{key: float(seed_row[key]) for key in METRICS},
+                'exposure_us': seed_row.get('exposure_us', self.point_exposure_us),
+                'roi_mean': seed_row.get('roi_mean', self.live_roi_mean),
+                'roi_p99': seed_row.get('roi_p99', self.live_roi_p99),
             }
             self.scan_rows.append(row)
             self.samples.append(row)
@@ -418,7 +558,16 @@ class Session:
             metrics = [scores(crop) for crop in crops]
             primary = self.cfg['metric']
             midpoint = sorted(range(len(crops)), key=lambda i: metrics[i][primary])[len(crops) // 2]
-            row = {'z_actual': z, **{key: statistics.median(item[key] for item in metrics) for key in METRICS}}
+            bright = roi_brightness(crops[midpoint])
+            self.live_roi_mean = bright['roi_mean']
+            self.live_roi_p99 = bright['roi_p99']
+            row = {
+                'z_actual': z,
+                **{key: statistics.median(item[key] for item in metrics) for key in METRICS},
+                'exposure_us': self.point_exposure_us,
+                'roi_mean': bright['roi_mean'],
+                'roi_p99': bright['roi_p99'],
+            }
             self._last_up_crop = crops[midpoint]
             self.coarse_up_rows.append(row)
             self.record.roi(crops[midpoint])
@@ -451,9 +600,15 @@ class Session:
         metrics = [scores(crop) for crop in crops]
         primary = self.cfg['metric']
         midpoint = sorted(range(len(crops)), key=lambda i: metrics[i][primary])[len(crops) // 2]
+        bright = roi_brightness(crops[midpoint])
+        self.live_roi_mean = bright['roi_mean']
+        self.live_roi_p99 = bright['roi_p99']
         row = {'label': self.label, 'pass': 'coarse' if self.phase == 'coarse' else self.repeat,
                'direction': 'down', 'z_cmd': self.expected[2], 'z_actual': z,
-               **{key: statistics.median(item[key] for item in metrics) for key in METRICS}}
+               **{key: statistics.median(item[key] for item in metrics) for key in METRICS},
+               'exposure_us': self.point_exposure_us,
+               'roi_mean': bright['roi_mean'],
+               'roi_p99': bright['roi_p99']}
         self.scan_rows.append(row)
         self.samples.append(row)
         self.last_sample = row
@@ -538,6 +693,12 @@ class Session:
             'dof_covered_count': len(covered_dofs),
             'dof_uncovered': len(uncovered_dofs),
             'dof_uncovered_repeats': uncovered_dofs,
+            'exposure_us': self.point_exposure_us,
+            'exposure_mode': self.point_exposure_mode,
+            'roi_mean': self.point_roi_mean,
+            'roi_p99': self.point_roi_p99,
+            'saturated_fraction': self.point_roi_sat_frac,
+            'exposure_warning': self.point_exposure_warning,
             'arrival': self._build_point_arrival(self.point_arrivals),
         }
         self.results.append(self.result)
@@ -546,7 +707,11 @@ class Session:
 
     def point_finished(self, frame):
         self.record.image(f'{self.label}_peak', frame)
-        self.record.roi(frame[self.roi])
+        crop = frame[self.roi]
+        self.record.roi(crop)
+        bright = roi_brightness(crop)
+        self.live_roi_mean = bright['roi_mean']
+        self.live_roi_p99 = bright['roi_p99']
         self.result['peak_image_z'] = self.actual[2]
         self.point_index += 1
         if self.point_index == len(self.plan):

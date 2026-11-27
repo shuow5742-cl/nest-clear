@@ -40,6 +40,11 @@ class FilmCamera(AsyncRequestWorker):
         self.anomaly = False
         self.offcenter = False
         self.exposure_us = 6000.
+        self.base_exposure_us = 6000.
+        self.simulate_exposure = False
+        self.background_level = 190.
+        self.per_label_background = {}
+        self.exposure_history = []
         self.cached = None
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.markers = {label: cv2.rotate(cv2.aruco.generateImageMarker(dictionary, int(label[1:]), 80),
@@ -49,6 +54,11 @@ class FilmCamera(AsyncRequestWorker):
         return -5.037 + .0005 * self.layout[label][0] + (.05 if self.anomaly and label == self.primary[-1] else 0.)
 
     def execute(self, payload):
+        if payload.get('operation') == 'set_exposure':
+            self.exposure_us = float(payload['exposure_us'])
+            self.exposure_history.append(self.exposure_us)
+            self.cached = None
+            return None, {'exposure_us': self.exposure_us}
         if self.blank:
             return np.full((420, 420), 220, np.uint8), {}
         if self.cached and self.cached[0] == self.actual and self.cached[1] == self.exposure_us:
@@ -57,12 +67,17 @@ class FilmCamera(AsyncRequestWorker):
         label = min(self.layout, key=lambda key: np.linalg.norm(self.origin + self.layout[key] - (x, y)))
         dx, dy = self.origin + self.layout[label] - (x, y)
         u, v = (260, 210) if self.offcenter else (int(round(210 + 20 * dx)), int(round(210 - 20 * dy)))
-        image = np.full((420, 420), 225, np.uint8)
-        cv2.circle(image, (u, v), 37, 18, 6, cv2.LINE_AA)
-        cv2.line(image, (u - 90, v), (u + 90, v), 18, 2, cv2.LINE_AA)
-        cv2.line(image, (u, v - 90), (u, v + 90), 18, 2, cv2.LINE_AA)
+        bg = float(self.per_label_background.get(label, self.background_level))
+        scale = (self.exposure_us / self.base_exposure_us) if self.simulate_exposure else 1.0
+        bg_val = int(np.clip(round(bg * scale), 0, 255))
+        fg_val = int(np.clip(round(18. * scale), 0, 255))
+        image = np.full((420, 420), bg_val, np.uint8)
+        cv2.circle(image, (u, v), 37, fg_val, 6, cv2.LINE_AA)
+        cv2.line(image, (u - 90, v), (u + 90, v), fg_val, 2, cv2.LINE_AA)
+        cv2.line(image, (u, v - 90), (u, v + 90), fg_val, 2, cv2.LINE_AA)
         if 0 <= u - 180 <= 340 and 0 <= v - 180 <= 340:
-            image[v - 180:v - 100, u - 180:u - 100] = self.markers[label]
+            marker = np.where(self.markers[label] < 128, fg_val, bg_val).astype(np.uint8)
+            image[v - 180:v - 100, u - 180:u - 100] = marker
         frame = cv2.GaussianBlur(image, (0, 0), math.hypot(.4, 1.5 * (z - self.focus(label))))
         self.cached = (self.actual, self.exposure_us, frame)
         return frame, {'exposure_us': self.exposure_us}
@@ -344,11 +359,14 @@ def test_160_multisite(tcp_rig, anomaly):
     assert session_dir.is_dir() and session_dir.parent.name == 'depthcal'
     with (session_dir / 'curves.csv').open(encoding='utf-8', newline='') as f:
         reader = csv.DictReader(f)
-        assert tuple(reader.fieldnames) == ('label', 'pass', 'direction', 'z_cmd', 'z_actual', 'tenengrad', 'laplacian', 'brenner')
+        assert tuple(reader.fieldnames) == (
+            'label', 'pass', 'direction', 'z_cmd', 'z_actual',
+            'tenengrad', 'laplacian', 'brenner', 'exposure_us', 'roi_mean', 'roi_p99',
+        )
         rows = list(reader)
     assert len(rows) == len(session.samples) > 0
     assert all(r['direction'] == 'down' for r in rows)
-    assert all(r[m] for r in rows for m in ('tenengrad', 'laplacian', 'brenner'))
+    assert all(r[m] for r in rows for m in ('tenengrad', 'laplacian', 'brenner', 'exposure_us', 'roi_mean', 'roi_p99'))
     assert len(list((session_dir / 'roi').glob('*.png'))) == len(rows)
     for result in session.results:
         assert (session_dir / f"{result['label']}_center.png").is_file()
@@ -413,6 +431,13 @@ def test_160_error(tcp_rig, case, reason):
             send(rig.root, 'depthcal_abort')
             kwargs = {'xyz': target}
         elif case == 'exposure_change':
+            # 等居中与自动曝光锁定完成后再模拟外部改曝光，验证 DEPTH-EXPOSURE 仍针对本点锁定值生效
+            for _ in range(10):
+                sess = rig.batch.blackboard.read('depth_session')
+                if sess is not None and sess.exposure_locked:
+                    break
+                code, target = rig.exchange(target)
+                assert code == 160
             rig.camera.exposure_us = 8000.
             kwargs = {'xyz': target}
     elif case == 'boundary':
@@ -490,3 +515,124 @@ def test_160_independent_depth_travel_tcp(tmp_path):
         finally:
             clock.shutdown()
             io.close()
+
+
+def test_160_per_point_auto_exposure_dark_saturated_and_clamped(tcp_rig):
+    """合成亮度：偏暗(p99≈60)自动提亮至190±15、过曝自动下调、不同点可不同曝光、触及上限记警告不999。"""
+    rig = tcp_rig
+    rig.camera.simulate_exposure = True
+    # T00 偏暗 (p99≈60), T07 过曝 (p99=255), T31 正常, T24/T11 偏暗
+    rig.camera.per_label_background = {'T00': 60.0, 'T07': 400.0, 'T31': 190.0, 'T24': 95.0, 'T11': 190.0}
+    rig.camera.background_level = 190.0
+    # 设一个刚好让 60->190 达不到而触及上限的测试用例在后半段测，本段先用默认上限 200000 跑完 5 点
+    rig.cfg.depth_calibration['point_order'] = ['T00', 'T07', 'T31', 'T24', 'T11']
+
+    coordinates = None
+    session = None
+    for _ in range(1800):
+        code, coordinates = rig.exchange(coordinates)
+        if code == 161:
+            break
+        assert code == 160, rig.events.status.data['depthcal']
+        session = rig.batch.blackboard.read('depth_session')
+    else:
+        pytest.fail('未完成自动曝光多点会话')
+
+    by_label = {r['label']: r for r in session.results}
+    assert by_label['T00']['exposure_us'] > 12000.0
+    assert 175.0 <= by_label['T00']['roi_p99'] <= 205.0
+    assert by_label['T07']['exposure_us'] < 4500.0
+    assert 175.0 <= by_label['T07']['roi_p99'] <= 205.0
+    assert by_label['T07']['saturated_fraction'] <= 0.001
+    assert by_label['T31']['exposure_us'] == pytest.approx(6000.0, rel=0.05)
+    assert 175.0 <= by_label['T31']['roi_p99'] <= 205.0
+    assert by_label['T00']['exposure_us'] != by_label['T07']['exposure_us']
+
+    # 验证触及曝光上限时记警告并继续（不 999）
+    rig.cfg.depth_calibration['exposure_max_us'] = 10000.0
+    rig.camera.exposure_us = 6000.0
+    rig.camera.per_label_background = {lbl: 60.0 for lbl in rig.camera.layout}
+    coordinates = (*tuple(rig.camera.origin + rig.camera.layout['T00'] + [1., -1.]), -5.)
+    for _ in range(40):
+        code, coordinates = rig.exchange(coordinates)
+        assert code == 160
+        session2 = rig.batch.blackboard.read('depth_session')
+        if session2.exposure_locked and session2.label == 'T00':
+            break
+    else:
+        pytest.fail('未完成触及上限自动曝光')
+    assert session2.point_exposure_us == pytest.approx(10000.0)
+    assert session2.point_exposure_warning and '上限' in session2.point_exposure_warning
+
+
+def test_160_manual_exposure_idle_persist_and_next_point_effect(tcp_rig):
+    """空闲时持久化手动曝光，运行中修改手动曝光在下一测点生效且不触发当前点 DEPTH-EXPOSURE。"""
+    from nest_clear.depthcal.exposure import load_depthcal_exposure
+    from nest_clear.ui.model import classify_event
+
+    rig = tcp_rig
+    rig.camera.simulate_exposure = True
+    rig.camera.background_level = 120.0
+    rig.cfg.depth_calibration['point_order'] = ['T00', 'T07', 'T31', 'T24', 'T11']
+
+    # 空闲时下发手动曝光 10000 µs（先 tick 几拍让 WaitRequest 消费命令）
+    send(rig.root, 'depthcal_exposure', {'mode': 'manual', 'manual_exposure_us': 10000.0})
+    deadline = time.monotonic() + 2.0
+    while load_depthcal_exposure(rig.root)['mode'] != 'manual':
+        rig.plc_worker._board and None
+        # 触发一次 clock tick：通过 WaitRequest 消费命令（发一次 160 即可或检查 persistence）
+        break
+    # 直接通过一次 160 前短暂等待或由首次 160 之前 WaitRequest 消费
+    # 用 FakePLC 不会阻塞 WaitRequest；让 rig.exchange(160) 前先跑几拍无法直接调 clock，因此先测运行中与首次进入前：
+    code, target = rig.exchange()
+    assert code == 160
+    session = rig.batch.blackboard.read('depth_session')
+    # WaitRequest 已在首次 160 之前消费 depthcal_exposure 并持久化
+    assert load_depthcal_exposure(rig.root) == {'mode': 'manual', 'manual_exposure_us': 10000.0}
+    assert session.desired_exposure_mode == 'manual'
+    assert session.desired_manual_exposure_us == pytest.approx(10000.0)
+
+    # 推进直到 T00 完成曝光锁定（10000 µs）
+    for _ in range(30):
+        if session.exposure_locked and session.label == 'T00':
+            break
+        code, target = rig.exchange(target)
+        assert code == 160
+    assert session.exposure_locked and session.point_exposure_us == pytest.approx(10000.0)
+
+    # 在 T00 扫描中途修改手动曝光为 14000 µs -> T00 必须保持 10000 µs，T07 改为 14000 µs
+    send(rig.root, 'depthcal_exposure', {'mode': 'manual', 'manual_exposure_us': 14000.0})
+    t00_done = False
+    t07_locked = False
+    for _ in range(400):
+        code, target = rig.exchange(target)
+        assert code == 160
+        if not t00_done and session.results:
+            t00_done = True
+            assert session.results[0]['label'] == 'T00'
+            assert session.results[0]['exposure_us'] == pytest.approx(10000.0)
+        if session.label == 'T07' and session.exposure_locked:
+            t07_locked = True
+            assert session.point_exposure_us == pytest.approx(14000.0)
+            break
+    assert t00_done and t07_locked
+    assert load_depthcal_exposure(rig.root) == {'mode': 'manual', 'manual_exposure_us': 14000.0}
+    ev = classify_event({'event': 'depthcal_exposure_warning', 'what': '自动曝光达到上限'})
+    assert ev['color'] == 'yellow' and ev['category'] == '标定'
+
+
+def test_camera_worker_set_exposure_operation_used_by_depthcal():
+    """验证 CameraWorker._execute(operation='set_exposure') 复用现有 set_exposure 路径。"""
+    from autoweaver.sensor.camera.base import CameraConfig
+    from autoweaver.sensor.camera.mock import MockCamera
+    from nest_clear.workers.camera import CameraWorker
+
+    worker = CameraWorker('mock', 'MOCK01', MockCamera(CameraConfig(device_sn='MOCK01'), width=128, height=96), exposure_us=6000.0)
+    worker.open()
+    res, meta = worker.execute({'stage': 'depthcal', 'operation': 'set_exposure', 'exposure_us': 15000.0})
+    assert res is None
+    assert meta['exposure_us'] == pytest.approx(15000.0)
+    assert worker.readback['exposure_us'] == pytest.approx(15000.0)
+    frame, fmeta = worker.execute({'stage': 'depthcal', 'task_id': 1})
+    assert frame.shape == (96, 128, 3)
+    assert fmeta['exposure_us'] == pytest.approx(15000.0)

@@ -980,7 +980,7 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
             assert '均值' in ui.depth_dof_summary.options['text'] and '最小' in ui.depth_dof_summary.options['text']
             assert '满足下针深度标定误差预算' in ui.depth_feasibility.options['text']
             assert '0.0502 mm/100mm' in ui.depth_plane_grid.values_data['最大 |残差| / 倾斜']
-            assert '±1.500 mm' in ui.depth_fine_info.options['text']
+            assert '[-6.51, -3.51] mm' in ui.depth_fine_info.options['text']
             assert '0.075 mm' in ui.depth_fine_info.options['text']
             assert not ui.depth_notice.visible
             assert ui.depth_abort.options['state'] == 'disabled'
@@ -989,7 +989,7 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
             assert '到位异常 3 次' in ui.depth_stage.options['text']
             assert len(ui.depth_table.rows) == 2
             assert '细扫1' in ui.depth_dof.options['text']
-            assert '±1.500 mm' in ui.depth_fine_info.options['text']
+            assert '[-6.49, -3.49] mm' in ui.depth_fine_info.options['text']
         elif state == 'failed':
             assert ui.depth_failure_detail.visible
             assert 'DEPTH-PEAK-BOUNDARY' in ui.depth_failure_detail.options['text']
@@ -1040,6 +1040,26 @@ def test_depthcal_page_updates_and_abort(tmp_path, monkeypatch):
     ui.depth_command('depthcal_abort')
     assert sent == [('depthcal_abort', None)]
     assert ui.depth_pending == 1
+
+    # 曝光区交互：自动/手动单选、输入框、应用命令写入（清 pending 模拟 ack）
+    ui.depth_pending = 0
+    ui.depth_exp_entry.get = lambda: '15000'
+    ui.select_depth_exposure_mode('manual')
+    assert '◉ 手动' == ui.depth_exp_manual_btn.options['text']
+    assert '○ 自动' == ui.depth_exp_auto_btn.options['text']
+    ui.apply_depth_exposure()
+    assert sent[-1] == ('depthcal_exposure', {'mode': 'manual', 'manual_exposure_us': 15000.0})
+    assert '18500 µs' in ui.depth_exp_live.options['text']
+    assert '118.4' in ui.depth_exp_live.options['text']
+    assert '191.2' in ui.depth_exp_live.options['text']
+
+    # 手动模式下非法输入只报错不发送命令
+    ui.depth_pending = 0
+    ui.depth_exp_entry.get = lambda: '50'
+    ui.apply_depth_exposure()
+    assert len(sent) == 2
+    assert ui.depth_exp_status.options['fg'] == app.COLORS['red']
+
     ui.root.destroy()
 
 

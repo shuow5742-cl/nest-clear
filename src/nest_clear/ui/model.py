@@ -326,7 +326,7 @@ def status_indicators(s, m, now=None, supervisor_age=None):
         ready = ('gray', ready_text)
     return {'父程序': parent, '主程序': main_indicator, 'PLC 连接': (plc_color, plc_text), '心跳': (hb_color, hb_text), '40932 就绪': ready}
 
-EVENTS = {'arrival_warning','depthcal_arrival_warning','tooltip_settings_warning','tooltip_preview_error','tooltip_exposure_failed','error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
+EVENTS = {'arrival_warning','depthcal_arrival_warning','depthcal_exposure_warning','tooltip_settings_warning','tooltip_preview_error','tooltip_exposure_failed','error','pickacc_failed','tooloffset_failed','tooloffset_quality_warning','camcal_failed','tooltip_failed','supervisor_reply_999','request_abandoned','plc_disconnected','plc_restored','heartbeat_failed','heartbeat_restored','image_dropped','warning'}
 def classify_event(row):
     event = str(row.get('event','')).lower()
     text = ' '.join(str(row.get(k,'')) for k in ('reason_code','code','reason','what','operation','event')).lower()
@@ -336,7 +336,7 @@ def classify_event(row):
     if event not in EVENTS and reply not in (999, 131, 99, 82) and not any(x in text for x in ('readback','回读不一致','采图失败','capture_failed')):
         return None
     category = '父程序' if row.get('process') == 'supervisor' else '标定' if any(x in text for x in ('camcal','tooltip','tooloffset','pickacc','calib','depthcal')) or reply in (82, 99, 131, 152) else '通信' if any(x in text for x in ('plc','heartbeat','readback','回读')) else '相机' if any(x in text for x in ('camera','capture','image','采图')) else '配置' if 'config' in text else '算法'
-    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('arrival_warning','depthcal_arrival_warning','warning','tooltip_settings_warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
+    color = 'green' if 'restored' in event or '恢复' in event else 'yellow' if event in ('arrival_warning','depthcal_arrival_warning','depthcal_exposure_warning','warning','tooltip_settings_warning','tooloffset_quality_warning','request_abandoned','image_dropped') else 'red'
     reason = str(row.get('reason',row.get('message',event)))
     fields = {}
     for line in reason.splitlines():
@@ -518,9 +518,10 @@ def depthcal_stage_info(data):
     if phase == 'plane':
         suffix = f' · 到位异常 {anom} 次' if has_summary else ''
         return f'阶段：平面判定{suffix}', '#e0f2fe', '#0369a1'
-    if phase in ('center', 'coarse_up', 'coarse_overshoot', 'coarse', 'overshoot', 'fine', 'peak'):
+    if phase in ('center', 'exposure', 'coarse_up', 'coarse_overshoot', 'coarse', 'overshoot', 'fine', 'peak'):
         detail = message or {
             'center': '居中',
+            'exposure': '测点自动曝光',
             'coarse_up': '粗找 · 上行',
             'coarse_overshoot': '粗扫 · 抬升',
             'coarse': '粗扫 · 下行',
@@ -531,6 +532,28 @@ def depthcal_stage_info(data):
         suffix = f' · 到位异常 {anom} 次' if has_summary else ''
         return f'阶段：{detail}{suffix}', '#dbeafe', '#1d4ed8'
     return f'阶段：{phase}', '#eef2f6', '#1d2939'
+
+
+def depthcal_exposure_display(data):
+    """格式化当前测点锁定曝光与 ROI 均值/p99 实时显示文本。"""
+    sample = data.get('sample') if isinstance(data.get('sample'), dict) else {}
+    results = data.get('results') or []
+    last_res = results[-1] if results and isinstance(results[-1], dict) else {}
+    cur_exp = data.get('current_exposure_us')
+    if cur_exp is None:
+        cur_exp = sample.get('exposure_us', last_res.get('exposure_us'))
+    roi_mean = data.get('roi_mean')
+    if roi_mean is None:
+        roi_mean = sample.get('roi_mean', last_res.get('roi_mean'))
+    roi_p99 = data.get('roi_p99')
+    if roi_p99 is None:
+        roi_p99 = sample.get('roi_p99', last_res.get('roi_p99'))
+    mode = data.get('point_exposure_mode') or data.get('exposure_mode') or 'auto'
+    mode_tag = '自动' if mode == 'auto' else '手动'
+    exp_txt = f'{float(cur_exp):.0f} µs（{mode_tag}）' if isinstance(cur_exp, (int, float)) else '— µs'
+    mean_txt = f'{float(roi_mean):.1f}' if isinstance(roi_mean, (int, float)) else '—'
+    p99_txt = f'{float(roi_p99):.1f}' if isinstance(roi_p99, (int, float)) else '—'
+    return f'当前曝光：{exp_txt}  |  ROI 均值 {mean_txt} / p99 {p99_txt}'
 
 
 def depthcal_point_arrival_text(item):

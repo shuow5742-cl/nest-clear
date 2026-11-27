@@ -9,7 +9,8 @@ import pytest
 from nest_clear.config import load_config
 from nest_clear.depth_config import DEFAULTS as DEPTH_DEFAULTS
 from nest_clear.depthcal.focus import (
-    analyze_coarse_scan, fit_coarse_fwhm, fit_peak, measure_dof, plan_fine_scan, scores,
+    analyze_coarse_scan, fit_coarse_fwhm, fit_peak, measure_dof, next_auto_exposure,
+    plan_fine_scan, roi_brightness, scores,
 )
 from nest_clear.depthcal.layout import dof_summary, fit_plane, repeatability
 from nest_clear.depthcal.session import ascending, descending
@@ -331,3 +332,25 @@ def test_coarse_blur_search_and_limits_and_config():
     assert loaded.depth_calibration['fine_range_mode'] == 'auto'
     assert loaded.depth_calibration['fine_steps_target'] == 40
     assert loaded.depth_calibration['dof_ratio'] == 0.8
+
+
+def test_roi_brightness_and_next_auto_exposure():
+    cfg = dict(DEPTH_DEFAULTS)
+    dark = np.full((60, 60), 60, np.uint8)
+    dark[:5, :5] = 15
+    st_dark = roi_brightness(dark)
+    assert st_dark['roi_p99'] == pytest.approx(60.0)
+    assert st_dark['saturated_fraction'] == 0.0
+    nxt, warn = next_auto_exposure(6000.0, st_dark, cfg)
+    assert warn is None and nxt == pytest.approx(6000.0 * (190.0 / 60.0))
+
+    ok = np.full((60, 60), 192, np.uint8)
+    nxt_ok, warn_ok = next_auto_exposure(19000.0, roi_brightness(ok), cfg)
+    assert nxt_ok is None and warn_ok is None
+
+    sat = np.full((60, 60), 255, np.uint8)
+    nxt_sat, warn_sat = next_auto_exposure(20000.0, roi_brightness(sat), cfg)
+    assert warn_sat is None and nxt_sat < 20000.0
+
+    nxt_max, warn_max = next_auto_exposure(cfg['exposure_max_us'], st_dark, cfg)
+    assert nxt_max is None and warn_max is not None and '上限' in warn_max

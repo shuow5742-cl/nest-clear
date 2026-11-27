@@ -143,27 +143,32 @@ class CameraWorker(AsyncRequestWorker):
         if node is not None and value is not None:
             node.set(enum_value(value))
 
-    def set_exposure(self, exposure_us: float) -> float:
-        """在无并发采图时设置曝光并回读，失败时抛错。"""
+    def _set_exposure_locked(self, exposure_us: float) -> float:
+        """在已持有 capture_lock 时设置曝光并回读，失败时抛错。"""
         if exposure_us is None or not np.isfinite(exposure_us) or exposure_us <= 0:
             raise ValueError('曝光必须为正的有限数')
+        device = getattr(self.camera, '_cam', None)
+        if device is not None:
+            auto = getattr(device, 'ExposureAuto', None)
+            if auto is not None:
+                auto.set(self.camera._gx.GxAutoEntry.OFF)
+            node = device.ExposureTime
+            node.set(float(exposure_us))
+            actual = float(node.get())
+        else:
+            if hasattr(self.camera, 'set_exposure_time'):
+                self.camera.set_exposure_time(float(exposure_us))
+            self.camera.exposure_us = float(exposure_us)
+            actual = float(self.camera.exposure_us)
+        if abs(actual - exposure_us) > max(0.01, abs(exposure_us) * .001):
+            raise ValueError(f'曝光设置期望 {exposure_us}，实际 {actual}')
+        self.readback['exposure_us'] = actual
+        return actual
+
+    def set_exposure(self, exposure_us: float) -> float:
+        """在无并发采图时设置曝光并回读，失败时抛错。"""
         with self.capture_lock:
-            device = getattr(self.camera, '_cam', None)
-            if device is not None:
-                auto = getattr(device, 'ExposureAuto', None)
-                if auto is not None: auto.set(self.camera._gx.GxAutoEntry.OFF)
-                node = device.ExposureTime
-                node.set(float(exposure_us))
-                actual = float(node.get())
-            else:
-                if hasattr(self.camera, 'set_exposure_time'):
-                    self.camera.set_exposure_time(float(exposure_us))
-                self.camera.exposure_us = float(exposure_us)
-                actual = float(self.camera.exposure_us)
-            if abs(actual - exposure_us) > max(0.01, abs(exposure_us) * .001):
-                raise ValueError(f'曝光设置期望 {exposure_us}，实际 {actual}')
-            self.readback['exposure_us'] = actual
-            return actual
+            return self._set_exposure_locked(exposure_us)
 
     def execute(self, payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         with self.capture_lock:
@@ -190,6 +195,9 @@ class CameraWorker(AsyncRequestWorker):
         try:
             if self.needs_reopen:
                 raise RuntimeError("上次采图超时，相机需要重开")
+            if payload.get("operation") == "set_exposure":
+                actual = self._set_exposure_locked(float(payload["exposure_us"]))
+                return None, {"exposure_us": actual, "settings": self.settings}
             if payload.get("stage") == "depthcal":
                 device = getattr(self.camera, "_cam", None)
                 if device is not None:

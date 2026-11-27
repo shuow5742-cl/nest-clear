@@ -235,10 +235,10 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
 
     def make_coarse(lbl: str, limit: int | None = None):
         z0 = true_peaks[lbl]
-        zs = [-2.0 - 0.2 * i for i in range(26)]
+        zs = [round(-2.0 - 0.5 * i, 2) for i in range(13)]
         if limit is not None:
             zs = zs[:limit]
-        return [[round(z, 3), curve_val(z, z0, amp=0.84, sigma=0.85)] for z in zs]
+        return [[z, curve_val(z, z0, amp=0.84, sigma=0.85)] for z in zs]
 
     def make_fine(lbl: str, offset: float, limit: int | None = None, sigma: float = 0.85):
         z0 = true_peaks[lbl] + offset
@@ -247,11 +247,14 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             zs = zs[:limit]
         return [[z, curve_val(z, z0, amp=0.92, sigma=sigma)] for z in zs]
 
-    def make_fine_plan():
+    def make_fine_plan(lbl: str = 'T02'):
+        z0 = true_peaks[lbl]
         return {
             'mode': 'auto', 'configured_mode': 'auto', 'fallback': False, 'fallback_reason': None,
             'coarse_fwhm_mm': 2.002, 'half_width_mm': 1.500, 'effective_half_width_mm': 1.500,
-            'lower_half_mm': 1.500, 'upper_half_mm': 1.500, 'fine_step_mm': 0.075,
+            'blur_low_z': round(z0 - 1.50, 2), 'blur_high_z': round(z0 + 1.50, 2),
+            'blur_low_reached': True, 'blur_high_reached': True,
+            'fine_step_mm': 0.075,
             'truncated': False, 'truncation_note': None,
         }
 
@@ -318,12 +321,16 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
         rng = max(peaks) - min(peaks)
         var = sum((p - mean_pk) ** 2 for p in peaks) / (len(peaks) - 1)
         dofs = [f['dof_mm'] for f in fits if isinstance(f.get('dof_mm'), (int, float))]
+        z0 = true_peaks[lbl]
         return {'label': lbl, 'xy': coords[lbl], 'fits': fits, 'coarse_fit': make_coarse_fit(lbl),
-                'fine_plan': make_fine_plan(), 'insufficient_repeats': [],
+                'coarse_bounds': {'blur_low_z': round(z0 - 1.50, 2), 'blur_high_z': round(z0 + 1.50, 2),
+                                  'blur_low_reached': True, 'blur_high_reached': True},
+                'fine_plan': make_fine_plan(lbl), 'insufficient_repeats': [],
                 'z_peak': mean_pk, 'range': rng, 'std': math.sqrt(var),
                 'dof_mm': sum(dofs) / len(dofs) if dofs else None,
                 'dof_range_mm': (max(dofs) - min(dofs)) if len(dofs) >= 2 else None,
                 'dof_covered_count': len(dofs), 'dof_uncovered': 0,
+                'exposure_us': 18500.0, 'exposure_mode': 'auto', 'roi_mean': 118.4, 'roi_p99': 191.2,
                 'arrival': dict(point_arrivals[lbl])}
 
     curves = {}
@@ -334,16 +341,19 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
 
     if state == 'coarse':
         lbl = 'T02'
-        curves[lbl] = {'coarse': make_coarse(lbl, limit=21)}
+        curves[lbl] = {'coarse': make_coarse(lbl, limit=11)}
         z_cur = curves[lbl]['coarse'][-1][0]
         return ({
-            'phase': 'coarse', 'message': 'T02 粗扫中（Z 向下步进 0.20 mm）',
+            'phase': 'coarse', 'message': 'T02 粗扫 · 下行中（步距 0.50 mm）',
             'label': lbl, 'z': z_cur, 'point': 1, 'total': 5, 'plan': plan,
             'plane': None, 'initial_plane': None, 'results': [], 'feasibility': None,
             'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
             'fine_plan': None, 'coarse_fit': None, 'current_fits': [], 'dof_summary': None,
+            'exposure_mode': 'auto', 'manual_exposure_us': None,
+            'current_exposure_us': 18500.0, 'point_exposure_mode': 'auto',
+            'roi_mean': 118.4, 'roi_p99': 191.2,
             'arrival_summary': {
-                'total_arrivals': 21, 'total_anomalies': 0, 'over_tolerance_count': 0, 'unstable_count': 0,
+                'total_arrivals': 14, 'total_anomalies': 0, 'over_tolerance_count': 0, 'unstable_count': 0,
                 'anomaly_points': [], 'max_abs_delta_mm': 0.004, 'max_delta_mm': 0.004,
                 'max_delta_axis': 'Z', 'max_delta_label': 'T02', 'position_tolerance_mm': 0.01,
                 'avg_elapsed_s': 0.51, 'max_elapsed_s': 0.54,
@@ -375,7 +385,10 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             'label': lbl, 'z': z_cur, 'point': 3, 'total': 5, 'plan': plan,
             'plane': None, 'initial_plane': None, 'results': results, 'feasibility': None,
             'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
-            'fine_plan': make_fine_plan(), 'coarse_fit': make_coarse_fit(lbl),
+            'fine_plan': make_fine_plan(lbl), 'coarse_fit': make_coarse_fit(lbl),
+            'exposure_mode': 'auto', 'manual_exposure_us': None,
+            'current_exposure_us': 18500.0, 'point_exposure_mode': 'auto',
+            'roi_mean': 118.4, 'roi_p99': 191.2,
             'current_fits': [t29_fit1], 'dof_summary': None,
             'arrival_summary': {
                 'total_arrivals': 405, 'total_anomalies': 3, 'over_tolerance_count': 3, 'unstable_count': 0,
@@ -421,7 +434,10 @@ def depthcal_demo(state: str, step: int = 0) -> tuple[dict, float, str]:
             'label': 'T12', 'z': z_cur, 'point': 5, 'total': 5, 'plan': plan,
             'plane': plane, 'initial_plane': initial_plane, 'results': results, 'feasibility': feasibility,
             'metric': 'tenengrad', 'method': 'gauss', 'dof_ratio': 0.8,
-            'fine_plan': make_fine_plan(), 'coarse_fit': results[-1]['coarse_fit'],
+            'fine_plan': make_fine_plan('T12'), 'coarse_fit': results[-1]['coarse_fit'],
+            'exposure_mode': 'auto', 'manual_exposure_us': None,
+            'current_exposure_us': 18500.0, 'point_exposure_mode': 'auto',
+            'roi_mean': 118.4, 'roi_p99': 191.2,
             'current_fits': results[-1]['fits'], 'dof_summary': dof_sum,
             'arrival_summary': {
                 'total_arrivals': 775, 'total_anomalies': 4, 'over_tolerance_count': 4, 'unstable_count': 0,

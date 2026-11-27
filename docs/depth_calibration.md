@@ -11,19 +11,19 @@
 - 模组 Z 行程为 `[-15, 0]` mm：`Z−` 向下（靠近料盘），`Z+` 向上（远离料盘）。
 - 两把工具与主相机共用 Z 轴，相机下降时工具尖同步下降，**必须配置 `depth_calibration.camera_z_min_mm`**。
 - 现场已于 11-26 核定 `camera_z_min_mm: -12.0`。程序默认缺省值为 `null`；若置空未配置，收到 `160` 直接回 `999` 拒绝启动。每次下发坐标及到位检查均强制校验 `Z ≥ camera_z_min_mm` 且 XYZ 在 `travel` 内。
-- 扫描期间主相机必须关闭自动曝光（固定曝光）；若曝光自动开启或中途变化，立即报错回 `999`。
+- 扫描期间主相机必须关闭自动曝光（固定曝光）。每个测点居中完成后、开始粗找前，按页面配置的【自动】或【手动】模式确定并**锁定该点曝光**；该点整个粗找与细测期间若曝光被外部改动，立即报错回 `999`。
 
 ---
 
 ## 2. 160/161 协议与自动流程
 
-开始前：将 V2 菲林片平整固定在料盘上；完成主相机标定（`camera.yaml` 有效且非占位）；将主相机移到菲林任意靶点上方初始 Z 高度（推荐在焦点附近，使上下 3mm 能覆盖清晰峰），确认固定曝光且无过曝/过暗。
+开始前：将 V2 菲林片平整固定在料盘上；完成主相机标定（`camera.yaml` 有效且非占位）；将主相机移到菲林任意靶点上方初始 Z 高度。
 
 1. **发起会话（PLC 发 160）**：
    - PLC 写入 `40904 = 160` 并更新 `Task_ID`（`40903`），模式切为 `下针深度标定中`。
    - 后续每次需要移动相机，PC 将目标 `(X, Y, Z)` 写入 **`40942–40946`** 并回 **`160`**；PLC 到位后再发 **`160`**（新 `Task_ID`）推进下一步。
    - **不检查也不回显 `40905`**。
-2. **第 1 步：测点居中**：
+2. **第 1 步：测点居中与每点曝光锁定**：
    - 采用非阻塞滑动窗口持续读取 PLC 实时坐标（按 `settle_window_s / (settle_samples - 1)` 间隔采样，取最近 `settle_samples` 个样本，默认 `6` 次 / `0.5 s`）。
    - **到位判据**：窗口每轴极差 `≤ jitter_tol_mm`（默认 `0.02 mm`）**且**窗口均值与目标 `expected` 每轴偏差 `|均值 − expected| ≤ position_tolerance_mm`（默认 `0.01 mm`）时立即取均值继续（首次 `160` 尚无 `expected` 时只按极差判稳）。
    - 若超时 `arrival_timeout_s`（默认 `2.0 s`）仍未满足，则取**最后一个窗口的均值**作为实测坐标 `actual` 照常继续流程（**不因到位超差或未稳定回 `999`**），并将本次异常（`超差` / `未稳定` / `超差+未稳定`）记入 `arrivals.csv` 与 `events.jsonl`（`depthcal_arrival_warning`）。仅在读取 PLC 失败、坐标非有限数或实测坐标超出深度行程 / 低于 `camera_z_min_mm` 时回 `999`。
@@ -31,18 +31,18 @@
    - 若初始位置不在计划首点，先按布局毫米差移向计划测点；若当前靶点已在默认 5 点计划内，优先从当前靶点开始测。
    - 重复计算平移量把环心拉到画面中心，直到偏差 `≤ center_tol_px`（默认 `15 px`），最多 `center_max_iter`（默认 `5`）轮。
    - 居中后在环心周围截取固定正方形 ROI（边长 `roi_mm` 默认 `8 mm`，按当前像素尺度换算），整个扫描过程 XY 固定、不再重新检测。
-3. **第 2 步：粗扫（`coarse`）**：
-   - 先抬升到 `min(Z0 + coarse_range_mm, travel_z_max)`，再以 `coarse_step_mm`（默认 `0.2 mm`）**逐步向下**扫到 `max(Z0 - coarse_range_mm, camera_z_min_mm)`。
-   - 每步按滑动窗口等待稳定且到位（或超时 `arrival_timeout_s` 取最后窗口均值并记录异常）后，拍 `frames_per_step`（默认 `3`）帧计算清晰度取中位。
-   - 当越过当前最大值且清晰度 `< defocus_ratio`（默认 `0.3`）× 最大值并连续 2 步时，提前结束粗扫。若最大值出现在最高或最低边界步，报错回 `999`。
+   - **每点自动曝光 / 手动曝光**：居中完成后、粗找开始前，通过主相机曝光接口在该点 ROI 上确定曝光并锁定整个测点（不同测点可采用不同曝光）：
+     - **自动模式（`exposure_mode: auto`）**：目标 ROI 第 99 百分位灰度 `exposure_target_p99`（默认 `190`，容差 `±15`），ROI 饱和像素（`≥ 250`）比例 `≤ 0.1%`；按线性比例最多调整 `exposure_max_iter`（默认 `5`）次，夹在 `[exposure_min_us, exposure_max_us]`（默认 `[100, 200000] µs`）。若到达上下限或最大迭代仍未完全达标，采用最接近值继续并记录警告（不回 `999`）。
+     - **手动模式（`exposure_mode: manual`）**：直接应用界面/配置设置的 `manual_exposure_us` 并采图核验 ROI 灰度。运行中在界面修改曝光模式或手动值，将在**下一个测点**生效（当前测点保持已锁定曝光不变）；空闲时设置会持久化到 `runs/state/depthcal_exposure.json`。
+3. **第 2 步：粗找（大步找两侧明显模糊，`coarse_up` + `coarse`）**：
+   - 从居中后的 Z 开始，先以 `coarse_step_mm`（默认 `0.5 mm`）**向上大步**找“上侧明显模糊”或到达行程上限 `z_max`（若配置 `coarse_max_span_mm` 则受其限制）；随后先做顶部过冲 `overshoot_mm`，再**整段向下大步扫**（只记录向下趟采样，与细扫保持一致的回差处理），直到“下侧明显模糊”或到达安全下限 `camera_z_min_mm` / 行程下限 `z_min`。
+   - **明显模糊判据**（同时兼容存在较大底值的清晰度曲线）：令 `v_peak` 为已测最大清晰度、`v_low` 为已测最小清晰度。首先须满足 `v_peak / v_low ≥ min_peak_contrast`（默认 `1.15`）才认为找到了明显清晰峰，否则报错 `DEPTH-CONTRAST`（`"清晰度变化太小，景深过大或画面太暗/对比度不足"`）。在已离开峰且呈单调下降趋势的一侧，若**连续 2 个点**满足 `(v − v_low) / (v_peak − v_low) ≤ blur_contrast_ratio`（默认 `0.3`）**或** `v / v_peak ≤ defocus_ratio`（默认 `0.3`），即判定该侧达到明显模糊。
+   - 若到达上/下边界仍未达到明显模糊，记录 `"上/下侧未达明显模糊（受行程/Z 下限限制）"`，若峰在扫描内部仍继续；若最大值出现在边界点或不足 3 步，报错 `DEPTH-PEAK-BOUNDARY`。
 4. **第 3 步：细扫（`fine`，重复 `repeats_per_point` 次，默认 3 次）**：
-   - 默认 `fine_range_mode: auto` 时，根据粗扫拟合出的 `FWHM_粗扫` 自适应计算细扫半宽与步距（防止 `FWHM` 达到 1–3 mm 时固定 ±0.6 mm 只扫到峰顶平坦段导致高斯拟合退化）：
-     - `细扫半宽 = clamp(fine_range_factor × FWHM_粗扫, fine_range_min_mm, fine_range_max_mm)`（默认 `0.75 × FWHM`，限制在 `[0.3, 3.0] mm`）；
-     - `细扫步距 = clamp(2 × 细扫半宽 / fine_steps_target, fine_step_min_mm, fine_step_max_mm)`（默认目标 40 步，步距限制在 `[0.02, 0.10] mm`）。
-     - 若粗扫拟合失败或 `FWHM` 无效，自动回退 `fixed`（`fine_range_mm` / `fine_step_mm`）并在记录和界面注明。
-   - 若为 `fine_range_mode: fixed`，则直接使用 `fine_range_mm`（默认 `0.6`）和 `fine_step_mm`（默认 `0.02`）。
-   - 上下边界均受 `camera_z_min_mm` 与 `travel.z` 约束；发生截断时在记录与界面提示。
-   - 每次先上到 `min(Z_peak_coarse + 半宽 + overshoot_mm, travel_z_max)`，再**单向向下**扫到 `max(Z_peak_coarse - 半宽, camera_z_min_mm)`。抬升阶段不采图，**只使用向下那一趟的数据**（消除丝杠反向间隙），且实测 Z 必须严格递减。
+   - 默认 `fine_range_mode: auto` 时，直接以上下两侧“明显模糊”点（边界受限时用已测边界）构成细扫区间 `[blur_low_z, blur_high_z]` 均匀插点：
+     - `细扫步距 = clamp((blur_high_z − blur_low_z) / fine_steps_target, fine_step_min_mm, fine_step_max_mm)`（默认目标 `40` 步，步距限制在 `[0.02, 0.25] mm`），不再使用“粗扫拟合失败回退固定 ±0.6/0.02”的逻辑。
+   - 若显式配置为 `fine_range_mode: fixed`，则使用 `fine_range_mm`（默认 `0.6`）和 `fine_step_mm`（默认 `0.02`）。
+   - 每次先上到 `min(blur_high_z + overshoot_mm, travel_z_max)`，再**单向向下**扫到 `max(blur_low_z, camera_z_min_mm)`。抬升阶段不采图，**只使用向下那一趟的数据**（消除丝杠反向间隙），且实测 Z 必须严格递减。
 5. **第 4 步：峰位拟合、景深计算、质量门与峰位全幅留档**：
    - 对每条细扫曲线取 `≥ 50%` 最大值的点，对 `log(清晰度)` 做二次多项式高斯拟合，输出 `Z_peak`、`FWHM`（50% 半高宽）、`R²`；同时计算半高宽中点法峰位作对照。
    - **景深（DOF）定义与计算**：
@@ -73,16 +73,20 @@
 | `center_tol_px` | `15.0` | 测点居中允许的最大圆环中心像素偏差（px） |
 | `center_max_iter` | `5` | 单点居中最大迭代次数，超过回 `999` |
 | `roi_mm` | `8.0` | 清晰度计算 ROI 边长（mm），围绕居中后环心固定裁剪 |
-| `coarse_range_mm` | `3.0` | 粗扫相对初始 `Z0` 的半范围（mm） |
-| `coarse_step_mm` | `0.2` | 粗扫向下步距（mm） |
-| `defocus_ratio` | `0.3` | 粗扫提前结束离焦阈值（低于当前最大清晰度该比例连续 2 步即停） |
-| `fine_range_mode` | `auto` | 细扫范围模式：`auto`（按粗扫 FWHM 自适应）或 `fixed`（固定 `fine_range_mm` / `fine_step_mm`） |
-| `fine_range_factor` | `0.75` | `auto` 模式下 `细扫半宽 = fine_range_factor × FWHM_粗扫` 的比例系数 |
-| `fine_range_min_mm` / `fine_range_max_mm` | `0.3` / `3.0` | `auto` 模式下细扫半宽的上下限夹紧范围（mm） |
-| `fine_steps_target` | `40` | `auto` 模式下每次细扫的目标步数（用于反算步距） |
-| `fine_step_min_mm` / `fine_step_max_mm` | `0.02` / `0.1` | `auto` 模式下细扫步距的上下限夹紧范围（mm） |
-| `fine_range_mm` | `0.6` | `fixed` 模式或粗扫拟合失败回退时的细扫半范围（mm） |
-| `fine_step_mm` | `0.02` | `fixed` 模式或回退时的细扫向下步距（mm） |
+| `coarse_step_mm` | `0.5` | 粗找上行与下行步距（mm） |
+| `coarse_max_span_mm` | `null` | 粗找单侧最大跨度（mm）；`null` 表示仅受行程上限与 `camera_z_min_mm` 限制 |
+| `defocus_ratio` | `0.3` | 明显模糊的峰值比值判据（`v / v_peak ≤ defocus_ratio`） |
+| `blur_contrast_ratio` | `0.3` | 明显模糊的动态范围判据（`(v − v_low) / (v_peak − v_low) ≤ blur_contrast_ratio`，连续 2 点即成立） |
+| `min_peak_contrast` | `1.15` | 粗找有效清晰峰最小对比度 `v_peak / v_low`，不足报错 `DEPTH-CONTRAST` |
+| `fine_range_mode` | `auto` | 细扫范围模式：`auto`（在两侧明显模糊点间均匀插点）或 `fixed`（固定 `fine_range_mm` / `fine_step_mm`） |
+| `fine_steps_target` | `40` | `auto` 模式下细扫目标步数（用于反算步距） |
+| `fine_step_min_mm` / `fine_step_max_mm` | `0.02` / `0.25` | `auto` 模式下细扫步距上下限夹紧范围（mm） |
+| `fine_range_mm` / `fine_step_mm` | `0.6` / `0.02` | `fixed` 模式下的细扫半范围与步距（mm） |
+| `exposure_mode` | `auto` | 测点曝光模式：`auto`（每点 ROI 自动曝光）或 `manual`（使用手动曝光值） |
+| `manual_exposure_us` | `null` | 手动曝光值（µs），界面应用后持久化到 `runs/state/depthcal_exposure.json` |
+| `exposure_target_p99` | `190.0` | 自动曝光目标 ROI 第 99 百分位灰度（容差 `±15`，饱和像素 `≥250` 比例 `≤0.1%`） |
+| `exposure_max_iter` | `5` | 每点自动曝光最大线性调节次数 |
+| `exposure_min_us` / `exposure_max_us` | `100` / `200000` | 自动/手动曝光允许上下限（µs） |
 | `overshoot_mm` | `0.3` | 细扫顶部换向过冲余量（mm），用于避开反向间隙 |
 | `repeats_per_point` | `3` | 每个靶点的细扫重复次数 |
 | `frames_per_step` | `3` | 每个 Z 台阶采图帧数（取各清晰度指标中位数） |
@@ -150,7 +154,7 @@
 ## 5. 记录文件位置与内容
 
 每次会话自动保存到 `runs/<日期>/depthcal/<会话>/`：
-- `curves.csv`：每步原始记录（`label, pass, direction, z_cmd, z_actual, tenengrad, laplacian, brenner`）。
+- `curves.csv`：每步原始记录（`label, pass, direction, z_cmd, z_actual, tenengrad, laplacian, brenner, exposure_us, roi_mean, roi_p99`）。
 - `arrivals.csv`：每次 160 到位采样记录（`label, phase, seq, expected_x, expected_y, expected_z, actual_x, actual_y, actual_z, delta_x, delta_y, delta_z, max_abs_delta_mm, max_delta_axis, ptp_x, ptp_y, ptp_z, status, elapsed_s, samples`），其中 `status` 为 `ok` / `超差` / `未稳定` / `超差+未稳定`。
 - `roi/*.png`：每步所选中位帧的 ROI 裁剪图。
 - `<标签>_center.png` / `<标签>_peak.png`：每个靶点居中后与均值峰位处的全幅原图。
@@ -169,7 +173,8 @@
 | `DEPTH-UNIMPLEMENTED` | 收到 `170/171/180/181/190/191` | PLC 请求 | 本阶段只使用 `160`，勿发后续阶段功能码 |
 | `DEPTH-MODE` | 当前模式不允许或会话中收到非 `160` | PLC 请求 | 空闲态从 `160` 发起；会话中只连续发 `160` |
 | `DEPTH-CALIBRATION` | 缺少有效主相机标定 | `160` 会话启动 | 先通过 `80` 完成主相机标定（非占位文件） |
-| `DEPTH-EXPOSURE` | 未关闭自动曝光或扫描中曝光改变 | 采图前置/采图校验 | 在相机配置中固定曝光并关闭自动曝光 |
+| `DEPTH-EXPOSURE` | 未关闭自动曝光或扫描中曝光改变 | 采图前置/采图校验 | 检查主相机曝光设置；确认无外部程序中途改动当前点锁定曝光 |
+| `DEPTH-CONTRAST` | 清晰度变化太小（`v_peak / v_low < min_peak_contrast`） | 粗找判定 | 检查照明、曝光、焦距，确认画面有足够对比度且覆盖清晰峰 |
 | `DEPTH-TARGET` | 未识别到菲林靶点或靶点标签跳变 | 居中识别 | 检查初始位置是否正对菲林、菲林旋转方向、光照与初始焦距 |
 | `DEPTH-CENTER` | 达到居中上限仍未进入 `center_tol_px` | 居中循环 | 检查主相机标定投影精度、PLC XY 到位精度与 `center_tol_px` |
 | `DEPTH-ROI` | 固定 ROI 超出图像边界 | 居中结束取 ROI | 减小 `roi_mm` 或检查像素比例尺与居中性 |

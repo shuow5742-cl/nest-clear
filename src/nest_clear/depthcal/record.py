@@ -23,7 +23,8 @@ class DepthRecord:
         (self.directory / 'roi').mkdir()
         self.live.unlink(missing_ok=True)
         with (self.directory / 'curves.csv').open('w', encoding='utf-8', newline='') as stream:
-            csv.writer(stream).writerow(('label', 'pass', 'direction', 'z_cmd', 'z_actual', *METRICS))
+            csv.writer(stream).writerow(('label', 'pass', 'direction', 'z_cmd', 'z_actual', *METRICS,
+                                         'exposure_us', 'roi_mean', 'roi_p99'))
         with (self.directory / 'arrivals.csv').open('w', encoding='utf-8', newline='') as stream:
             csv.writer(stream).writerow((
                 'label', 'phase', 'seq',
@@ -85,7 +86,11 @@ class DepthRecord:
     def sample(self, row, frame, number):
         self.image(f"roi/{number:05d}_{row['label']}_{row['pass']}", frame)
         with (self.directory / 'curves.csv').open('a', encoding='utf-8', newline='') as stream:
-            csv.writer(stream).writerow(row[key] for key in ('label', 'pass', 'direction', 'z_cmd', 'z_actual', *METRICS))
+            csv.writer(stream).writerow(
+                '' if row.get(key) is None else row[key]
+                for key in ('label', 'pass', 'direction', 'z_cmd', 'z_actual', *METRICS,
+                            'exposure_us', 'roi_mean', 'roi_p99')
+            )
         self.roi(frame)
 
     def interaction(self, kind, row):
@@ -118,10 +123,21 @@ class DepthRecord:
             fine_plans = {r['label']: r['fine_plan'] for r in session.results if r.get('fine_plan')}
             if session.label and getattr(session, 'fine_plan', None) and session.label not in fine_plans:
                 fine_plans[session.label] = session.fine_plan
+            point_exposures = {
+                r['label']: {
+                    'exposure_us': r.get('exposure_us'),
+                    'exposure_mode': r.get('exposure_mode'),
+                    'roi_mean': r.get('roi_mean'),
+                    'roi_p99': r.get('roi_p99'),
+                    'exposure_warning': r.get('exposure_warning'),
+                }
+                for r in session.results
+            }
             self.write('session_record.json', {
                 'start_time': self.started.isoformat(), 'end_time': self.events.clock().isoformat(),
                 'outcome': outcome, 'diagnostic': details, 'configuration': session.cfg,
-                'exposure_us': getattr(session, 'exposure_us', None), 'plan': session.plan,
+                'exposure_us': getattr(session, 'exposure_us', None), 'point_exposures': point_exposures,
+                'plan': session.plan,
                 'fine_plans': fine_plans,
                 'dof_summary': getattr(session, 'dof_summary', None),
                 'arrival_summary': getattr(session, 'arrival_summary', None),
