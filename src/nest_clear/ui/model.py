@@ -13,6 +13,9 @@ from nest_clear.baseline.focus_rules import (
     EDGE_MARGIN_MESSAGE,
     GEOMETRY_SUMMARY,
     PEAK_OVERSHOOT_HINT,
+    STAGE_ASCENDING_TEXT,
+    STAGE_OVERSHOT_TEXT,
+    STAGE_READY_TEXT,
     evaluate_baseline_readiness,
     evaluate_camera_readiness,
 )

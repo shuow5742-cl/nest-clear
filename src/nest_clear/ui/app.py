@@ -24,6 +24,7 @@ from .model import (EventTail, camcal_progress, command_timeout_message, decode_
                     page_for_mode, depthcal_session_key, next_auto_page,
                     baseline_focus_status, baseline_preview_display, extract_tooltip_preview,
                     CAMERA_AXES, EDGE_MARGIN_MESSAGE, GEOMETRY_SUMMARY, PEAK_OVERSHOOT_HINT,
+                    STAGE_ASCENDING_TEXT, STAGE_OVERSHOT_TEXT, STAGE_READY_TEXT,
                     evaluate_baseline_readiness, evaluate_camera_readiness,
                     depthcal_stage_info, depthcal_feasibility_text, depthcal_fine_plan_text, depthcal_subplot_layout,
                     depthcal_curve_dof, depthcal_latest_dof_text, depthcal_dof_summary_text,
@@ -1343,7 +1344,12 @@ class App:
             bar_bg, bar_fg, bar_border, badge_bg, badge_fg = focus_palettes[focus_info['color_key']]
             widgets['focus_bar'].config(bg=bar_bg, highlightbackground=bar_border)
             widgets['focus_badge'].config(text=focus_info['badge'], bg=badge_bg, fg=badge_fg)
-            widgets['focus_summary'].config(text=focus_info['summary'], bg=bar_bg, fg=bar_fg)
+            summary_text = focus_info['summary']
+            if focus_live is not None:
+                summary_text += f" · {cam_ready['stage_text']}"
+                if cam_ready.get('wide_edge_note'):
+                    summary_text += f"（{cam_ready['wide_edge_note']}）"
+            widgets['focus_summary'].config(text=summary_text, bg=bar_bg, fg=bar_fg)
             widgets['focus_graph'].config(bg=bar_bg)
             hint_text = display.get('hint', '')
             hint_color = COLORS['red'] if display['failed'] else MUTED
@@ -1371,19 +1377,23 @@ class App:
                 pct = src.get('percent')
                 percent_text = f'{pct:.0f}' if isinstance(pct, (int, float)) else '—'
                 axis_hint = CAMERA_AXES[name]['jog_hint']
+                stage_text = cam_ready['stage_text']
+                wide_note = cam_ready.get('wide_edge_note') or ''
                 if cam_ready['edge_near']:
                     color = COLORS['red']
                     hint_text = hint_text or EDGE_MARGIN_MESSAGE
                     hint_color = COLORS['red']
                 elif cam_ready['ready']:
                     color = COLORS['green']
-                    hint_text = hint_text or PEAK_OVERSHOOT_HINT
-                elif isinstance(pct, (int, float)) and pct >= 80:
+                    hint_text = hint_text or wide_note or stage_text
+                    hint_color = '#b45309' if wide_note else COLORS['green']
+                elif cam_ready.get('peak_confirmed') or (isinstance(pct, (int, float)) and pct >= 80):
                     color = COLORS['yellow']
-                    hint_text = hint_text or PEAK_OVERSHOOT_HINT
+                    hint_text = hint_text or stage_text
+                    hint_color = COLORS['yellow'] if color != COLORS['red'] else COLORS['red']
                 else:
                     color = COLORS.get(focus_info['color_key'], COLORS['red'])
-                    hint_text = hint_text or PEAK_OVERSHOOT_HINT
+                    hint_text = hint_text or stage_text
                 if src.get('source') == 'band_gradient_p995':
                     text = f'清晰度 {percent_text}%（相对本次峰值）　当前 {number(src.get("band_gradient"))} / 本次最佳 {number(src.get("peak"))}　{axis_hint}'
                 else:

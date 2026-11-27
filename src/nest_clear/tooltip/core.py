@@ -56,6 +56,7 @@ class ViewCalib:
     override_note: str | None = None
     focus_percent: float | None = None
     focus_peak: float | None = None
+    peak_confirmed: bool | None = None
 
     def __post_init__(self) -> None:
         """校验并冻结基准数据，供求解与 YAML 共用。"""
@@ -63,6 +64,8 @@ class ViewCalib:
             raise _error("width_px must be positive", locals())
         if type(self.manual_override) is not bool:
             raise _error("manual_override must be a boolean", locals())
+        if self.peak_confirmed is not None and type(self.peak_confirmed) is not bool:
+            raise _error("peak_confirmed must be a boolean", locals())
         for attr in ("axis_rms_px", "edge_width_px", "focus_percent", "focus_peak"):
             val = getattr(self, attr)
             if val is not None and (isinstance(val, bool) or not isinstance(val, (int, float)) or not np.isfinite(val) or val < 0):

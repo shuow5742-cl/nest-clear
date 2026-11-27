@@ -155,6 +155,7 @@ def save_baseline(
                 **({"override_note": view.override_note} if view.override_note else {}),
                 **({"focus_percent": view.focus_percent} if view.focus_percent is not None else {}),
                 **({"focus_peak": view.focus_peak} if view.focus_peak is not None else {}),
+                **({"peak_confirmed": view.peak_confirmed} if view.peak_confirmed is not None else {}),
             }
             for view in baseline.views
         ],

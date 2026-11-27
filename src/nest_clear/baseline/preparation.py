@@ -25,6 +25,7 @@ from nest_clear.baseline.latest_capture import FrameBroker
 from nest_clear.baseline.focus_rules import (
     CAMERA_AXES,
     EDGE_MARGIN_MESSAGE,
+    STAGE_ASCENDING_TEXT,
     evaluate_camera_readiness,
     resolve_focus_config,
 )
@@ -37,10 +38,16 @@ def exposure_source(measured):
     return ('已存（手动）' if measured.get('source') == 'manual' else '已存（自动测）') if measured else '默认'
 
 
-def make_tip_tracker(detector_cfg):
-    """按检测方法构造对应的清晰度峰值跟踪器。"""
+def make_tip_tracker(detector_cfg, ui_config=None):
+    """按检测方法构造对应的清晰度峰值与越峰跟踪器。"""
     method = (detector_cfg or {}).get('method', 'trident')
-    return BandGradientTracker() if method == 'trident' else EdgeWidthTracker(reset_distance=50)
+    focus_cfg = resolve_focus_config(ui_config, ui_config)
+    if method == 'trident':
+        return BandGradientTracker(
+            smooth_frames=int(focus_cfg['focus_smooth_frames']),
+            pass_percent=float(focus_cfg['focus_pass_percent']),
+        )
+    return EdgeWidthTracker(reset_distance=50, pass_percent=float(focus_cfg['focus_pass_percent']))
 
 
 class ReadinessTracker:
@@ -137,11 +144,15 @@ def build_preview_camera_payload(
     )
     return {
         'tenengrad': metrics['tenengrad'],
+        'raw_band_gradient': metrics.get('raw_band_gradient'),
         'band_gradient': metrics.get('band_gradient'),
         'axis_rms_px': metrics.get('axis_rms_px'),
         'axis_rms_limit': axis_rms_limit,
+        'focus_smooth_frames': focus_cfg['focus_smooth_frames'],
+        'focus_pass_percent': focus_cfg['focus_pass_percent'],
         'focus_good_px': focus_cfg['focus_good_px'],
         'focus_warn_px': focus_cfg['focus_warn_px'],
+        'focus_max_px': focus_cfg['focus_max_px'],
         'focus_ready_percent': focus_cfg['focus_ready_percent'],
         'focus_ready_frames': focus_cfg['focus_ready_frames'],
         'peak_min_frames': focus_cfg['peak_min_frames'],
@@ -150,6 +161,10 @@ def build_preview_camera_payload(
         'percent': tracked['percent'],
         'sample_count': sample_count,
         'peak_valid': peak_valid,
+        'peak_confirmed': bool(readiness['peak_confirmed']) if readiness is not None else bool(tracked.get('peak_confirmed')),
+        'stage': readiness['stage'] if readiness is not None else 'ascending',
+        'stage_text': readiness['stage_text'] if readiness is not None else STAGE_ASCENDING_TEXT,
+        'wide_edge_note': readiness['wide_edge_note'] if readiness is not None else '',
         'consecutive_ready': consec,
         'edge_near': bool(readiness['edge_near']) if readiness is not None else False,
         'manual_confirmed': bool(manual_confirmed),
@@ -192,6 +207,7 @@ def analyze_tip(frame, detection, tracker, scale, min_contrast, threshold=127, *
         edge_um = edge_px * scale if edge_px is not None else None
         metrics = {'tenengrad': None, 'edge_width_px': edge_px, 'edge_width_um': edge_um,
                    'contrast': detection.tip_contrast, 'source': 'band_gradient_p995',
+                   'raw_band_gradient': tracked.get('raw'),
                    'band_gradient': tracked['current'], 'axis_rms_px': detection.axis_rms_px}
         return status, reason, metrics, tracked
     status = '未识别' if detection.point_uv is None else '粗定位' if detection.coarse else '精定位'
@@ -266,15 +282,18 @@ def draw_tip_preview(frame, name, detection, ui_config, scale):
             focus_en = 'Near edge'
             focus_color = (0, 0, 220)
         elif readiness and readiness.get('ready'):
-            focus_line = f'清晰度 {pct_str}  边缘 {edge_str}  已最清晰'
+            stage_txt = readiness.get('stage_text') or '✔ 最清晰'
+            focus_line = f'清晰度 {pct_str}  边缘 {edge_str}  {stage_txt}'
             focus_en = f'Focus {pct_str} edge {edge_str} READY'
             focus_color = (0, 165, 0)
         else:
-            reason_hint = (readiness or {}).get('short_reason') or axis_hint
-            focus_line = f'清晰度 {pct_str}  边缘 {edge_str}  {reason_hint}'
+            stage_or_reason = (readiness or {}).get('stage_text') or (readiness or {}).get('short_reason') or axis_hint
+            focus_line = f'清晰度 {pct_str}  边缘 {edge_str}  {stage_or_reason}'
             focus_en = f'Focus {pct_str} edge {edge_str}'
             focus_color = (0, 145, 220) if (readiness or {}).get('color_key') == 'yellow' else (0, 0, 220)
         labels.append(((20, 58), focus_line, focus_en, focus_color, 26))
+        if readiness and readiness.get('wide_edge_note'):
+            labels.append(((20, 90), readiness['wide_edge_note'], 'Wide edge accepted', (0, 145, 220), 22))
     return _draw_labels(image, labels)
 
 
@@ -295,7 +314,7 @@ class Preparation:
         self.assignment_thread = None
         self.devices = []
         detector_settings = getattr(getattr(config, 'tool_calibration', None), 'detection', {})
-        self.trackers = {n: make_tip_tracker(detector_settings.get(n, {})) for n in self.enabled}
+        self.trackers = {n: make_tip_tracker(detector_settings.get(n, {}), self.ui_config) for n in self.enabled}
         self.readiness_trackers = {n: ReadinessTracker() for n in self.enabled}
         self.reset_peak = {n: threading.Event() for n in self.enabled}
         self.history = {n: [] for n in self.enabled}
@@ -787,6 +806,7 @@ class Preparation:
                         'percent': tracked['percent'],
                         'peak': tracked['best'],
                         'sample_count': tracked.get('sample_count', 0),
+                        'peak_confirmed': tracked.get('peak_confirmed', False),
                         'edge_width_px': metrics['edge_width_px'],
                     },
                     self.ui_config,
@@ -803,6 +823,8 @@ class Preparation:
                         source=metrics['source'], tip_uv=list(tip) if tip is not None else None,
                         detection_status=status, detection_reason=detection.diagnostic, focus_reason=reason,
                         ready=readiness['ready'], ready_reason=readiness['reason'],
+                        peak_confirmed=readiness['peak_confirmed'], stage=readiness['stage'],
+                        stage_text=readiness['stage_text'], wide_edge_note=readiness['wide_edge_note'],
                         sample_count=tracked.get('sample_count', 0), consecutive_ready=readiness['consecutive_ready'],
                         history=[v for _,v in self.history[name]], fps=fps)
                 preview_cfg = {**self.ui_config, '_live_readiness': readiness, '_live_tracked': tracked}

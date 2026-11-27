@@ -54,50 +54,73 @@ class PeakTracker:
 
 
 class EdgeWidthTracker:
-    def __init__(self, reset_distance=50):
+    def __init__(self, reset_distance=50, smooth_frames=3, pass_percent=92.0):
         self.reset_distance = reset_distance
+        self.smooth_frames = max(1, int(smooth_frames))
+        self.pass_percent = float(pass_percent)
         self.reset()
 
     def reset(self):
         self.best = None
         self.position = None
-        self.widths = deque(maxlen=3)
+        self.widths = deque(maxlen=self.smooth_frames)
         self.sample_count = 0
+        self.peak_confirmed = False
 
     def update(self, width, position=None):
         if width is None or not np.isfinite(width) or width <= 0:
-            return {'best': self.best, 'percent': None, 'sample_count': self.sample_count}
+            return {'raw': None, 'current': None, 'best': self.best, 'percent': None,
+                    'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed}
         if position is not None and self.position is not None and np.linalg.norm(np.asarray(position) - self.position) > self.reset_distance:
             self.reset()
         if position is not None:
             self.position = np.asarray(position, dtype=float)
+        raw = float(width)
         self.sample_count += 1
-        self.widths.append(float(width))
-        if len(self.widths) < 3:
-            return {'best': self.best, 'percent': None, 'sample_count': self.sample_count}
+        self.widths.append(raw)
+        if len(self.widths) < self.smooth_frames:
+            return {'raw': raw, 'current': None, 'best': self.best, 'percent': None,
+                    'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed}
         median = float(np.median(self.widths))
-        self.best = min(median, self.best if self.best is not None else median)
-        return {'best': self.best, 'percent': min(100., 100. * self.best / width), 'sample_count': self.sample_count}
+        if self.best is None or median < self.best:
+            self.best = median
+            self.peak_confirmed = False
+        percent = min(100., 100. * self.best / raw) if self.best else None
+        if percent is not None and percent <= self.pass_percent:
+            self.peak_confirmed = True
+        return {'raw': raw, 'current': median, 'best': self.best, 'percent': percent,
+                'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed}
 
 
 class BandGradientTracker:
-    """Five-frame display median and three-frame median peak reference."""
-    def __init__(self): self.reset()
+    """N-frame smoothed median, smoothed peak reference, and overshoot confirmation."""
+    def __init__(self, smooth_frames=5, pass_percent=92.0):
+        self.smooth_frames = max(1, int(smooth_frames))
+        self.pass_percent = float(pass_percent)
+        self.reset()
 
     def reset(self):
-        self.values = deque(maxlen=5)
+        self.values = deque(maxlen=self.smooth_frames)
         self.best = None
         self.sample_count = 0
+        self.peak_confirmed = False
 
     def update(self, value, position=None):
         if value is None or not np.isfinite(value) or value <= 0:
-            return {'current': None, 'best': self.best, 'percent': None, 'sample_count': self.sample_count}
+            return {'raw': None, 'current': None, 'best': self.best, 'percent': None,
+                    'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed}
+        raw = float(value)
         self.sample_count += 1
-        self.values.append(float(value))
-        if len(self.values) >= 3:
-            candidate = float(np.median(list(self.values)[-3:]))
-            self.best = max(candidate, self.best if self.best is not None else candidate)
-        current = float(np.median(self.values)) if len(self.values) == 5 else None
-        return {'current': current, 'best': self.best,
-                'percent': 100 * current / self.best if current is not None and self.best else None,
-                'sample_count': self.sample_count}
+        self.values.append(raw)
+        if len(self.values) < self.smooth_frames:
+            return {'raw': raw, 'current': None, 'best': self.best, 'percent': None,
+                    'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed}
+        current = float(np.median(self.values))
+        if self.best is None or current > self.best:
+            self.best = current
+            self.peak_confirmed = False
+        percent = 100 * current / self.best if self.best else None
+        if percent is not None and percent <= self.pass_percent:
+            self.peak_confirmed = True
+        return {'raw': raw, 'current': current, 'best': self.best, 'percent': percent,
+                'sample_count': self.sample_count, 'peak_confirmed': self.peak_confirmed}

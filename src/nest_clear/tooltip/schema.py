@@ -91,6 +91,7 @@ def load_baseline(path: str | Path) -> ToolTipBaseline:
                     "override_note",
                     "focus_percent",
                     "focus_peak",
+                    "peak_confirmed",
                 },
                 f"views[{i}]",
             )
@@ -147,6 +148,7 @@ def save_baseline(baseline: ToolTipBaseline, path: str | Path) -> None:
                 **({"override_note": v.override_note} if v.override_note else {}),
                 **({"focus_percent": v.focus_percent} if v.focus_percent is not None else {}),
                 **({"focus_peak": v.focus_peak} if v.focus_peak is not None else {}),
+                **({"peak_confirmed": v.peak_confirmed} if v.peak_confirmed is not None else {}),
             }
             for v in baseline.views
         ],

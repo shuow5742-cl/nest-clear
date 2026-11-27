@@ -6,9 +6,12 @@ from typing import Any
 BASELINE_RULE = "focus_both_v1"
 
 FOCUS_DEFAULTS: dict[str, Any] = {
+    "focus_smooth_frames": 5,
+    "focus_pass_percent": 92.0,
     "focus_ready_percent": 95.0,
     "focus_good_px": 2.0,
     "focus_warn_px": 3.0,
+    "focus_max_px": 3.0,
     "focus_ready_frames": 5,
     "peak_min_frames": 10,
     "edge_margin_px": 40.0,
@@ -33,7 +36,10 @@ GEOMETRY_SUMMARY = (
     "正面沿 Y 看 → 点动 Y 找正面最清晰；侧面沿 X 看 → 点动 X 找侧面最清晰；"
     "Z 两路均在竖直方向，只需使针尖在画面内且不靠边"
 )
-PEAK_OVERSHOOT_HINT = "越过最清晰点后会下降，往回点动到峰值附近"
+STAGE_ASCENDING_TEXT = "继续同方向点动（尚未越过最清晰点）"
+STAGE_OVERSHOT_TEXT = "已越峰，往回点动到峰值附近"
+STAGE_READY_TEXT = "✔ 最清晰"
+PEAK_OVERSHOOT_HINT = STAGE_ASCENDING_TEXT
 EDGE_MARGIN_MESSAGE = "针尖太靠近画面边缘，点动 Z/X/Y 移回画面中部"
 
 
@@ -67,11 +73,20 @@ def resolve_focus_config(live: dict[str, Any] | None = None, config: dict[str, A
     warn_px = pick_float("focus_warn_px", max(good_px, float(FOCUS_DEFAULTS["focus_warn_px"])))
     if warn_px < good_px:
         warn_px = good_px
+    max_px = pick_float("focus_max_px", max(good_px, float(FOCUS_DEFAULTS["focus_max_px"])))
+    if max_px < good_px:
+        max_px = good_px
     ready_pct = min(100.0, pick_float("focus_ready_percent", float(FOCUS_DEFAULTS["focus_ready_percent"])))
+    pass_pct = pick_float("focus_pass_percent", float(FOCUS_DEFAULTS["focus_pass_percent"]))
+    if pass_pct >= ready_pct:
+        pass_pct = max(1.0, ready_pct - 3.0)
     return {
+        "focus_smooth_frames": pick_int("focus_smooth_frames", int(FOCUS_DEFAULTS["focus_smooth_frames"])),
+        "focus_pass_percent": pass_pct,
         "focus_ready_percent": ready_pct,
         "focus_good_px": good_px,
         "focus_warn_px": warn_px,
+        "focus_max_px": max_px,
         "focus_ready_frames": pick_int("focus_ready_frames", int(FOCUS_DEFAULTS["focus_ready_frames"])),
         "peak_min_frames": pick_int("peak_min_frames", int(FOCUS_DEFAULTS["peak_min_frames"])),
         "edge_margin_px": pick_float("edge_margin_px", float(FOCUS_DEFAULTS["edge_margin_px"]), minimum=0.0, allow_zero=True),
@@ -102,7 +117,7 @@ def evaluate_camera_readiness(
     config: dict[str, Any] | None = None,
     manual_confirmed: bool = False,
 ) -> dict[str, Any]:
-    """判定单路对刀相机是否已达到“最清晰可建基准”条件。"""
+    """判定单路对刀相机是否已越峰确认并达到“最清晰可建基准”条件。"""
     axis_meta = CAMERA_AXES.get(name, {"label": name, "axis": "X/Y", "jog_hint": "点动调焦", "geometry_hint": ""})
     label = axis_meta["label"]
     jog_hint = axis_meta["jog_hint"]
@@ -118,6 +133,10 @@ def evaluate_camera_readiness(
             "frame_ok": False,
             "edge_near": False,
             "peak_valid": False,
+            "peak_confirmed": False,
+            "stage": "ascending",
+            "stage_text": STAGE_ASCENDING_TEXT,
+            "wide_edge_note": "",
             "manual_confirmed": bool(manual_confirmed),
             "color_key": "gray",
             "reason": f"{label}等待实时检测数据（{jog_hint}）",
@@ -158,20 +177,53 @@ def evaluate_camera_readiness(
     else:
         peak_valid = peak is not None
 
-    pct_ok = pct is not None and pct >= float(cfg["focus_ready_percent"])
-    edge_ok = edge_px is not None and 0.0 < edge_px <= float(cfg["focus_good_px"])
+    if "peak_confirmed" in src:
+        peak_confirmed = bool(src["peak_confirmed"])
+    elif "ready" in src:
+        peak_confirmed = bool(src["ready"])
+    elif sample_count is not None:
+        peak_confirmed = False
+    else:
+        # 兼容仅提供静态清晰度字段、无会话状态字段的单元测试输入
+        peak_confirmed = True
 
-    frame_ok = (tip_uv is not None or is_manual) and not edge_near and det_ok and peak_valid and pct_ok and edge_ok
+    pct_ok = pct is not None and pct >= float(cfg["focus_ready_percent"])
+    edge_ok = edge_px is not None and 0.0 < edge_px <= float(cfg["focus_max_px"])
+
+    frame_ok = (
+        (tip_uv is not None or is_manual)
+        and not edge_near
+        and det_ok
+        and peak_valid
+        and peak_confirmed
+        and pct_ok
+        and edge_ok
+    )
 
     if consecutive is not None:
         ready = frame_ok and consecutive >= int(cfg["focus_ready_frames"])
     elif "ready" in src and not (is_manual and not src.get("manual_confirmed")):
-        ready = bool(src["ready"])
+        ready = bool(src["ready"]) and peak_confirmed and edge_ok
     else:
         ready = frame_ok
 
     pct_txt = f"{pct:.0f}%" if pct is not None else "—%"
     edge_txt = f"{edge_px:.2f}px" if edge_px is not None else "—px"
+    wide_edge_note = (
+        f"该路最佳边缘 {edge_px:.1f}px 偏宽，可接受"
+        if (ready and edge_px is not None and edge_px > float(cfg["focus_good_px"]))
+        else ""
+    )
+
+    if ready:
+        stage = "ready"
+        stage_text = STAGE_READY_TEXT
+    elif peak_confirmed:
+        stage = "overshot"
+        stage_text = STAGE_OVERSHOT_TEXT
+    else:
+        stage = "ascending"
+        stage_text = STAGE_ASCENDING_TEXT
 
     if edge_near:
         short_reason = f"{label}靠边（{EDGE_MARGIN_MESSAGE}）"
@@ -191,8 +243,8 @@ def evaluate_camera_readiness(
             detail_bits.append(f"当前 {pct_txt}")
         elif edge_px is not None:
             detail_bits.append(f"边缘 {edge_txt}")
-        short_reason = f"{label}模糊（{'，'.join(detail_bits)}）"
-        reason = f"{label}未精定位（可调焦或点【人工点选】）"
+        short_reason = f"{label}未精定位（{'，'.join(detail_bits)}）"
+        reason = f"{label}未精定位（可{jog_hint}或点【人工点选】）"
         color_key = "red" if (edge_px is None or edge_px > float(cfg["focus_warn_px"])) else "yellow"
     elif not peak_valid:
         cnt = sample_count if sample_count is not None else 0
@@ -200,14 +252,18 @@ def evaluate_camera_readiness(
         short_reason = f"{label}峰值样本不足（{cnt}/{need}，{jog_hint}）"
         reason = f"{label}峰值样本不足（{cnt}/{need} 帧），请{jog_hint}寻找最清晰点"
         color_key = "yellow"
+    elif not peak_confirmed:
+        short_reason = f"{label}尚未越峰（{jog_hint}，当前 {pct_txt}）"
+        reason = f"{label}{STAGE_ASCENDING_TEXT}（{jog_hint}，需先降到 ≤{cfg['focus_pass_percent']:g}% 峰值确认）"
+        color_key = "yellow"
     elif not pct_ok:
         short_reason = f"{label}模糊（{jog_hint}，当前 {pct_txt}）"
-        reason = f"{label}清晰度 {pct_txt} < {cfg['focus_ready_percent']:g}%（{jog_hint}）"
+        reason = f"{label}{STAGE_OVERSHOT_TEXT}（当前 {pct_txt} < {cfg['focus_ready_percent']:g}%，{jog_hint}）"
         color_key = "yellow" if (pct is not None and pct >= 80.0) else "red"
     elif not edge_ok:
-        short_reason = f"{label}模糊（{jog_hint}，边缘 {edge_txt}）"
-        reason = f"{label}边缘宽 {edge_txt} > {cfg['focus_good_px']:g}px（{jog_hint}）"
-        color_key = "yellow" if (edge_px is not None and edge_px <= float(cfg["focus_warn_px"])) else "red"
+        short_reason = f"{label}边缘过宽 {edge_txt}（上限 {cfg['focus_max_px']:g}px，{jog_hint}）"
+        reason = f"{label}边缘宽 {edge_txt} > 兜底上限 {cfg['focus_max_px']:g}px（{jog_hint}）"
+        color_key = "red"
     elif not ready:
         cur_c = consecutive if consecutive is not None else 0
         need_c = int(cfg["focus_ready_frames"])
@@ -215,9 +271,9 @@ def evaluate_camera_readiness(
         reason = f"{label}已达清晰门限，保持稳定（{cur_c}/{need_c} 帧）"
         color_key = "yellow"
     else:
-        short_reason = f"{label}已最清晰"
-        reason = ""
-        color_key = "green"
+        short_reason = f"{label} ✔ 最清晰"
+        reason = wide_edge_note
+        color_key = "green" if not wide_edge_note else "yellow"
 
     return {
         "camera": name,
@@ -227,6 +283,10 @@ def evaluate_camera_readiness(
         "frame_ok": frame_ok,
         "edge_near": edge_near,
         "peak_valid": peak_valid,
+        "peak_confirmed": peak_confirmed,
+        "stage": stage,
+        "stage_text": stage_text,
+        "wide_edge_note": wide_edge_note,
         "manual_confirmed": is_manual,
         "color_key": color_key,
         "reason": reason,
@@ -258,9 +318,11 @@ def evaluate_baseline_readiness(
     }
     unready = [cams[n] for n in ("front", "side") if not cams[n]["ready"]]
     if not unready:
+        wide_notes = [f"{cams[n]['label']}{cams[n]['wide_edge_note']}" for n in ("front", "side") if cams[n]["wide_edge_note"]]
+        suffix = f"（{'；'.join(wide_notes)}）" if wide_notes else ""
         return {
             "ready": True,
-            "banner_text": "✔ 两路针尖都最清晰，可作为对刀基准 → 点【对刀基准】",
+            "banner_text": f"✔ 两路针尖都最清晰，可作为对刀基准 → 点【对刀基准】{suffix}",
             "banner_color": "green",
             "disabled_reason": "",
             "cameras": cams,

@@ -193,7 +193,7 @@ bit7 初始化中 bit8 初始化完成 bit9 信息提示 bit10 一般报警 bit1
 
 主程序空闲时界面开始会话并选择工具；主对刀相机使用现有 front，辅助对刀相机使用 side。会话中所有 PLC 功能码回 999，原因“对刀基准建立中，请先在界面结束”，不会结束会话；挑毛或其他标定中忽略界面开始。两相机由主程序持有，会话后台线程取图与识别，结束和异常时释放；换针对刀下次使用时重新打开。人工通过 PLC 手动点动；此功能不向 PLC 写运动或基准地址。
 
-`config/tooltip_baseline.yaml` 的 `baseline_ui`（及代码默认值）设置两相机比例（11-25 实测 13.5 μm/px）及双路对焦就绪参数（`focus_ready_percent=95`、`focus_good_px=2.0`、`focus_ready_frames=5`、`peak_min_frames=10`、`edge_margin_px=40`）。正面沿 Y 看（点动 Y 调正面清晰度）、侧面沿 X 看（点动 X 调侧面清晰度）、Z 在两路均为竖直方向（只需保持在画面内且不靠边）。取消主相机中心约束，主视图中心偏差只作灰色参考；两路均就绪后按【对刀基准】，按工具偏移标定的稳定采样参数读取实时 XYZ，稳定后均值为 P0，并保存规则版本 `focus_both_v1` 与清晰度参数。人工点选可替换单路或双视图针尖，辅助重设只修改辅助点。换针对刀比较两路像素与基准各自保存的 `target_uv`。
+`config/tooltip_baseline.yaml` 的 `baseline_ui`（及代码默认值）设置两相机比例（11-25 实测 13.5 μm/px）及双路对焦就绪参数（`focus_smooth_frames=5`、`focus_pass_percent=92`、`focus_ready_percent=95`、`focus_good_px=2.0`、`focus_warn_px=3.0`、`focus_max_px=3.0`、`focus_ready_frames=5`、`peak_min_frames=10`、`edge_margin_px=40`）。正面沿 Y 看（点动 Y 调正面清晰度）、侧面沿 X 看（点动 X 调侧面清晰度）、Z 在两路均为竖直方向（只需保持在画面内且不靠边）。以 5 帧平滑中值抗抖动，并要求每路在峰值出现后先越峰降到 ≤92% 确认峰值再回到 ≥95% 连续 5 帧（出现更高平滑峰则重置）；`focus_good_px`/`focus_warn_px` 仅控制颜色，`focus_max_px` 作为绝对边缘兜底上限。取消主相机中心约束，主视图中心偏差只作灰色参考；两路均就绪后按【对刀基准】，按工具偏移标定的稳定采样参数读取实时 XYZ，稳定后均值为 P0，保存规则版本 `focus_both_v1`、清晰度与越峰确认参数，并全程追加记录 `focus_trace.csv` 便于现场调门限。人工点选可替换单路或双视图针尖，辅助重设只修改辅助点。换针对刀比较两路像素与基准各自保存的 `target_uv`。
 
 覆盖前显示新旧时间、P0、像素和差值；保存时绑定 `tools.yaml` 当时的补偿，备份到 `history/`，清除该工具 `tool_offset.yaml` 的 `baseline_stale`。使用配置的标定目录；会话原图和记录保存在运行目录 `baseline/`。界面保存的雅可比为 null，`jacobian_pending: true`；首次换针对刀时自动探测并保存雅可比，已有雅可比直接对准。原有含雅可比的基准及命令行工具保留。
 

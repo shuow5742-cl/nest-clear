@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import datetime
 import copy
+import csv
 import hashlib
 import json
 import math
@@ -125,6 +126,8 @@ def settings(path: str | Path) -> dict[str, Any]:
         "min_focus_contrast",
         "focus_good_px",
         "focus_warn_px",
+        "focus_max_px",
+        "focus_pass_percent",
         "focus_ready_percent",
         "runout_max_mm",
         "runout_frame_std_max_px",
@@ -134,9 +137,13 @@ def settings(path: str | Path) -> dict[str, Any]:
             raise ValueError(f"{key} 必须为有限正数")
     if cfg["focus_ready_percent"] > 100:
         raise ValueError("focus_ready_percent 不能大于 100")
+    if cfg["focus_pass_percent"] >= cfg["focus_ready_percent"]:
+        raise ValueError("focus_pass_percent 必须小于 focus_ready_percent")
     if cfg["focus_warn_px"] < cfg["focus_good_px"]:
         raise ValueError("focus_warn_px 不能小于 focus_good_px")
-    for key in ("focus_ready_frames", "peak_min_frames"):
+    if cfg["focus_max_px"] < cfg["focus_good_px"]:
+        raise ValueError("focus_max_px 不能小于 focus_good_px")
+    for key in ("focus_smooth_frames", "focus_ready_frames", "peak_min_frames"):
         value = cfg[key]
         if type(value) is not int or value < 1:
             raise ValueError(f"{key} 必须为正整数")
@@ -247,6 +254,8 @@ def baseline_mapping(baseline: ToolTipBaseline) -> dict[str, Any]:
             item["focus_percent"] = view.focus_percent
         if view.focus_peak is not None:
             item["focus_peak"] = view.focus_peak
+        if view.peak_confirmed is not None:
+            item["peak_confirmed"] = view.peak_confirmed
         views.append(item)
     return {
         "version": 1,
@@ -424,7 +433,7 @@ class BaselineSession:
         self.saved_path: str | None = None
         self.shots = 0
         detector_settings = getattr(getattr(config, "tool_calibration", None), "detection", {}) or {}
-        self.trackers = {n: make_tip_tracker(detector_settings.get(n, {})) for n in ("front", "side")}
+        self.trackers = {n: make_tip_tracker(detector_settings.get(n, {}), self.cfg) for n in ("front", "side")}
         self.readiness_trackers = {n: ReadinessTracker() for n in ("front", "side")}
         self.history: dict[str, list[tuple[float, float]]] = {"front": [], "side": []}
         self.manual_points: dict[str, list[float]] = {}
@@ -628,7 +637,7 @@ class BaselineSession:
                     focus_color = (0, 155, 0)
                 coarse_cn = " 粗定位" if d.coarse else ""
                 manual_cn = " 人工确认" if name in manual_pts else ""
-                ready_tag = " [已最清晰]" if readiness["ready"] else f" [{axis_hint}]"
+                ready_tag = f" [{readiness['stage_text']}]" if not readiness["edge_near"] else ""
                 labels.append((
                     (12, 34 if name == "front" else 10),
                     f"清晰度 {pct_str}  边缘 {edge_text}  {focus_cn}{coarse_cn}{manual_cn}{ready_tag}",
@@ -638,6 +647,8 @@ class BaselineSession:
                 ))
                 if readiness["edge_near"]:
                     labels.append(((12, 58 if name == "front" else 34), EDGE_MARGIN_MESSAGE, "Near image edge", (0, 0, 220), 14))
+                elif readiness.get("wide_edge_note"):
+                    labels.append(((12, 58 if name == "front" else 34), readiness["wide_edge_note"], "Wide edge accepted", (0, 145, 220), 14))
             else:
                 labels.append((
                     (12, 34 if name == "front" else 10),
@@ -827,6 +838,7 @@ class BaselineSession:
                 "override_note": override_note,
                 "focus_percent": float(focus_pct) if isinstance(focus_pct, (int, float)) and math.isfinite(focus_pct) else None,
                 "focus_peak": float(focus_peak) if isinstance(focus_peak, (int, float)) and math.isfinite(focus_peak) else None,
+                "peak_confirmed": bool(snap["peak_confirmed"]) if snap.get("peak_confirmed") is not None else None,
             }
             if name in clicked:
                 clicked[name]["manual_override"] = is_override
@@ -933,6 +945,7 @@ class BaselineSession:
                     override_note=note_item if is_override else None,
                     focus_percent=f_info.get("focus_percent"),
                     focus_peak=f_info.get("focus_peak"),
+                    peak_confirmed=f_info.get("peak_confirmed"),
                 )
             )
         has_override = bool(c.get("manual_override")) or any(v.manual_override for v in views)
@@ -940,8 +953,12 @@ class BaselineSession:
         if override_notes:
             baseline_note += "；" + "；".join(override_notes)
         criteria = {
+            "focus_smooth_frames": int(self.cfg.get("focus_smooth_frames", 5)),
+            "focus_pass_percent": float(self.cfg.get("focus_pass_percent", 92.0)),
             "focus_ready_percent": float(self.cfg.get("focus_ready_percent", 95.0)),
             "focus_good_px": float(self.cfg.get("focus_good_px", 2.0)),
+            "focus_warn_px": float(self.cfg.get("focus_warn_px", 3.0)),
+            "focus_max_px": float(self.cfg.get("focus_max_px", 3.0)),
             "focus_ready_frames": int(self.cfg.get("focus_ready_frames", 5)),
             "peak_min_frames": int(self.cfg.get("peak_min_frames", 10)),
             "edge_margin_px": float(self.cfg.get("edge_margin_px", 40.0)),
@@ -1158,6 +1175,7 @@ class BaselineSession:
         detection_cfg = getattr(getattr(self.config, "tool_calibration", None), "detection", {}) or {}
         cameras_payload: dict[str, dict[str, Any]] = {}
         updated_at = self.events.clock().isoformat()
+        trace_rows: list[list[Any]] = []
         for name in ("front", "side"):
             frame = images[name]
             det = detections[name]
@@ -1191,6 +1209,7 @@ class BaselineSession:
                     "image_size": list(image_size),
                     "percent": tracked["percent"],
                     "peak": tracked["best"],
+                    "peak_confirmed": tracked.get("peak_confirmed", False),
                     "sample_count": tracked.get("sample_count", 0),
                     "edge_width_px": metrics["edge_width_px"],
                 },
@@ -1219,8 +1238,53 @@ class BaselineSession:
             )
             self.live_snapshots[name] = payload
             cameras_payload[name] = payload
+            raw_sharpness = metrics.get("band_gradient") if metrics.get("band_gradient") is not None else tracked.get("raw")
+            trace_rows.append([
+                updated_at,
+                name,
+                f"{float(raw_sharpness):.6g}" if isinstance(raw_sharpness, (int, float)) and math.isfinite(raw_sharpness) else "",
+                f"{float(tracked['current']):.6g}" if isinstance(tracked.get("current"), (int, float)) and math.isfinite(tracked["current"]) else "",
+                f"{float(tracked['best']):.6g}" if isinstance(tracked.get("best"), (int, float)) and math.isfinite(tracked["best"]) else "",
+                f"{float(tracked['percent']):.4f}" if isinstance(tracked.get("percent"), (int, float)) and math.isfinite(tracked["percent"]) else "",
+                f"{float(metrics['edge_width_px']):.4f}" if isinstance(metrics.get("edge_width_px"), (int, float)) and math.isfinite(metrics["edge_width_px"]) else "",
+                f"{float(metrics['contrast']):.4f}" if isinstance(metrics.get("contrast"), (int, float)) and math.isfinite(metrics["contrast"]) else "",
+                f"{float(det.axis_rms_px):.4f}" if isinstance(getattr(det, "axis_rms_px", None), (int, float)) and math.isfinite(det.axis_rms_px) else "",
+                status,
+                int(bool(readiness.get("peak_confirmed"))),
+                readiness.get("stage", ""),
+                int(bool(readiness.get("ready"))),
+            ])
+        if self.record_dir is not None and trace_rows:
+            self._append_focus_trace(trace_rows)
         if directory is not None:
             write_tooltip_preview_file(directory, cameras_payload, updated_at)
+
+    def _append_focus_trace(self, rows: list[list[Any]]) -> None:
+        """将实时清晰度与越峰状态追加写入本次基准记录目录下的 focus_trace.csv。"""
+        if self.record_dir is None or not rows:
+            return
+        self.record_dir.mkdir(parents=True, exist_ok=True)
+        trace_path = self.record_dir / "focus_trace.csv"
+        need_header = (not trace_path.exists()) or trace_path.stat().st_size == 0
+        with trace_path.open("a", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            if need_header:
+                writer.writerow([
+                    "timestamp",
+                    "camera",
+                    "raw_sharpness",
+                    "smoothed_sharpness",
+                    "peak",
+                    "percent",
+                    "edge_width_px",
+                    "contrast",
+                    "axis_rms_px",
+                    "detection_status",
+                    "peak_confirmed",
+                    "peak_stage",
+                    "ready",
+                ])
+            writer.writerows(rows)
 
     def run(self) -> None:
         """后台循环：处理队列命令，并在等待测量时以 ≥5Hz 刷新实时画面与清晰度。"""

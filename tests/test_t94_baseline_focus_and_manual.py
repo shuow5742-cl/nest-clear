@@ -197,7 +197,7 @@ def test_ui_model_and_headless_display_live_focus_when_preview_off(tmp_path, mon
     assert side_v["focus_badge"].options["text"] == "✖ 未对焦"
     assert "3.51 px（47.4 µm）" in side_v["focus_summary"].options["text"]
     assert "点动 X" in side_v["info"].options["text"]
-    assert "越过最清晰点后会下降" in side_v["hint"].options["text"]
+    assert "往回点动到峰值附近" in side_v["hint"].options["text"]
     assert side_v["reset"].options["state"] == "normal"
 
 
